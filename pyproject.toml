@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kazenai"  # Matches your README installation instructions
+version = "0.1.0"
+description = "Reliability infrastructure for AI agents: Local-first budget & loop enforcement."
+readme = "README.md"
+requires-python = ">=3.10" # v4 TDD specifies 3.10+ for modern Typing/ContextVars
+license = { text = "Apache-2.0" } # Explicitly state the license type here
+authors = [{ name = "Dhavan Shah", email = "founder@kazenai.com" }]
+keywords = ["llm", "agents", "observability", "finops", "langchain"]
+
+dependencies = [
+  "pydantic>=2.6.0",
+  "structlog>=24.1.0",
+  "aiohttp>=3.9.0",
+  "pydantic-settings>=2.1.0", # Added: Necessary for your config.py logic
+]
+
+[project.urls]
+"Homepage" = "https://kazenai.com"
+"Repository" = "https://github.com/kazenai-ai/kazenai-core"
+
+[tool.setuptools]
+# Ensure it only picks up the 'kazenai' folder, not 'tests' or 'examples'
+packages = ["kazenai"]
+package-dir = {"" = "."}
