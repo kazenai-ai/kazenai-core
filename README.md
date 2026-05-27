@@ -4,7 +4,7 @@
 
 [![PyPI version](https://badge.fury.io/py/kazenai-finops.svg)](https://badge.fury.io/py/kazenai-finops)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![License: BSL-1.1](https://img.shields.io/badge/license-BSL--1.1-blue.svg)](LICENSE)
 [![Status: Building in Public](https://img.shields.io/badge/status-building%20in%20public-orange.svg)](https://x.com/kazenai)
 
 ---
@@ -52,29 +52,30 @@ No more waking up to a $47K bill.
 
 ---
 
-## Features (MVP — shipping Week 1)
+## Features (shipped in this repo)
 
-- **`monitor(agent, ...)`** — wraps LangChain, AutoGen, and CrewAI agents with one call
-- **Local budget enforcement** — blocks calls before they're made, no network required, <1ms
-- **Real-time debug output** — `debug=True` prints cost + status after every LLM call
-- **Loop detection (H1)** — Jaccard similarity catches near-duplicate inputs before they spiral
-- **Loop detection (H2)** — tool chain fingerprinting catches recursive tool patterns
-- **Rate limiting** — `max_calls_per_minute` prevents runaway agents from moving too fast
-- **Event sampling** — `sample_rate=0.3` to control backend traffic at scale
-- **Offline resilience** — RetryQueue (SQLite) stores events locally if backend is down
-- **Parent-child tracing** — `RunContext` with `parent_step_id` for multi-agent pipelines
-- **Canonical event schema** — `KazenEvent` shared by SDK and backend (no field drift)
-- **OpenAI patcher** — transparent monkey-patch, no code changes required
-- **LangChain integration** — `KazenCallbackHandler` + `LangChainProxy`
-- **AutoGen integration** — wraps `initiate_chat`
-- **CrewAI integration** — wraps `kickoff()`
+- **`monitor(client, ...)`** — OpenAI-compatible client wrapper with budget + loop enforcement
+- **`FinOpsController`** — trajectory projection + soft circuit breaker (`KazenCircuitBreaker`)
+- **`HttpSink`** — batch ingest to `kazenai-agent-finops` with offline `RetryQueue`
+- **Canonical `KazenEvent`** — shared schema with orchestrator + FinOps API
+- **Framework integrations** (see `examples/`):
+  - **LangChain** — `KazenCallbackHandler` + optional `wrap_langchain_runnable()`
+  - **CrewAI** — `wrap_crew_kickoff()` using `RunContext`
+  - **LangGraph** — `wrap_graph_invoke()` using `RunContext`
+- **AutoGen** — planned; not yet in this package
 
-## Planned Modules (Roadmap)
+### Environment variables (FinOps ingest)
 
-- **AgentLens P1** — step-level trace capture dashboard (Month 2)
-- **AgentLens P2** — Probabilistic Replay Engine: run any trace N times, get statistical distribution of outcomes (Month 5) — *no competitor has built this*
-- **AgentLens P3** — Semantic Drift Monitor: detect when your agent's behaviour changes after a model update (Month 6)
-- **TypeScript SDK** — for Node.js agent frameworks (Month 6)
+| Variable | Purpose |
+|----------|---------|
+| `KAZENAI_FINOPS_INGEST_URL` | Base URL (e.g. `http://127.0.0.1:8090`) |
+| `KAZENAI_FINOPS_API_KEY` | API key for `POST /v1/events` |
+| `KAZENAI_BUDGET_USD` | Per-run soft budget for circuit breaker |
+| `KAZENAI_ORG_ID` / `KAZENAI_PROJECT_ID` | Tenant labels on events |
+
+## Roadmap
+
+Future capabilities (probabilistic replay, drift monitor, TypeScript SDK) are listed in [../docs/ROADMAP.md](../docs/ROADMAP.md). AgentLens P2/P3 are **scaffold** stage, not shipped products.
 
 ---
 
