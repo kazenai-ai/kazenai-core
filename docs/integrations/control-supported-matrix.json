@@ -1,0 +1,394 @@
+{
+  "schema_version": "final1.p4-1.v1",
+  "title": "KazenAI Control FINAL_1 supported integration matrix",
+  "recorded_at": "2026-09-16T20:50:00Z",
+  "authority": "FIX_LOOP_PROMPT_FINAL_1 P4-1 + envelope lock 2026-09-16",
+  "evidence_tiers": [
+    "unsupported",
+    "planned",
+    "implemented-unverified",
+    "fixture-verified",
+    "integration-verified",
+    "live-verified"
+  ],
+  "rules": {
+    "advertised_requires_evidence_and_test": true,
+    "fake_transport_is_not_live": true,
+    "forbidden_claims_unless_unsupported": [
+      "universal provider",
+      "checkpoint/resume",
+      "subscription invoice",
+      "guaranteed savings"
+    ],
+    "adding_capability_requires_deferred_tests_first": true
+  },
+  "envelope": {
+    "adapter": "sync non-streaming OpenAI Chat Completions + Anthropic Messages via kazenai.monitor",
+    "package": "from kazenai import monitor (distribution kazenai)",
+    "demo_mode": "fake/local transport + real local Control services",
+    "live_provider": "USER-GO separate; does not block honestly labelled DEMO_READY",
+    "topology": "additive Control compose; Brain/Builder/Copilot/Home absent"
+  },
+  "cells": [
+    {
+      "id": "sdk.kazenai.monitor",
+      "category": "sdk",
+      "name": "Public monitor entrypoint",
+      "detail": "kazenai 1.0.1 local; from kazenai import monitor; no api_key kwarg",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1-p3-1-verification-20260916T195500Z.json",
+        "artifacts/final-1-p3-2-verification-20260916T200620Z.json"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_final1_p0_2_monitor_tiny_cap.py",
+        "kazenai-core/tests/test_final1_p3_2_provider_contract.py"
+      ]
+    },
+    {
+      "id": "sdk.kazenai_finops.wrapper",
+      "category": "sdk",
+      "name": "kazenai-finops re-export wrapper",
+      "detail": "Optional customer name; not DEMO_READY prerequisite",
+      "status": "implemented-unverified",
+      "evidence": [],
+      "tests": [],
+      "notes": "Re-exports monitor; Control certification uses kazenai directly"
+    },
+    {
+      "id": "provider.openai.chat_completions.sync",
+      "category": "provider",
+      "name": "OpenAI Chat Completions sync non-streaming",
+      "detail": "Patched chat.completions.create; fake transport certified",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1-p3-2-verification-20260916T200620Z.json"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_final1_p3_2_provider_contract.py"
+      ]
+    },
+    {
+      "id": "provider.anthropic.messages.sync",
+      "category": "provider",
+      "name": "Anthropic Messages sync non-streaming",
+      "detail": "Patched messages.create; fake transport certified",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1-p3-2-verification-20260916T200620Z.json"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_final1_p3_2_provider_contract.py"
+      ]
+    },
+    {
+      "id": "provider.openai.responses",
+      "category": "provider",
+      "name": "OpenAI Responses API",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [
+        "kazenai-core/tests/test_final1_p3_2_provider_contract.py::test_p32_monitor_rejects_openai_responses_api"
+      ],
+      "notes": "monitor() stubs responses.create with UnsupportedModeError"
+    },
+    {
+      "id": "mode.async_clients",
+      "category": "mode",
+      "name": "Async OpenAI/Anthropic clients",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [
+        "kazenai-core/tests/test_final1_p3_2_provider_contract.py::test_p32_async_client_rejected"
+      ]
+    },
+    {
+      "id": "mode.streaming.control",
+      "category": "mode",
+      "name": "Streaming under Control profile",
+      "status": "unsupported",
+      "evidence": [
+        "artifacts/final-1-p2-5-verification-20260916T201000Z.json"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_final1_p3_2_provider_contract.py::test_p32_control_streaming_denied_before_provider"
+      ]
+    },
+    {
+      "id": "admission.pg_reserve_settle",
+      "category": "pricing_admission",
+      "name": "PostgreSQL reserve/settle lifecycle (ADR-015)",
+      "detail": "micro-USD; applied|duplicate|pending; PG sole accounting authority",
+      "status": "integration-verified",
+      "evidence": [
+        "artifacts/final-1-p2-2-verification-20260916T191000Z.json",
+        "artifacts/final-1-p2-3-verification-20260916T192000Z.json",
+        "docs/adr/ADR-015-reservation-lifecycle.md"
+      ],
+      "tests": [
+        "kazenai-agent-finops/backend/tests/test_pg_atomic_admit_p22.py",
+        "kazenai-agent-finops/backend/tests/test_pg_settle_p23.py"
+      ]
+    },
+    {
+      "id": "admission.local_max_budget_usd",
+      "category": "pricing_admission",
+      "name": "Local monitor max_budget_usd pre-call Enforcement",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1-p3-1-verification-20260916T195500Z.json"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_final1_p0_2_monitor_tiny_cap.py",
+        "kazenai-core/tests/test_final1_p3_1_monitor_cap.py"
+      ]
+    },
+    {
+      "id": "pricing.token_cost_engine",
+      "category": "pricing_admission",
+      "name": "TokenCostEngine model price table",
+      "detail": "Pre/post call projection for known models; unknown model \u2192 0 projection",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1-p3-1-verification-20260916T195500Z.json"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_final1_p3_1_monitor_cap.py"
+      ]
+    },
+    {
+      "id": "privacy.capture_metadata_default",
+      "category": "privacy",
+      "name": "Private-by-default capture (metadata)",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1-p3-3-verification-20260916T202223Z.json",
+        "docs/security/capture-and-retention.md"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_final1_p3_3_capture_privacy.py"
+      ]
+    },
+    {
+      "id": "telemetry.lineage_ids",
+      "category": "telemetry",
+      "name": "Canonical event lineage (schema 1.2)",
+      "detail": "org/workspace/run/root_run_id/trace_id; reservation_id/call_id/attempt in payload",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1-p3-5-verification-20260916T203920Z.json",
+        "docs/adr/ADR-016-control-event-topology.md"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_final1_p3_5_event_path.py"
+      ]
+    },
+    {
+      "id": "telemetry.sinks_lifecycle",
+      "category": "telemetry",
+      "name": "Bounded HttpSink + RetryQueue lease/ack",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1-p3-4-verification-20260916T203004Z.json"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_final1_p3_4_sink_lifecycle.py"
+      ]
+    },
+    {
+      "id": "telemetry.finops_lens_multisink",
+      "category": "telemetry",
+      "name": "Control FinOps\u2194Lens MultiSink fan-out",
+      "detail": "FinOps settle-only; Lens metadata mirror",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1-p3-5-verification-20260916T203920Z.json",
+        "docs/adr/ADR-016-control-event-topology.md"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_final1_p3_5_event_path.py"
+      ]
+    },
+    {
+      "id": "auth.control_identity",
+      "category": "deployment_auth",
+      "name": "Control identity + browser boundaries",
+      "status": "integration-verified",
+      "evidence": [
+        "artifacts/final-1-p1-4-verification-20260916T181600Z.json"
+      ],
+      "tests": [
+        "scripts/final1_p1_4_live_bringup.sh"
+      ]
+    },
+    {
+      "id": "deployment.control_compose",
+      "category": "deployment_auth",
+      "name": "Additive docker-compose.control.yml",
+      "detail": "postgres+redis+finops+lens+platform+auth; no Brain",
+      "status": "implemented-unverified",
+      "evidence": [
+        "docker-compose.control.yml"
+      ],
+      "tests": [],
+      "notes": "Compose exists; full DEMO_READY journey is P7-2/P9-1"
+    },
+    {
+      "id": "tools.model_call_only",
+      "category": "tool_instrumentation",
+      "name": "model.call emission on patched providers",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1-p3-2-verification-20260916T200620Z.json"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_monitor_helpers.py"
+      ]
+    },
+    {
+      "id": "tools.generic_tool_capture",
+      "category": "tool_instrumentation",
+      "name": "Generic tool/framework instrumentation",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "Not certified for Control FINAL_1 beyond model.call"
+    },
+    {
+      "id": "framework.langgraph",
+      "category": "framework",
+      "name": "LangGraph adapter / example",
+      "status": "implemented-unverified",
+      "evidence": [
+        "artifacts/final-1-p4-5-langgraph-verify.log",
+        "kazenai-examples/langgraph-research-capped/artifacts/DEMO_TRANSCRIPT.md"
+      ],
+      "tests": [
+        "kazenai-examples/langgraph-research-capped/verify_integration.py"
+      ],
+      "notes": "P4-5 D1: offline fake Anthropic client only; ChatAnthropic/live not Control-certified. Prefer example.control_loop_and_failure."
+    },
+    {
+      "id": "example.control_loop_and_failure",
+      "category": "example",
+      "name": "Plain Python Control reference (loop/deny/tool/corrected)",
+      "detail": "kazenai-examples/control-loop-and-failure; fake OpenAI client; zero paid I/O",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1-p4-5-verification-20260917T021000Z.json",
+        "artifacts/final-1-p4-5-verify-out/verifier-report.json"
+      ],
+      "tests": [
+        "kazenai-examples/control-loop-and-failure/tests/test_scenarios.py",
+        "kazenai-examples/control-loop-and-failure/verify.py"
+      ],
+      "notes": "Lens browser assertion + live FinOps reserve/settle remain integration-gated (P7-2 / DEMO_READY)"
+    },
+    {
+      "id": "framework.langchain",
+      "category": "framework",
+      "name": "LangChain adapter",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "FINAL_2 / optional unless independently verified"
+    },
+    {
+      "id": "framework.crewai",
+      "category": "framework",
+      "name": "CrewAI adapter",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "FINAL_2 / optional unless independently verified"
+    },
+    {
+      "id": "framework.autogen",
+      "category": "framework",
+      "name": "AutoGen adapter",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "FINAL_2 / optional unless independently verified"
+    },
+    {
+      "id": "capability.generic_replay",
+      "category": "excluded",
+      "name": "Generic live replay execution",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "FINAL_2 P5-3; Control must gate (P5-1)"
+    },
+    {
+      "id": "capability.drift_calibration",
+      "category": "excluded",
+      "name": "Drift calibration",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "FINAL_2"
+    },
+    {
+      "id": "capability.mcp_only_spend_control",
+      "category": "excluded",
+      "name": "MCP-only spend control (Cursor/Claude Code)",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "docs/integrations/* are Brain/MCP paths \u2014 not Control FINAL_1"
+    },
+    {
+      "id": "capability.subscription_cost_attribution",
+      "category": "excluded",
+      "name": "Subscription / invoice cost attribution",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "Forbidden claim for FINAL_1 advertising"
+    },
+    {
+      "id": "capability.checkpoint_resume",
+      "category": "excluded",
+      "name": "Checkpoint / resume after circuit-breaker",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "Soft KazenCircuitBreaker exists; durable resume not Control-certified"
+    },
+    {
+      "id": "capability.universal_provider",
+      "category": "excluded",
+      "name": "Universal / any LLM client",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "Only OpenAI Chat Completions + Anthropic Messages sync certified"
+    },
+    {
+      "id": "capability.guaranteed_savings",
+      "category": "excluded",
+      "name": "Guaranteed savings claims",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "Forbidden claim"
+    },
+    {
+      "id": "capability.live_provider",
+      "category": "evidence_tier",
+      "name": "Live provider operation",
+      "status": "unsupported",
+      "evidence": [],
+      "tests": [],
+      "notes": "USER-GO; fake transport proves integration only"
+    }
+  ],
+  "doc_demotions": [
+    {
+      "path": "README.md",
+      "action": "banner_control_scope"
+    }
+  ],
+  "provenance_note": "Vendored into kazenai-core for standalone CI; workspace copy remains at docs/integrations/control-supported-matrix.json"
+}

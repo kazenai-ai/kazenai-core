@@ -9,7 +9,10 @@ import pytest
 
 from kazenai.auth import evaluate_fixture, reject_client_privileged_headers, PrincipalError
 
-CONTRACTS = Path(__file__).resolve().parents[2] / "kazenai-contracts"
+CONTRACTS = Path(__file__).resolve().parents[1].parent / "kazenai-contracts"
+# Prefer sibling monorepo checkout; fall back one more level for nested layouts.
+if not (CONTRACTS / "fixtures" / "auth").is_dir():
+    CONTRACTS = Path(__file__).resolve().parents[2] / "kazenai-contracts"
 FIXTURE_DIR = CONTRACTS / "fixtures" / "auth"
 
 

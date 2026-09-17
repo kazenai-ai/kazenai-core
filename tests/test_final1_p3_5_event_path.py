@@ -16,6 +16,59 @@ from kazenai.schema import KazenEvent, new_id, now_ms
 from kazenai.sinks import HttpSink, HttpSinkConfig, MultiSink
 
 
+def _finops_style_event_in():
+    """FinOps KazenEventIn shape without requiring FinOps on CI.
+
+    Prefer live FinOps ``events_schema`` when a sibling checkout exists; otherwise
+    use a local Pydantic mirror of the P3-5 lineage fields.
+    """
+    from pathlib import Path
+    import sys
+
+    here = Path(__file__).resolve()
+    for parents_up in (2, 3):
+        try:
+            backend = here.parents[parents_up] / "kazenai-agent-finops" / "backend"
+        except IndexError:
+            continue
+        if (backend / "events_schema.py").is_file():
+            sys.path.insert(0, str(backend))
+            from events_schema import KazenEventIn  # type: ignore
+
+            return KazenEventIn
+
+    from typing import Any, Dict, Optional
+
+    from pydantic import BaseModel, Field, model_validator
+
+    class KazenEventIn(BaseModel):
+        schema_version: str = Field(default="1.2", min_length=1)
+        ts_ms: int
+        event_id: str = Field(..., min_length=1)
+        org_id: str
+        workspace_id: str = "default"
+        project_id: str
+        surface: str
+        agent_id: str
+        agent_role: str
+        run_id: str
+        parent_run_id: Optional[str] = None
+        root_run_id: Optional[str] = None
+        trace_id: Optional[str] = None
+        client_id: Optional[str] = None
+        step_id: str
+        event_type: str
+        payload: Dict[str, Any] = Field(default_factory=dict)
+
+        @model_validator(mode="after")
+        def _default_root_run_id(self) -> "KazenEventIn":
+            if self.root_run_id is None and self.run_id:
+                self.root_run_id = self.run_id
+            return self
+
+    return KazenEventIn
+
+
 def test_p35_normalize_ingest_url_strips_v1_events():
     assert normalize_ingest_base_url("http://finops:8090/v1/events") == "http://finops:8090"
     assert normalize_ingest_base_url("http://finops:8090/v1/events/") == "http://finops:8090"
@@ -200,12 +253,7 @@ def test_p35_dual_ingest_same_run_join_no_double_settle(tmp_path):
 
 def test_p35_cross_tenant_rejected_by_finops_store_logic():
     """Document Control rule: org_mismatch rejects (mirrors FinOps store)."""
-    from pathlib import Path
-    import sys
-
-    backend = Path("/Users/dhavanshah/Documents/KazenAI/kazenai-agent-finops/backend")
-    sys.path.insert(0, str(backend))
-    from events_schema import KazenEventIn
+    KazenEventIn = _finops_style_event_in()
 
     ev = KazenEventIn.model_validate(
         {
@@ -273,12 +321,7 @@ def test_p35_derived_header_skips_settle_spy(tmp_path):
 
 
 def test_p35_finops_event_in_keeps_lineage_fields():
-    import sys
-    from pathlib import Path
-
-    backend = Path("/Users/dhavanshah/Documents/KazenAI/kazenai-agent-finops/backend")
-    sys.path.insert(0, str(backend))
-    from events_schema import KazenEventIn
+    KazenEventIn = _finops_style_event_in()
 
     ev = KazenEventIn.model_validate(
         {
