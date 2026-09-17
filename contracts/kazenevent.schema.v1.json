@@ -11,6 +11,7 @@
       "type": "string"
     },
     "artifact_refs": {
+      "additionalProperties": true,
       "title": "Artifact Refs",
       "type": "object"
     },
@@ -25,6 +26,18 @@
       ],
       "default": null,
       "title": "Avoided Cost Usd"
+    },
+    "client_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Client Id"
     },
     "cost_quality_score": {
       "anyOf": [
@@ -146,6 +159,18 @@
       "title": "Org Id",
       "type": "string"
     },
+    "parent_run_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Run Id"
+    },
     "parent_step_id": {
       "anyOf": [
         {
@@ -159,6 +184,7 @@
       "title": "Parent Step Id"
     },
     "payload": {
+      "additionalProperties": true,
       "title": "Payload",
       "type": "object"
     },
@@ -202,6 +228,18 @@
       "default": null,
       "title": "Replay Group Id"
     },
+    "root_run_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Root Run Id"
+    },
     "run_id": {
       "title": "Run Id",
       "type": "string"
@@ -236,8 +274,16 @@
       "title": "Stage Budget Usd"
     },
     "step_id": {
-      "title": "Step Id",
-      "type": "string"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Step Id"
     },
     "surface": {
       "title": "Surface",
@@ -254,6 +300,18 @@
       ],
       "default": null,
       "title": "Tokens Used"
+    },
+    "trace_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Trace Id"
     },
     "ts_ms": {
       "title": "Ts Ms",
@@ -274,7 +332,6 @@
     "agent_id",
     "agent_role",
     "run_id",
-    "step_id",
     "event_type"
   ],
   "title": "KazenEvent",
