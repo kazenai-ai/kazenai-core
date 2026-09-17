@@ -7,6 +7,10 @@ __pycache__/
 .eggs/
 # Virtual envs
 .venv/
+.venv-build/
+.venv-test/
+.venv-bootstrap/
+
 venv/
 ENV/
 env/
@@ -27,3 +31,10 @@ htmlcov/
 # Local config
 .env
 .env.*
+
+.env
+.env.*
+!.env.example
+.venv/
+dist/
+*.egg-info/
