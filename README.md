@@ -1,11 +1,19 @@
 # kazenai-core
 
+> **Control FINAL_1 scope:** Certified path is sync non-streaming OpenAI Chat Completions + Anthropic Messages via `monitor()` — see `docs/integrations/control-supported-matrix.md`. Framework adapters (LangChain/CrewAI/LangGraph/AutoGen) are **not Control-certified** in FINAL_1.
+
+
 > **Stop your AI agents from burning your budget. Catch loops before they catch you.**
 
-[![PyPI version](https://badge.fury.io/py/kazenai-finops.svg)](https://badge.fury.io/py/kazenai-finops)
+[![Local package](https://img.shields.io/badge/package-local%20v1.0.1-blue.svg)](../WORKSPACE.md)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![LLM calls guarded](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/kazenai-ai/kazenai-finops-sdk/main/badge/llm-guard.json)](https://github.com/kazenai-ai/kazenai-finops-sdk/blob/main/scripts/audit_llm_calls_all.py)
 [![License: BSL-1.1](https://img.shields.io/badge/license-BSL--1.1-blue.svg)](LICENSE)
-[![Status: Building in Public](https://img.shields.io/badge/status-building%20in%20public-orange.svg)](https://x.com/kazenai)
+
+**Quickstart:** [kazenai.com/onboarding](https://kazenai.com/onboarding) · Customer package: `kazenai-finops`
+
+> Publishing status: this checkout uses local sibling-path installs for
+> `kazenai` v1.0.1. PyPI currently does not provide this workspace version.
 
 ---
 
@@ -22,15 +30,28 @@ When you run an AI agent in production, three things will eventually go wrong:
 KazenAI intercepts every LLM and tool call your agent makes, enforces budget limits locally (no network required), detects loops before they become expensive, and gives you full observability — with one function call.
 
 ```python
-from kazenai import monitor
+import os
+from openai import OpenAI
+from kazenai import monitor, BudgetExceeded
 
-agent = monitor(
-    agent,
+# API key for FinOps ingest is env-only (not a monitor kwarg):
+#   export KAZENAI_FINOPS_API_KEY=kz_...
+#   export KAZENAI_FINOPS_INGEST_URL=http://127.0.0.1:8090
+
+client = monitor(
+    OpenAI(),
     agent_id="support-agent",
-    api_key="kz_...",
     max_budget_usd=5.00,
     debug=True,           # see cost per call in your terminal
 )
+
+try:
+    client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+except BudgetExceeded as e:
+    print("hard local/shared cap:", e)
 ```
 
 That's it. Your agent code doesn't change.
@@ -45,7 +66,8 @@ That's it. Your agent code doesn't change.
 [KazenAI] step=8  gpt-4o-mini  cost=$0.0039  total=$0.43    proj=$4.91/$5.00  WARN:budget_87pct
 [KazenAI] step=9  gpt-4o-mini  BLOCKED:budget  spent=$5.00  limit=$5.00
 
-KazenBudgetExceeded: Run agent-001: budget $5.00 exceeded (spent $4.97, attempted $5.42)
+BudgetExceeded: cumulative_cost exceeded (hard pre-call cap)
+# Soft trajectory pause raises KazenCircuitBreaker after a completed call
 ```
 
 No more waking up to a $47K bill.
@@ -73,6 +95,19 @@ No more waking up to a $47K bill.
 | `KAZENAI_BUDGET_USD` | Per-run soft budget for circuit breaker |
 | `KAZENAI_ORG_ID` / `KAZENAI_PROJECT_ID` | Tenant labels on events |
 
+
+## Certified Control provider contract (FINAL_1)
+
+| Mode | Status |
+|------|--------|
+| Sync OpenAI `chat.completions.create` (non-streaming) | **Certified** via `monitor()` |
+| Sync Anthropic `messages.create` (non-streaming) | **Certified** via `monitor()` |
+| OpenAI Responses API / async clients / Control streaming | **`UnsupportedModeError`** |
+| Soft trajectory pause | `KazenCircuitBreaker` (after a completed call) |
+| Hard local/shared budget deny | `BudgetExceeded` (before provider) |
+
+`kazenai_finops.KazenBudgetExceeded` is a **deprecated alias of** `KazenCircuitBreaker`, not hard `BudgetExceeded`.
+
 ## Roadmap
 
 Future capabilities (probabilistic replay, drift monitor, TypeScript SDK) are listed in [../docs/ROADMAP.md](../docs/ROADMAP.md). AgentLens P2/P3 are **scaffold** stage, not shipped products.
@@ -82,10 +117,32 @@ Future capabilities (probabilistic replay, drift monitor, TypeScript SDK) are li
 ## Installation
 
 ```bash
-pip install kazenai-finops
+pip install -e ../kazen-event-schema
+pip install --no-deps -e .
 ```
 
 Python 3.10, 3.11, 3.12 supported. No C extensions. Installs in under 30 seconds.
+
+---
+
+## Quickstart
+
+```python
+from openai import OpenAI
+from kazenai import monitor
+
+# export KAZENAI_FINOPS_API_KEY=...   # optional ingest; not a monitor kwarg
+monitored_client = monitor(
+    OpenAI(),
+    agent_id="my-run-001",
+    max_budget_usd=5.00,
+)
+
+result = monitored_client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello KazenAI"}],
+)
+```
 
 ---
 
@@ -95,15 +152,15 @@ Python 3.10, 3.11, 3.12 supported. No C extensions. Installs in under 30 seconds
 
 ```python
 import openai
-from kazenai import monitor, KazenBudgetExceeded
+from kazenai import monitor, BudgetExceeded, KazenCircuitBreaker, LoopDetected
 
 client = openai.OpenAI()
 
-# monitor() patches the OpenAI client transparently
-with_monitoring = monitor(
+# monitor() patches sync chat.completions (certified Control path).
+# FinOps API key: KAZENAI_FINOPS_API_KEY env (not a kwarg).
+monitor(
     client,
     agent_id="my-agent",
-    api_key="kz_...",          # get yours at kazenai.com
     max_budget_usd=0.50,
     debug=True,
 )
@@ -114,8 +171,12 @@ try:
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": f"Step {i}: do the thing"}],
         )
-except KazenBudgetExceeded as e:
-    print(f"Blocked at step {e.run_id}: spent ${e.spent:.4f}")
+except BudgetExceeded as e:
+    print(f"Hard cap before provider: {e}")
+except LoopDetected as e:
+    print(f"Loop blocked before provider: {e}")
+except KazenCircuitBreaker as e:
+    print(f"Soft pause after a completed call: {e}")
 ```
 
 ### LangChain
@@ -127,7 +188,7 @@ chain = your_langchain_chain  # LCEL chain, agent, etc.
 monitored = monitor(
     chain,
     agent_id="customer-support",
-    api_key="kz_...",
+    # api_key is env-only for monitor(); framework adapters may take api_key separately
     max_budget_usd=2.00,
     debug=True,
 )
@@ -144,7 +205,7 @@ crew = YourCrew()
 monitored = monitor(
     crew,
     agent_id="research-crew",
-    api_key="kz_...",
+    # api_key is env-only for monitor(); framework adapters may take api_key separately
     max_budget_usd=10.00,
     h2_max_reps=3,   # block if same tool chain repeats 3 times
 )
