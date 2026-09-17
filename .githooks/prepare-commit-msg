@@ -1,0 +1,9 @@
+#!/bin/sh
+# Strip Cursor agent co-author trailers so GitHub contributors stay human-only.
+# Enable once per clone: git config core.hooksPath .githooks
+MSG_FILE="$1"
+[ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || exit 0
+tmp="$(mktemp)"
+# portable: delete Cursor co-authored-by lines
+sed '/^Co-authored-by:[[:space:]]*Cursor[[:space:]]*<cursoragent@cursor.com>[[:space:]]*$/d' "$MSG_FILE" > "$tmp" && mv "$tmp" "$MSG_FILE"
+exit 0

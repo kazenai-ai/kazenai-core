@@ -116,9 +116,19 @@ Future capabilities (probabilistic replay, drift monitor, TypeScript SDK) are li
 
 ## Installation
 
+Local (sibling checkout of `kazen-event-schema`):
+
 ```bash
 pip install -e ../kazen-event-schema
 pip install --no-deps -e .
+```
+
+CI installs a pinned wheel from `vendor/kazen_event_schema-0.6.0-py3-none-any.whl` first, because `kazen-event-schema` is not on PyPI yet.
+
+To keep Cursor out of GitHub contributors, enable the strip hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
 ```
 
 Python 3.10, 3.11, 3.12 supported. No C extensions. Installs in under 30 seconds.
