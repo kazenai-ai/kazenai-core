@@ -123,7 +123,8 @@ pip install -e ../kazen-event-schema
 pip install --no-deps -e .
 ```
 
-CI installs a pinned wheel from `vendor/kazen_event_schema-0.6.0-py3-none-any.whl` first, because `kazen-event-schema` is not on PyPI yet.
+CI installs pinned wheels from `vendor/` first (`kazen-event-schema` and
+`kazenai-contracts`), because neither is on PyPI yet.
 
 To keep Cursor out of GitHub contributors, enable the strip hook once per clone:
 

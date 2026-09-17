@@ -13,12 +13,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      # kazen-event-schema is not on PyPI; install the pinned vendored wheel first
-      # so `pip install -e ".[dev]"` can resolve kazen-event-schema>=0.6.0,<0.7.
-      - name: Install vendored kazen-event-schema
+      # Neither dependency is on PyPI yet; install pinned vendored wheels first.
+      - name: Install vendored unpublished deps
         run: |
           pip install --upgrade pip
           pip install ./vendor/kazen_event_schema-0.6.0-py3-none-any.whl
+          pip install ./vendor/kazenai_contracts-0.1.0-py3-none-any.whl
       - run: pip install -e ".[dev]"
       - run: pytest tests/ -q --cov=kazenai --cov-report=term-missing --cov-fail-under=90
       - run: python scripts/export_kazenevent_schema.py
