@@ -1,7 +1,8 @@
-"""Canonical principal helpers for kazenai-core (FINAL_1 P1-1).
+"""Canonical principal helpers for kazenai-core (FINAL_1 P1-1 / LF-05).
 
-Prefers shared ``kazenai_contracts.principal`` when installed; otherwise uses a
-local mirror of the same allow/reject semantics so core tests stay hermetic.
+Prefers shared ``kazenai_contracts.principal`` when installed; otherwise uses the
+in-tree mirror ``kazenai.auth._principal_impl``. No sibling-path ``sys.path``
+injection (public installs must not require a private contracts checkout).
 """
 
 from __future__ import annotations
@@ -23,19 +24,8 @@ try:
         resolve_effective_workspace,
         strip_privileged_headers,
     )
-except ImportError:  # pragma: no cover - contracts may be absent in some installs
-    import sys
-    from pathlib import Path
-
-    _contracts = (
-        Path(__file__).resolve().parents[3]
-        / "kazenai-contracts"
-        / "sdks"
-        / "python"
-    )
-    if _contracts.is_dir() and str(_contracts) not in sys.path:
-        sys.path.insert(0, str(_contracts))
-    from kazenai_contracts.principal import (  # type: ignore
+except ImportError:  # pragma: no cover - contracts optional for public wheel
+    from kazenai.auth._principal_impl import (
         PRIVILEGED_HEADERS,
         SERVICE_ACT_AS_ROLES,
         CanonicalPrincipal,

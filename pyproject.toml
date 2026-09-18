@@ -8,7 +8,7 @@ version = "1.0.1"
 description = "KazenAI SDK - agent monitoring, FinOps, and event instrumentation"
 readme = "README.md"
 requires-python = ">=3.10" # v4 TDD specifies 3.10+ for modern Typing/ContextVars
-license = { file = "LICENSE" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "KazenAI", email = "hello@kazenai.com" }]
 keywords = ["llm", "agents", "observability", "finops", "langchain"]
 
@@ -45,6 +45,8 @@ omit = [
   "kazenai/debug.py",
   "kazenai/integrations/*",
   "kazenai/retry_queue.py",
+  # LF-05 in-tree contracts mirror; exercised via re-export / contracts suite
+  "kazenai/auth/_principal_impl.py",
 ]
 
 [tool.coverage.report]

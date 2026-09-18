@@ -8,7 +8,7 @@
 [![Local package](https://img.shields.io/badge/package-local%20v1.0.1-blue.svg)](../WORKSPACE.md)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![LLM calls guarded](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/kazenai-ai/kazenai-finops-sdk/main/badge/llm-guard.json)](https://github.com/kazenai-ai/kazenai-finops-sdk/blob/main/scripts/audit_llm_calls_all.py)
-[![License: BSL-1.1](https://img.shields.io/badge/license-BSL--1.1-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **Quickstart:** [kazenai.com/onboarding](https://kazenai.com/onboarding) · Customer package: `kazenai-finops`
 
@@ -319,4 +319,4 @@ Full contribution guide coming with v1.0.
 
 ## License
 
-Apache 2.0 — use it for anything, attribution appreciated.
+Licensed under the Apache License, Version 2.0. See LICENSE and NOTICE.

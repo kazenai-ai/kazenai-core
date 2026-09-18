@@ -1,7 +1,7 @@
 {
   "schema_version": "final1.p4-1.v1",
   "title": "KazenAI Control FINAL_1 supported integration matrix",
-  "recorded_at": "2026-09-16T20:50:00Z",
+  "recorded_at": "2026-09-18T21:51:46Z",
   "authority": "FIX_LOOP_PROMPT_FINAL_1 P4-1 + envelope lock 2026-09-16",
   "evidence_tiers": [
     "unsupported",
@@ -34,7 +34,7 @@
       "id": "sdk.kazenai.monitor",
       "category": "sdk",
       "name": "Public monitor entrypoint",
-      "detail": "kazenai 1.0.1 local; from kazenai import monitor; no api_key kwarg",
+      "detail": "kazenai Apache-2.0; from kazenai import monitor; sync OpenAI+Anthropic fixture-verified",
       "status": "fixture-verified",
       "evidence": [
         "artifacts/final-1-p3-1-verification-20260916T195500Z.json",
@@ -53,7 +53,7 @@
       "status": "implemented-unverified",
       "evidence": [],
       "tests": [],
-      "notes": "Re-exports monitor; Control certification uses kazenai directly"
+      "notes": "Optional Apache-2.0 wrapper; Control certification uses kazenai directly"
     },
     {
       "id": "provider.openai.chat_completions.sync",
@@ -390,5 +390,29 @@
       "action": "banner_control_scope"
     }
   ],
-  "provenance_note": "Vendored into kazenai-core for standalone CI; workspace copy remains at docs/integrations/control-supported-matrix.json"
+  "provenance_note": "Vendored into kazenai-core for standalone CI; workspace copy remains at docs/integrations/control-supported-matrix.json",
+  "refresh_note": "FINAL_1 P8-4 / LEGAL G04 \u2014 licenses Apache-2.0 for public SDK candidates",
+  "licenses": {
+    "kazenai": "Apache-2.0",
+    "kazenai-finops": "Apache-2.0",
+    "kazen-event-schema": "Apache-2.0",
+    "status": "approved_and_applied_working_tree",
+    "publication": "USER-GO G06/G07 not authorized"
+  },
+  "install_names": {
+    "primary": "kazenai",
+    "optional_wrapper": "kazenai-finops",
+    "schema": "kazen-event-schema",
+    "import": "from kazenai import monitor"
+  },
+  "python_matrix": {
+    "ci_verified": [
+      "3.11"
+    ],
+    "declared": ">=3.10",
+    "declared_not_ci_verified": [
+      "3.10",
+      "3.12"
+    ]
+  }
 }
