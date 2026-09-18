@@ -1,0 +1,33 @@
+# PyPI Trusted Publishing (OIDC). Configure pending/trusted publisher at:
+#   https://pypi.org/manage/account/publishing/
+#   Owner: kazenai-ai  Repo: kazenai-core  Workflow: publish.yml  Environment: pypi
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: python -m pip install -U pip build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
