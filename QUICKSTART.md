@@ -12,7 +12,7 @@ in-process — no backend required to start enforcing.
 
 ```bash
 pip install kazenai
-# local dev (until the 1.0.1 build is live on PyPI):
+# workspace contributor editable install:
 #   pip install -e ./kazenai-core
 ```
 

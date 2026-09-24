@@ -1,17 +1,17 @@
 # Vendored wheels (CI)
 
-These packages are not published to PyPI. CI installs the pinned wheels here
-before `pip install -e ".[dev]"`.
+Pinned wheels for hermetic CI. **`kazen-event-schema` is on PyPI** (`0.6.0`);
+**`kazenai-contracts` is not** — keep that wheel here until it is published.
 
 | Wheel | Purpose |
 |-------|---------|
-| `kazen_event_schema-0.6.0-py3-none-any.whl` | Satisfies `kazen-event-schema>=0.6.0,<0.7` |
-| `kazenai_contracts-0.1.0-py3-none-any.whl` | Provides `kazenai_contracts` for principal/auth tests |
+| `kazen_event_schema-0.6.0-py3-none-any.whl` | Optional pin; also available via `pip install kazen-event-schema` |
+| `kazenai_contracts-0.1.0-py3-none-any.whl` | Provides `kazenai_contracts` for principal/auth tests (not on PyPI) |
 
 Refresh:
 
 ```bash
-# schema
+# schema (or: pip download kazen-event-schema==0.6.0)
 cd ../kazen-event-schema && python -m build
 cp dist/kazen_event_schema-0.6.0-py3-none-any.whl ../kazenai-core/vendor/
 

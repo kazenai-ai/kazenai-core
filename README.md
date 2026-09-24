@@ -1,33 +1,31 @@
-# kazenai-core
+# kazenai (kazenai-core)
 
 > **Control FINAL_1 scope:** Certified path is sync non-streaming OpenAI Chat Completions + Anthropic Messages via `monitor()` — see `docs/integrations/control-supported-matrix.md`. Framework adapters (LangChain/CrewAI/LangGraph/AutoGen) are **not Control-certified** in FINAL_1.
 
 
 > **Stop your AI agents from burning your budget. Catch loops before they catch you.**
 
-[![Local package](https://img.shields.io/badge/package-local%20v1.0.1-blue.svg)](../WORKSPACE.md)
+[![PyPI](https://img.shields.io/pypi/v/kazenai.svg)](https://pypi.org/project/kazenai/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![LLM calls guarded](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/kazenai-ai/kazenai-finops-sdk/main/badge/llm-guard.json)](https://github.com/kazenai-ai/kazenai-finops-sdk/blob/main/scripts/audit_llm_calls_all.py)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**Quickstart:** [kazenai.com/onboarding](https://kazenai.com/onboarding) · Customer package: `kazenai-finops`
+**Install:** [PyPI · kazenai](https://pypi.org/project/kazenai/) · Customer package: [`kazenai-finops`](https://pypi.org/project/kazenai-finops/) · **Products:** [kazenai.com](https://kazenai.com)
 
-> Publishing status: this checkout uses local sibling-path installs for
-> `kazenai` v1.0.1. PyPI currently does not provide this workspace version.
+> This repository publishes to PyPI as **`kazenai`** (version aligned with `1.0.2`). For most agent integrations, install **`kazenai-finops`**, which depends on this package. Editable sibling-path installs are for workspace contributors only.
 
 ---
 
 ## What is KazenAI?
 
-KazenAI is **reliability infrastructure for AI agents**.
+KazenAI provides **Agent FinOps** reliability primitives for AI agents: local budget checks, loop detection, and optional event ingest into Agent FinOps / Agent Lens.
 
-When you run an AI agent in production, three things will eventually go wrong:
+When you run an AI agent in production, cost and control failures are common:
 
-1. **It loops** — and burns your entire monthly LLM budget in 40 minutes
-2. **It fails silently** — returns 200 OK but the business outcome is wrong
-3. **You can't debug it** — because AI agents are non-deterministic and single-trace debugging is meaningless
+1. **It loops** — and burns LLM budget quickly
+2. **It fails with weak evidence** — HTTP 200 with a wrong business outcome
+3. **Debugging is hard** — non-deterministic traces without a shared event model
 
-KazenAI intercepts every LLM and tool call your agent makes, enforces budget limits locally (no network required), detects loops before they become expensive, and gives you full observability — with one function call.
+`monitor()` intercepts supported LLM calls, enforces budget limits locally (no network required for the hard cap), detects loops before another provider call, and can emit canonical `KazenEvent` batches when FinOps ingest is configured.
 
 ```python
 import os
@@ -36,7 +34,7 @@ from kazenai import monitor, BudgetExceeded
 
 # API key for FinOps ingest is env-only (not a monitor kwarg):
 #   export KAZENAI_FINOPS_API_KEY=kz_...
-#   export KAZENAI_FINOPS_INGEST_URL=http://127.0.0.1:8090
+#   export KAZENAI_FINOPS_INGEST_URL=https://finops.example.com
 
 client = monitor(
     OpenAI(),
@@ -54,7 +52,7 @@ except BudgetExceeded as e:
     print("hard local/shared cap:", e)
 ```
 
-That's it. Your agent code doesn't change.
+That's it for the Control-certified sync OpenAI path. Your call sites stay the same.
 
 ---
 
@@ -70,27 +68,25 @@ BudgetExceeded: cumulative_cost exceeded (hard pre-call cap)
 # Soft trajectory pause raises KazenCircuitBreaker after a completed call
 ```
 
-No more waking up to a $47K bill.
+Illustrative debug output — not a customer bill or certified savings claim.
 
 ---
 
-## Features (shipped in this repo)
+## Features (shipped in this package)
 
-- **`monitor(client, ...)`** — OpenAI-compatible client wrapper with budget + loop enforcement
+- **`monitor(client, ...)`** — Control-certified for sync OpenAI Chat Completions + Anthropic Messages
 - **`FinOpsController`** — trajectory projection + soft circuit breaker (`KazenCircuitBreaker`)
-- **`HttpSink`** — batch ingest to `kazenai-agent-finops` with offline `RetryQueue`
-- **Canonical `KazenEvent`** — shared schema with orchestrator + FinOps API
-- **Framework integrations** (see `examples/`):
-  - **LangChain** — `KazenCallbackHandler` + optional `wrap_langchain_runnable()`
-  - **CrewAI** — `wrap_crew_kickoff()` using `RunContext`
-  - **LangGraph** — `wrap_graph_invoke()` using `RunContext`
-- **AutoGen** — planned; not yet in this package
+- **`HttpSink`** — batch ingest to Agent FinOps with offline `RetryQueue`
+- **Canonical `KazenEvent`** — via dependency on `kazen-event-schema`
+- **Framework integrations** (see `examples/`): present for evaluation — **not Control-certified** in FINAL_1
+  - LangChain, CrewAI, LangGraph helpers
+  - AutoGen helper may lag; treat as experimental
 
 ### Environment variables (FinOps ingest)
 
 | Variable | Purpose |
 |----------|---------|
-| `KAZENAI_FINOPS_INGEST_URL` | Base URL (e.g. `http://127.0.0.1:8090`) |
+| `KAZENAI_FINOPS_INGEST_URL` / `KAZENAI_FINOPS_URL` | Base URL for ingest |
 | `KAZENAI_FINOPS_API_KEY` | API key for `POST /v1/events` |
 | `KAZENAI_BUDGET_USD` | Per-run soft budget for circuit breaker |
 | `KAZENAI_ORG_ID` / `KAZENAI_PROJECT_ID` | Tenant labels on events |
@@ -110,21 +106,28 @@ No more waking up to a $47K bill.
 
 ## Roadmap
 
-Future capabilities (probabilistic replay, drift monitor, TypeScript SDK) are listed in [../docs/ROADMAP.md](../docs/ROADMAP.md). AgentLens P2/P3 are **scaffold** stage, not shipped products.
+Future capabilities (broader adapters, replay, TypeScript SDK) are product/roadmap items — see [../docs/ROADMAP.md](../docs/ROADMAP.md) where present. Do not treat them as Control-certified from this README alone.
 
 ---
 
 ## Installation
 
-Local (sibling checkout of `kazen-event-schema`):
+```bash
+python -m pip install kazenai
+# Typical customer install (re-exports + FinOps extras):
+python -m pip install kazenai-finops openai
+```
+
+### Workspace / contributor install (optional)
 
 ```bash
 pip install -e ../kazen-event-schema
 pip install --no-deps -e .
 ```
 
-CI installs pinned wheels from `vendor/` first (`kazen-event-schema` and
-`kazenai-contracts`), because neither is on PyPI yet.
+CI may install pinned wheels from `vendor/` for `kazen-event-schema` and
+`kazenai-contracts`. **`kazen-event-schema` is on PyPI**; `kazenai-contracts` remains
+workspace/vendor until published separately.
 
 To keep Cursor out of GitHub contributors, enable the strip hook once per clone:
 
@@ -132,7 +135,7 @@ To keep Cursor out of GitHub contributors, enable the strip hook once per clone:
 git config core.hooksPath .githooks
 ```
 
-Python 3.10, 3.11, 3.12 supported. No C extensions. Installs in under 30 seconds.
+Python 3.10, 3.11, 3.12 supported. No C extensions.
 
 ---
 
@@ -159,7 +162,7 @@ result = monitored_client.chat.completions.create(
 
 ## Quick Start
 
-### Raw OpenAI (no framework)
+### Raw OpenAI (Control-certified)
 
 ```python
 import openai
@@ -190,55 +193,27 @@ except KazenCircuitBreaker as e:
     print(f"Soft pause after a completed call: {e}")
 ```
 
-### LangChain
+### LangChain / CrewAI (not Control-certified)
 
-```python
-from kazenai import monitor
-
-chain = your_langchain_chain  # LCEL chain, agent, etc.
-monitored = monitor(
-    chain,
-    agent_id="customer-support",
-    # api_key is env-only for monitor(); framework adapters may take api_key separately
-    max_budget_usd=2.00,
-    debug=True,
-)
-
-result = monitored.invoke({"input": "help me with my order"})
-```
-
-### CrewAI
-
-```python
-from kazenai import monitor
-
-crew = YourCrew()
-monitored = monitor(
-    crew,
-    agent_id="research-crew",
-    # api_key is env-only for monitor(); framework adapters may take api_key separately
-    max_budget_usd=10.00,
-    h2_max_reps=3,   # block if same tool chain repeats 3 times
-)
-
-result = monitored.kickoff(inputs={"topic": "AI trends"})
-```
+Framework wrappers may exist for evaluation. Prefer wrapping the OpenAI/Anthropic
+client with `monitor()` for the FINAL_1 supported path. See
+`docs/integrations/control-supported-matrix.md`.
 
 ---
 
 ## Why local enforcement matters
 
-Most observability tools record what happened. **KazenAI blocks what's about to happen.**
+Most observability tools record what happened. **On the certified path, KazenAI can block what's about to happen.**
 
 ```
-Traditional tools:  LLM call → response → log cost → dashboard shows $47K
-KazenAI:            Pre-flight check → BLOCKED → LLM call never made
+Traditional tools:  LLM call → response → log cost → dashboard shows overspend
+KazenAI (local):    Pre-flight check → BLOCKED → LLM call never made
 ```
 
 Local enforcement means:
-- **No network dependency** — works with `backend_url=None`
-- **No latency added** — budget check completes in <1ms
-- **No backend outage = no protection failure** — the agent doesn't need to reach our servers to be protected
+- **Works for the hard cap without FinOps network** — `backend_url=None` still denies
+- **Low overhead** — budget check is local on the hot path
+- **Backend outage ≠ unprotected hard-cap path** — optional ingest may still fail open depending on configuration
 
 ---
 
@@ -254,7 +229,7 @@ kazenai-core/
 │   ├── interceptor.py       # LLM/tool call interception
 │   ├── enforcement.py       # local budget + rate limit enforcement
 │   ├── loop_detector.py     # H1 (Jaccard) + H2 (chain fingerprint)
-│   ├── cost_tracker.py      # 14-model pricing table
+│   ├── cost_tracker.py      # pricing table
 │   ├── client.py            # async API client + sampling
 │   ├── retry_queue.py       # SQLite retry queue for offline resilience
 │   ├── debug.py             # debug=True terminal output
@@ -265,10 +240,6 @@ kazenai-core/
 │       ├── crewai.py
 │       └── generic.py
 ├── examples/
-│   ├── basic_agent.py       # raw OpenAI example
-│   ├── langchain_example.py
-│   ├── loop_example.py      # trigger loop detection
-│   └── benchmark_latency.py # verify <5ms overhead
 ├── tests/
 ├── pyproject.toml
 └── README.md
@@ -278,42 +249,27 @@ kazenai-core/
 
 ## Design principles
 
-1. **Local-first enforcement** — SDK must block without backend
-2. **Zero-blocking** — SDK overhead <5ms on hot path
-3. **Fail-open always** — internal errors never crash your agent
-4. **Canonical schema** — KazenEvent used by both SDK and backend (`extra='forbid'`)
-5. **DX over features** — `debug=True` gives value in 2 minutes
-
----
-
-## Star this repo ⭐
-
-If you've ever woken up to an unexpected LLM bill, or spent hours debugging an agent that returned 200 OK but did nothing useful — **star this repo**. It tells us this matters to you, and it helps us ship faster.
-
-We're building in public. Follow [@kazenai](https://x.com/kazenai) for weekly progress updates.
+1. **Local-first hard-cap enforcement** — SDK can deny without backend
+2. **Low overhead** — keep hot-path checks fast
+3. **Fail-open for internal SDK faults** — SDK bugs should not crash the agent (budget deny is intentional)
+4. **Canonical schema** — `KazenEvent` shared with FinOps / Lens
+5. **Honest Control matrix** — do not claim framework certification without evidence
 
 ---
 
 ## Status
 
-**Week 1** — Building core SDK  
-**Week 2** — Design partner onboarding  
-**Week 3** — Hosted dashboard + paid tiers  
-**Week 4** — Public launch
+**PyPI:** `kazenai` **1.0.2** published. Control FINAL_1 certifies the sync OpenAI + Anthropic `monitor()` path above — not a general "every agent framework" claim, and not customer production certification by itself.
 
-Early access: [kazenai.com](https://kazenai.com) or email **founder@kazenai.com**
+Products and design-partner enquiries: [kazenai.com](https://kazenai.com) · **founder@kazenai.com**
 
 ---
 
 ## Contributing
 
-We're pre-1.0 and moving fast. The best way to contribute right now is:
-
-1. ⭐ Star the repo
-2. Open an issue describing a pain point you've hit with AI agent costs or loops
-3. Try the examples and report what breaks
-
-Full contribution guide coming with v1.0.
+1. Star or open an issue describing a cost/loop pain point
+2. Try the Control-certified examples and report what breaks
+3. Keep PRs aligned with the Control supported matrix when claiming certification
 
 ---
 
