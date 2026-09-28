@@ -17,7 +17,7 @@ jobs:
       - name: Install vendored unpublished deps
         run: |
           pip install --upgrade pip
-          pip install ./vendor/kazen_event_schema-0.6.1-py3-none-any.whl
+          pip install ./vendor/kazen_event_schema-0.6.2-py3-none-any.whl
           pip install ./vendor/kazenai_contracts-0.1.0-py3-none-any.whl
       - run: pip install -e ".[dev]"
       # Coverage bar matches pyproject.toml [tool.coverage.report] fail_under=80

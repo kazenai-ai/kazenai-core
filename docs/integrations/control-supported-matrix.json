@@ -1,7 +1,7 @@
 {
   "schema_version": "final1.p4-1.v1",
   "title": "KazenAI Control FINAL_1 + FINAL_LENS supported integration matrix",
-  "recorded_at": "2026-09-23T05:40:00Z",
+  "recorded_at": "2026-09-28T20:30:00Z",
   "authority": "FIX_LOOP_PROMPT_FINAL_1 P4-1 + FIX_LOOP_PROMPT_FINAL_LENS P6-3",
   "evidence_tiers": [
     "unsupported",
@@ -421,6 +421,68 @@
       "evidence": [],
       "tests": [],
       "notes": "docs/integrations/* are Brain/MCP paths \u2014 not Control FINAL_1"
+    },
+    {
+      "id": "finops.business_attribution.v1",
+      "category": "finops",
+      "name": "Business attribution dimensions (subject/feature/workflow)",
+      "detail": "Canonical business.attribution.v1 snapshot through admit + SDK ContextVar",
+      "status": "fixture-verified",
+      "evidence": [
+        "kazenai-contracts/fixtures/finops/attribution_attributed.json",
+        "kazenai-contracts/fixtures/finops/attribution_unattributed.json",
+        "artifacts/final-1b-p8-1-adversarial-20260928T194504Z.json"
+      ],
+      "tests": [
+        "kazenai-contracts/tests/test_final1b_attribution_receipts.py",
+        "kazenai-core/tests/test_final1b_p1_3_attribution.py",
+        "kazenai-agent-finops/backend/tests/test_final1b_attribution_admit.py"
+      ]
+    },
+    {
+      "id": "finops.economic_decision_receipt.v1",
+      "category": "finops",
+      "name": "Economic decision receipts",
+      "detail": "Immutable allow/deny receipts with reason_code and evaluated policies",
+      "status": "fixture-verified",
+      "evidence": [
+        "kazenai-contracts/fixtures/finops/receipt_allow.json",
+        "kazenai-contracts/fixtures/finops/receipt_deny_insufficient.json",
+        "kazenai-contracts/fixtures/finops/receipt_deny_policy.json",
+        "docs/adr/ADR-019-economic-decision-receipts.md"
+      ],
+      "tests": [
+        "kazenai-contracts/tests/test_final1b_attribution_receipts.py",
+        "kazenai-agent-finops/backend/tests/test_final1b_attribution_admit.py"
+      ]
+    },
+    {
+      "id": "lens.economic_incidents.v1",
+      "category": "lens",
+      "name": "Economic incident categories + joined narrative",
+      "detail": "Deterministic economic categories with economic_detail projection in inbox",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/final-1b-p7-1-journey-20260928T194418Z.json"
+      ],
+      "tests": [
+        "kazenai-agent-lens/backend/tests/test_final1b_p4_economic_incidents.py"
+      ]
+    },
+    {
+      "id": "sdk.attribution_context.v1",
+      "category": "sdk",
+      "name": "SDK attribution ContextVar + monitor kwargs",
+      "detail": "use_attribution / monitor business_subject_ref,feature_id,workflow_id; enforcement_owner",
+      "status": "fixture-verified",
+      "evidence": [
+        "kazenai-examples/control-loop-and-failure/README.md"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_final1b_p1_3_attribution.py",
+        "kazenai-core/tests/test_final1b_p3_2_enforcement_owner.py",
+        "kazenai-examples/control-loop-and-failure/tests/test_scenarios.py"
+      ]
     },
     {
       "id": "capability.subscription_cost_attribution",

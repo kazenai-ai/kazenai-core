@@ -28,12 +28,22 @@ MATRIX = ROOT / "docs" / "integrations" / "control-supported-matrix.json"
 
 def _file_present(rel: str) -> bool:
     """Resolve evidence/test paths for workspace or standalone core checkout."""
-    candidates = [ROOT / rel]
-    if rel.startswith("kazenai-core/"):
-        candidates.append(ROOT / rel[len("kazenai-core/") :])
+    from glob import glob
+
+    roots = [ROOT]
     if ROOT.name == "kazenai-core":
-        candidates.append(ROOT.parent / rel)
-    return any(p.is_file() for p in candidates)
+        roots.append(ROOT.parent)
+    for root in roots:
+        if "*" in rel:
+            if any(Path(m).is_file() for m in glob(str(root / rel))):
+                return True
+            continue
+        candidates = [root / rel]
+        if rel.startswith("kazenai-core/"):
+            candidates.append(root / rel[len("kazenai-core/") :])
+        if any(path.is_file() for path in candidates):
+            return True
+    return False
 
 
 def _standalone_core_ci() -> bool:
