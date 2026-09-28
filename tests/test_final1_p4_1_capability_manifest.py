@@ -105,7 +105,9 @@ def test_p41_advertised_cells_have_evidence_and_tests():
                 or path.startswith("docs/")
                 or path.startswith("kazenai-agent-")
                 or path.startswith("kazenai-examples/")
+                or path.startswith("kazenai-contracts/")
                 or path.startswith("scripts/")
+                or path.startswith("tests/e2e/")
             ):
                 # Citations remain required; workspace evidence is not shipped in core CI.
                 continue
@@ -116,8 +118,14 @@ def test_p41_advertised_cells_have_evidence_and_tests():
                 continue
             if _file_present(path):
                 continue
+            # Standalone core CI only enforces in-repo unit tests under tests/
+            # (not workspace Playwright under tests/e2e/ or sibling repos).
             if standalone and not (
-                path.startswith("kazenai-core/tests/") or path.startswith("tests/")
+                path.startswith("kazenai-core/tests/")
+                or (
+                    path.startswith("tests/")
+                    and not path.startswith("tests/e2e/")
+                )
             ):
                 continue
             assert False, f"{cell['id']}: missing test {path}"
