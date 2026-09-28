@@ -1,4 +1,4 @@
-# Control FINAL_1 — supported integration matrix (P4-1)
+# Control FINAL_1 + FINAL_LENS — supported integration matrix
 
 **Machine-readable source of truth:** [`control-supported-matrix.json`](./control-supported-matrix.json)
 
@@ -45,6 +45,15 @@ capability requires deferred tests **before** raising its status above
 | `auth.control_identity` | integration-verified | P1-4 |
 | `tools.model_call_only` | fixture-verified | monitor helpers |
 | `example.control_loop_and_failure` | fixture-verified | P4-5 |
+| `lens.incident_inbox` | integration-verified | FINAL_LENS P1/P6 |
+| `lens.incident_reviews` | integration-verified | FINAL_LENS P2/P6 |
+| `lens.regression_export` | integration-verified | FINAL_LENS P3/P6 |
+| `lens.run_comparison` | integration-verified | FINAL_LENS P4/P6 |
+| `lens.incident_digest_local_capture` | integration-verified | FINAL_LENS P5/P6 |
+
+The FINAL_LENS cells mean authenticated real **local** services with synthetic
+events and a provider-incapable capture transport. They do not mean external
+notification, remote deployment, customer validation, causal improvement or ROI.
 
 ## Explicitly unsupported / unverified
 

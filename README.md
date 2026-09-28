@@ -11,7 +11,7 @@
 
 **Install:** [PyPI · kazenai](https://pypi.org/project/kazenai/) · Customer package: [`kazenai-finops`](https://pypi.org/project/kazenai-finops/) · **Products:** [kazenai.com](https://kazenai.com)
 
-> This repository publishes to PyPI as **`kazenai`** (version aligned with `1.0.2`). For most agent integrations, install **`kazenai-finops`**, which depends on this package. Editable sibling-path installs are for workspace contributors only.
+> This repository publishes to PyPI as **`kazenai`** (version aligned with `1.0.3`). For most agent integrations, install **`kazenai-finops`**, which depends on this package. Editable sibling-path installs are for workspace contributors only.
 
 ---
 
@@ -259,7 +259,7 @@ kazenai-core/
 
 ## Status
 
-**PyPI:** `kazenai` **1.0.2** published. Control FINAL_1 certifies the sync OpenAI + Anthropic `monitor()` path above — not a general "every agent framework" claim, and not customer production certification by itself.
+**PyPI:** `kazenai` **1.0.3** published. Control FINAL_1 certifies the sync OpenAI + Anthropic `monitor()` path above — not a general "every agent framework" claim, and not customer production certification by itself.
 
 Products and design-partner enquiries: [kazenai.com](https://kazenai.com) · **founder@kazenai.com**
 

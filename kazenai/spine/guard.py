@@ -265,6 +265,33 @@ def _apply_feature(body: dict[str, Any], feature: str | None) -> None:
         body["feature"] = feat
 
 
+def _apply_attribution(
+    body: dict[str, Any],
+    *,
+    feature: str | None = None,
+    business_subject_ref: str | None = None,
+    feature_id: str | None = None,
+    workflow_id: str | None = None,
+    operation_id: str | None = None,
+    attempt_id: str | None = None,
+) -> None:
+    """Attach business attribution metadata to a FinOps reserve/check body."""
+    from ..attribution import attribution_for_reserve_body
+
+    attrs = attribution_for_reserve_body(
+        business_subject_ref=business_subject_ref,
+        feature_id=feature_id,
+        workflow_id=workflow_id,
+        operation_id=operation_id,
+        attempt_id=attempt_id,
+        feature=feature,
+    )
+    # Prefer explicit feature kwarg for legacy ``feature`` when no feature_id resolved.
+    if feature and not attrs.get("feature"):
+        _apply_feature(body, feature)
+    body.update(attrs)
+
+
 def _lifecycle_budget_enabled() -> bool:
     """Control / strict mode: use /reserve+/settle with call/attempt/reservation IDs."""
     for key in (
@@ -334,6 +361,11 @@ def reserve_budget(
     call_id: str | None = None,
     attempt: int = 1,
     idempotency_key: str | None = None,
+    business_subject_ref: str | None = None,
+    feature_id: str | None = None,
+    workflow_id: str | None = None,
+    operation_id: str | None = None,
+    attempt_id: str | None = None,
 ) -> Union[ReservationHandle, float]:
     """Atomic pre-call FinOps reserve. Raises BudgetExceeded (402) or BudgetUnavailable.
 
@@ -341,7 +373,28 @@ def reserve_budget(
     a ``ReservationHandle`` carrying reservation_id/call_id/attempt. Legacy mode keeps
     ``POST /v1/budget/check`` and returns a float (tests may also receive a Handle that
     compares equal to floats).
+
+    Attribution fields prefer ambient ``AttributionContext`` then these kwargs.
     """
+    from ..enforcement_owner import (
+        assert_sdk_may_reserve,
+        bind_decision_refs,
+        get_enforcement_owner,
+        should_skip_sdk_reserve,
+    )
+
+    if should_skip_sdk_reserve():
+        owner = get_enforcement_owner()
+        return ReservationHandle(
+            reserved_cost_usd=0.0,
+            reservation_id=(owner.reservation_id if owner else "") or "",
+            call_id=(owner.call_id if owner else None) or (call_id or ""),
+            attempt=int((owner.attempt if owner and owner.attempt is not None else None) or attempt or 1),
+            lifecycle=_lifecycle_budget_enabled(),
+        )
+
+    assert_sdk_may_reserve()
+
     base = _finops_url()
     if not base:
         if enforcement_fail_closed():
@@ -349,7 +402,7 @@ def reserve_budget(
         return ReservationHandle(reserved_cost_usd=0.0) if _lifecycle_budget_enabled() else 0.0
 
     if _lifecycle_budget_enabled():
-        return _reserve_lifecycle(
+        handle = _reserve_lifecycle(
             base=base,
             org_id=org_id,
             workspace_id=workspace_id,
@@ -361,7 +414,19 @@ def reserve_budget(
             call_id=call_id,
             attempt=attempt,
             idempotency_key=idempotency_key,
+            business_subject_ref=business_subject_ref,
+            feature_id=feature_id,
+            workflow_id=workflow_id,
+            operation_id=operation_id,
+            attempt_id=attempt_id,
         )
+        if getattr(handle, "reservation_id", None):
+            bind_decision_refs(
+                reservation_id=str(handle.reservation_id),
+                call_id=str(getattr(handle, "call_id", "") or call_id or ""),
+                attempt=int(getattr(handle, "attempt", None) or attempt or 1),
+            )
+        return handle
 
     body: dict[str, Any] = {
         "org_id": org_id,
@@ -375,7 +440,15 @@ def reserve_budget(
     if estimated_cost_usd is not None:
         body["estimated_cost_usd"] = float(estimated_cost_usd)
         body["projected_spend_usd"] = float(estimated_cost_usd)
-    _apply_feature(body, feature)
+    _apply_attribution(
+        body,
+        feature=feature,
+        business_subject_ref=business_subject_ref,
+        feature_id=feature_id,
+        workflow_id=workflow_id,
+        operation_id=operation_id,
+        attempt_id=attempt_id,
+    )
 
     data = json.dumps({k: v for k, v in body.items() if v is not None}).encode("utf-8")
     req = urllib.request.Request(
@@ -388,7 +461,17 @@ def reserve_budget(
         timeout_s = float(os.getenv("KAZENAI_FINOPS_RESERVE_TIMEOUT_S", "0.8") or "0.8")
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
-            return float(payload.get("estimated_cost_usd") or 0.0)
+            reserved = float(payload.get("estimated_cost_usd") or 0.0)
+            decision_id = str(payload.get("decision_id") or "") or None
+            reservation_id = str(payload.get("reservation_id") or "") or None
+            if decision_id or reservation_id:
+                bind_decision_refs(
+                    decision_id=decision_id,
+                    reservation_id=reservation_id,
+                    call_id=call_id,
+                    attempt=attempt,
+                )
+            return reserved
     except urllib.error.HTTPError as exc:
         if exc.code == 402:
             try:
@@ -421,6 +504,11 @@ def _reserve_lifecycle(
     call_id: str | None,
     attempt: int,
     idempotency_key: str | None,
+    business_subject_ref: str | None = None,
+    feature_id: str | None = None,
+    workflow_id: str | None = None,
+    operation_id: str | None = None,
+    attempt_id: str | None = None,
 ) -> ReservationHandle:
     cid = (call_id or "").strip() or f"call_{new_id()}"
     att = max(1, int(attempt or 1))
@@ -452,7 +540,15 @@ def _reserve_lifecycle(
         "estimated_usd_micros": micros,
         "run_id": run_id or "",
     }
-    _apply_feature(body, feature)
+    _apply_attribution(
+        body,
+        feature=feature,
+        business_subject_ref=business_subject_ref,
+        feature_id=feature_id,
+        workflow_id=workflow_id,
+        operation_id=operation_id,
+        attempt_id=attempt_id,
+    )
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         f"{base}/v1/budget/reserve",
@@ -510,6 +606,11 @@ async def reserve_budget_async(
     call_id: str | None = None,
     attempt: int = 1,
     idempotency_key: str | None = None,
+    business_subject_ref: str | None = None,
+    feature_id: str | None = None,
+    workflow_id: str | None = None,
+    operation_id: str | None = None,
+    attempt_id: str | None = None,
 ) -> Union[ReservationHandle, float]:
     return await asyncio.to_thread(
         reserve_budget,
@@ -524,6 +625,11 @@ async def reserve_budget_async(
         call_id=call_id,
         attempt=attempt,
         idempotency_key=idempotency_key,
+        business_subject_ref=business_subject_ref,
+        feature_id=feature_id,
+        workflow_id=workflow_id,
+        operation_id=operation_id,
+        attempt_id=attempt_id,
     )
 
 

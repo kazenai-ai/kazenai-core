@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 import asyncio
 import inspect
 import json
@@ -274,10 +276,17 @@ def _try_reserve_budget(
     run_id: str,
     call_id: Optional[str] = None,
     estimated_cost_usd: Optional[float] = None,
+    business_subject_ref: Optional[str] = None,
+    feature_id: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+    operation_id: Optional[str] = None,
+    attempt_id: Optional[str] = None,
+    feature: Optional[str] = None,
 ):
     """Pre-call reservation via canonical spine (raises on fail-closed deny).
 
     Returns a float (legacy) or ReservationHandle (Control lifecycle).
+    Attribution prefers ambient AttributionContext, then these kwargs.
     """
     from .spine.guard import reserve_budget
 
@@ -289,6 +298,12 @@ def _try_reserve_budget(
             increment_step=False,
             call_id=call_id,
             estimated_cost_usd=estimated_cost_usd,
+            business_subject_ref=business_subject_ref,
+            feature_id=feature_id,
+            workflow_id=workflow_id,
+            operation_id=operation_id,
+            attempt_id=attempt_id,
+            feature=feature,
         )
     except BudgetUnavailable:
         raise
@@ -550,6 +565,12 @@ def patch_openai(
     stream_enforcement: bool = False,
     certified_surface: bool = False,
     capture_mode: CaptureMode = CaptureMode.METADATA,
+    business_subject_ref: Optional[str] = None,
+    feature_id: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+    feature: Optional[str] = None,
+    operation_id: Optional[str] = None,
+    attempt_id: Optional[str] = None,
 ) -> Callable[[], None]:
     """
     Monkey-patch an OpenAI-style client to enforce budgets/loops *before* each LLM call.
@@ -568,6 +589,17 @@ def patch_openai(
     loop_detector = loop_detector or LoopDetector()
     dbg = DebugPrinter(enabled=debug)
 
+    from .attribution import use_attribution
+    from .enforcement_owner import claim_enforcement_owner
+
+    attr_defaults = dict(
+        business_subject_ref=business_subject_ref,
+        feature_id=feature_id or feature,
+        workflow_id=workflow_id,
+        operation_id=operation_id,
+        attempt_id=attempt_id,
+    )
+
     ctx0 = get_current_context()
     if ctx0 is None:
         ctx0 = RunContext.new(
@@ -583,7 +615,10 @@ def patch_openai(
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             ctx = get_current_context() or ctx0
             step_ctx = ctx.child_step()
-            with use_context(step_ctx):
+            with ExitStack() as stack:
+                stack.enter_context(use_context(step_ctx))
+                stack.enter_context(claim_enforcement_owner("sdk"))
+                stack.enter_context(use_attribution(**attr_defaults))
                 payload = _extract_openai_input(args, kwargs)
                 tool_names = _extract_tool_names(kwargs)
 
@@ -629,6 +664,11 @@ def patch_openai(
                     run_id=step_ctx.run_id,
                     call_id=str(getattr(step_ctx, "step_id", None) or "") or None,
                     estimated_cost_usd=projected,
+                    business_subject_ref=attr_defaults.get("business_subject_ref"),
+                    feature_id=attr_defaults.get("feature_id"),
+                    workflow_id=attr_defaults.get("workflow_id"),
+                    operation_id=attr_defaults.get("operation_id"),
+                    attempt_id=attr_defaults.get("attempt_id"),
                 )
                 started = time.perf_counter()
                 try:
@@ -849,6 +889,12 @@ def patch_anthropic(
     finops: Optional[FinOpsController] = None,
     certified_surface: bool = False,
     capture_mode: CaptureMode = CaptureMode.METADATA,
+    business_subject_ref: Optional[str] = None,
+    feature_id: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+    feature: Optional[str] = None,
+    operation_id: Optional[str] = None,
+    attempt_id: Optional[str] = None,
 ) -> Callable[[], None]:
     """
     Monkey-patch an Anthropic client to emit KazenEvents on every messages.create call.
@@ -866,6 +912,17 @@ def patch_anthropic(
     loop_detector = loop_detector or LoopDetector()
     dbg = DebugPrinter(enabled=debug)
 
+    from .attribution import use_attribution
+    from .enforcement_owner import claim_enforcement_owner
+
+    attr_defaults = dict(
+        business_subject_ref=business_subject_ref,
+        feature_id=feature_id or feature,
+        workflow_id=workflow_id,
+        operation_id=operation_id,
+        attempt_id=attempt_id,
+    )
+
     ctx0 = get_current_context()
     if ctx0 is None:
         ctx0 = RunContext.new(
@@ -881,7 +938,10 @@ def patch_anthropic(
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             ctx = get_current_context() or ctx0
             step_ctx = ctx.child_step()
-            with use_context(step_ctx):
+            with ExitStack() as stack:
+                stack.enter_context(use_context(step_ctx))
+                stack.enter_context(claim_enforcement_owner("sdk"))
+                stack.enter_context(use_attribution(**attr_defaults))
                 payload = _extract_openai_input(args, kwargs)  # same shape works for Anthropic
                 tool_names = _extract_tool_names(kwargs)
 
@@ -916,6 +976,11 @@ def patch_anthropic(
                     run_id=step_ctx.run_id,
                     call_id=str(getattr(step_ctx, "step_id", None) or "") or None,
                     estimated_cost_usd=projected,
+                    business_subject_ref=attr_defaults.get("business_subject_ref"),
+                    feature_id=attr_defaults.get("feature_id"),
+                    workflow_id=attr_defaults.get("workflow_id"),
+                    operation_id=attr_defaults.get("operation_id"),
+                    attempt_id=attr_defaults.get("attempt_id"),
                 )
                 started = time.perf_counter()
                 try:
@@ -1116,6 +1181,12 @@ def monitor(
     timeline_path: Optional[str] = None,
     capture_mode: Optional[str] = None,
     capture_consent: Optional[bool] = None,
+    business_subject_ref: Optional[str] = None,
+    feature_id: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+    feature: Optional[str] = None,
+    operation_id: Optional[str] = None,
+    attempt_id: Optional[str] = None,
 ) -> Any:
     """
     High-level entrypoint for Agent FinOps on raw OpenAI-style or Anthropic clients.
@@ -1183,6 +1254,12 @@ def monitor(
         finops=finops,
         enforcement=enforcement,
         capture_mode=resolved_capture,
+        business_subject_ref=business_subject_ref,
+        feature_id=feature_id,
+        workflow_id=workflow_id,
+        feature=feature,
+        operation_id=operation_id,
+        attempt_id=attempt_id,
     )
     if _detect_client_kind(client) == "anthropic":
         patch_anthropic(client, **patch_kwargs, certified_surface=True)

@@ -1,6 +1,18 @@
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 from .context import BackgroundTaskContext, RunContext, get_current_context, use_context
+from .attribution import (
+    AttributionConflict,
+    AttributionContext,
+    get_attribution,
+    use_attribution,
+)
+from .enforcement_owner import (
+    EnforcementOwnerState,
+    EnforcementOwnershipError,
+    claim_enforcement_owner,
+    get_enforcement_owner,
+)
 from .enforcement import (
     BudgetExceeded,
     BudgetUnavailable,
@@ -91,6 +103,14 @@ __all__ = [
     "UnsupportedModeError",
     "RunContext",
     "BackgroundTaskContext",
+    "AttributionContext",
+    "AttributionConflict",
+    "get_attribution",
+    "use_attribution",
+    "EnforcementOwnerState",
+    "EnforcementOwnershipError",
+    "claim_enforcement_owner",
+    "get_enforcement_owner",
     "StateSerializer",
     "EventSink",
     "MemorySink",

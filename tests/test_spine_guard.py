@@ -97,6 +97,7 @@ def test_reserve_sends_explicit_estimated_cost(monkeypatch):
             "input_tokens": 1000,
             "estimated_cost_usd": 0.25,
             "projected_spend_usd": 0.25,
+            "attribution_state": "unattributed",
         }
     ]
 

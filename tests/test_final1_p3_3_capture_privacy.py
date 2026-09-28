@@ -118,6 +118,24 @@ def test_p33_default_monitor_timeline_and_logs_have_no_canary(monkeypatch, caplo
         assert model_calls[0]["payload"]["capture"]["bodies"] == "off"
 
 
+def test_p33_attribution_metadata_excludes_canary():
+    """FINAL_1_b P3-3 — attribution fields are metadata; canaries must not enter receipts."""
+    from kazenai.attribution import AttributionContext, attribution_for_reserve_body
+
+    canary = CANARY
+    ctx = AttributionContext(business_subject_ref="cust-meta", feature_id="assist")
+    receiptish = {
+        **ctx.to_dict(),
+        **attribution_for_reserve_body(feature_id="assist"),
+    }
+    scrubbed = redact_secrets({**receiptish, "api_key": canary, "messages": [{"content": canary}]})
+    blob = json.dumps(scrubbed)
+    _assert_no_canary(blob)
+    assert "messages" not in ctx.to_dict()
+    assert canary not in repr(ctx)
+    assert scrubbed["api_key"] == "[REDACTED]"
+
+
 def test_p33_sqlite_spool_and_http_payload_have_no_canary(monkeypatch):
     _standalone(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
