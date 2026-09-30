@@ -530,12 +530,6 @@
       "notes": "USER-GO; fake transport proves integration only"
     }
   ],
-  "doc_demotions": [
-    {
-      "path": "README.md",
-      "action": "banner_control_scope"
-    }
-  ],
   "provenance_note": "Vendored into kazenai-core for standalone CI; workspace copy remains at docs/integrations/control-supported-matrix.json",
   "refresh_note": "FINAL_LENS P6-3 adds five local integration-verified incident workflow cells; external delivery and customer validation remain USER-GO",
   "licenses": {

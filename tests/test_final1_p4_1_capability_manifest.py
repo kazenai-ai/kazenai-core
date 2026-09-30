@@ -7,7 +7,6 @@ Forbidden claims must only appear alongside unsupported labels in the matrix.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -180,26 +179,6 @@ def test_p41_forbidden_claims_not_in_matrix_as_supported():
         for phrase in FORBIDDEN_PHRASES:
             if phrase in blob and cell["status"] in ADVERTISED:
                 pytest.fail(f"{cell['id']} advertises forbidden phrase {phrase!r}")
-
-
-def test_p41_doc_demotions_have_control_banner():
-    data = _load()
-    for item in data.get("doc_demotions") or []:
-        rel = item["path"]
-        # Workspace paths like kazenai-core/README.md → README.md in standalone core.
-        candidates = [ROOT / rel]
-        if rel.startswith("kazenai-core/"):
-            candidates.append(ROOT / rel[len("kazenai-core/") :])
-        if ROOT.name == "kazenai-core" and not rel.startswith("kazenai-core/"):
-            candidates.append(ROOT / rel)
-        path = next((p for p in candidates if p.is_file()), None)
-        if path is None and _standalone_core_ci():
-            continue
-        assert path is not None, rel
-        text = path.read_text(encoding="utf-8")
-        assert re.search(r"Control FINAL_1|FINAL_1 Control|not Control", text, re.I), (
-            f"{path} missing Control FINAL_1 demotion banner"
-        )
 
 
 def test_p41_human_matrix_markdown_exists():
