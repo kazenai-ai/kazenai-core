@@ -317,6 +317,10 @@ class ReservationHandle:
     reserved_usd_micros: int = 0
     lifecycle: bool = False
     idempotency_key: str = ""
+    decision_id: str = ""
+    business_subject_ref: str = ""
+    feature_id: str = ""
+    workflow_id: str = ""
 
     def __float__(self) -> float:
         return float(self.reserved_cost_usd)
@@ -391,6 +395,7 @@ def reserve_budget(
             call_id=(owner.call_id if owner else None) or (call_id or ""),
             attempt=int((owner.attempt if owner and owner.attempt is not None else None) or attempt or 1),
             lifecycle=_lifecycle_budget_enabled(),
+            decision_id=(owner.decision_id if owner else "") or "",
         )
 
     assert_sdk_may_reserve()
@@ -420,9 +425,10 @@ def reserve_budget(
             operation_id=operation_id,
             attempt_id=attempt_id,
         )
-        if getattr(handle, "reservation_id", None):
+        if getattr(handle, "reservation_id", None) or getattr(handle, "decision_id", None):
             bind_decision_refs(
-                reservation_id=str(handle.reservation_id),
+                decision_id=str(getattr(handle, "decision_id", "") or "") or None,
+                reservation_id=str(handle.reservation_id or "") or None,
                 call_id=str(getattr(handle, "call_id", "") or call_id or ""),
                 attempt=int(getattr(handle, "attempt", None) or attempt or 1),
             )
@@ -561,6 +567,14 @@ def _reserve_lifecycle(
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
             reserved_micros = int(payload.get("reserved_usd_micros") or micros)
+            decision_id = str(payload.get("decision_id") or "")
+            receipt = payload.get("decision_receipt") if isinstance(payload.get("decision_receipt"), dict) else {}
+            if not decision_id and receipt:
+                decision_id = str(receipt.get("decision_id") or "")
+            attr = {}
+            if isinstance(receipt.get("attribution"), dict):
+                attr = receipt["attribution"]
+            economics = attr.get("economics") if isinstance(attr.get("economics"), dict) else {}
             return ReservationHandle(
                 reserved_cost_usd=_micros_to_usd(reserved_micros),
                 reservation_id=str(payload.get("reservation_id") or ""),
@@ -569,6 +583,18 @@ def _reserve_lifecycle(
                 reserved_usd_micros=reserved_micros,
                 lifecycle=True,
                 idempotency_key=idem,
+                decision_id=decision_id,
+                business_subject_ref=str(
+                    payload.get("business_subject_ref")
+                    or economics.get("business_subject_ref")
+                    or ""
+                ),
+                feature_id=str(
+                    payload.get("feature_id") or economics.get("feature_id") or ""
+                ),
+                workflow_id=str(
+                    payload.get("workflow_id") or economics.get("workflow_id") or ""
+                ),
             )
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""

@@ -248,7 +248,7 @@ def _precall_projection_usd(kwargs: Mapping[str, Any], usd_per_1k_tokens: Option
 
 
 def _reservation_payload_fields(reserved) -> dict:
-    """Carry call/attempt/reservation IDs on model.call for FinOps ingest settle."""
+    """Carry call/attempt/reservation/decision IDs on model.call for FinOps/Lens join."""
     if reserved is None:
         return {}
     from .spine.guard import ReservationHandle
@@ -260,6 +260,10 @@ def _reservation_payload_fields(reserved) -> dict:
             "attempt": int(reserved.attempt or 1),
             "reserved_cost_usd": float(reserved.reserved_cost_usd),
             "reserved_usd_micros": int(reserved.reserved_usd_micros or 0),
+            "decision_id": reserved.decision_id or None,
+            "business_subject_ref": reserved.business_subject_ref or None,
+            "feature_id": reserved.feature_id or None,
+            "workflow_id": reserved.workflow_id or None,
         }
         if reserved.reserved_usd_micros:
             out["actual_usd_micros"] = None  # filled after usage when known
