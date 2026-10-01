@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kazenai"  # Matches your README installation instructions
-version = "1.0.4"
+version = "1.0.5"
 description = "KazenAI core SDK: monitor() budget and loop enforcement for OpenAI/Anthropic (Control-certified sync path)"
 readme = "README.md"
 requires-python = ">=3.10" # v4 TDD specifies 3.10+ for modern Typing/ContextVars

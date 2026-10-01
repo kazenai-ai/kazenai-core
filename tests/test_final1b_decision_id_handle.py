@@ -21,13 +21,12 @@ def test_lifecycle_reserve_preserves_decision_id(monkeypatch):
         "decision_id": "dec_xyz",
         "decision_receipt": {
             "decision_id": "dec_xyz",
-            "attribution": {
-                "economics": {
-                    "business_subject_ref": "cust-9",
-                    "feature_id": "assist",
-                    "workflow_id": "wf-9",
-                }
+            "economics": {
+                "business_subject_ref": "cust-9",
+                "feature_id": "assist",
+                "workflow_id": "wf-9",
             },
+            "execution": {"run_id": "r", "call_id": "call_1", "attempt": 1},
         },
     }
 
@@ -49,3 +48,39 @@ def test_lifecycle_reserve_preserves_decision_id(monkeypatch):
     assert handle.business_subject_ref == "cust-9"
     assert handle.feature_id == "assist"
     assert handle.workflow_id == "wf-9"
+
+
+def test_lifecycle_reserve_falls_back_to_request_attribution(monkeypatch):
+    """A response missing echoed attribution must not erase caller context."""
+    monkeypatch.setenv("KAZENAI_FINOPS_URL", "http://finops.test")
+    monkeypatch.setenv("KAZENAI_FINOPS_CONTROL_PROFILE", "control")
+    monkeypatch.setenv("KAZENAI_FINOPS_API_KEY", "k")
+
+    payload = {
+        "reservation_id": "rsv_2",
+        "reserved_usd_micros": 10_000,
+        "decision_receipt": {"decision_id": "dec_fallback"},
+    }
+
+    class _Resp:
+        def read(self):
+            return json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    with patch("kazenai.spine.guard.urllib.request.urlopen", return_value=_Resp()):
+        handle = reserve_budget(
+            org_id="o",
+            workspace_id="w",
+            run_id="r",
+            business_subject_ref="cust-request",
+            feature_id="feature-request",
+            workflow_id="workflow-request",
+        )
+    assert handle.business_subject_ref == "cust-request"
+    assert handle.feature_id == "feature-request"
+    assert handle.workflow_id == "workflow-request"

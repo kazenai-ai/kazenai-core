@@ -571,10 +571,21 @@ def _reserve_lifecycle(
             receipt = payload.get("decision_receipt") if isinstance(payload.get("decision_receipt"), dict) else {}
             if not decision_id and receipt:
                 decision_id = str(receipt.get("decision_id") or "")
-            attr = {}
-            if isinstance(receipt.get("attribution"), dict):
-                attr = receipt["attribution"]
-            economics = attr.get("economics") if isinstance(attr.get("economics"), dict) else {}
+            # decision.receipt.v1 carries canonical attribution at the top level.
+            # Keep the nested lookup only as a compatibility read for receipts
+            # emitted before FINAL_1_b; never prefer it over the canonical shape.
+            economics = (
+                receipt.get("economics")
+                if isinstance(receipt.get("economics"), dict)
+                else {}
+            )
+            if not economics and isinstance(receipt.get("attribution"), dict):
+                legacy = receipt["attribution"]
+                economics = (
+                    legacy.get("economics")
+                    if isinstance(legacy.get("economics"), dict)
+                    else {}
+                )
             return ReservationHandle(
                 reserved_cost_usd=_micros_to_usd(reserved_micros),
                 reservation_id=str(payload.get("reservation_id") or ""),
@@ -587,13 +598,21 @@ def _reserve_lifecycle(
                 business_subject_ref=str(
                     payload.get("business_subject_ref")
                     or economics.get("business_subject_ref")
+                    or business_subject_ref
                     or ""
                 ),
                 feature_id=str(
-                    payload.get("feature_id") or economics.get("feature_id") or ""
+                    payload.get("feature_id")
+                    or economics.get("feature_id")
+                    or feature_id
+                    or feature
+                    or ""
                 ),
                 workflow_id=str(
-                    payload.get("workflow_id") or economics.get("workflow_id") or ""
+                    payload.get("workflow_id")
+                    or economics.get("workflow_id")
+                    or workflow_id
+                    or ""
                 ),
             )
     except urllib.error.HTTPError as exc:
