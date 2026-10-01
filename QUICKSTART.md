@@ -1,139 +1,167 @@
-# kazenai — runtime spend, policy & audit enforcement for AI agents
+# KazenAI Core quick start
 
-Drop it in front of any model or framework. It hard-caps spend **before** the call,
-kills runaway loops, and writes a policy-linked audit trail you can sell on later.
-
-Provider-agnostic (OpenAI, Anthropic, Bedrock, anything callable). Works fully
-in-process — no backend required to start enforcing.
-
----
-
-## Install
+`kazenai` is the Python runtime used by KazenAI to enforce local and shared
+spending policies around supported synchronous OpenAI and Anthropic calls. Most
+product integrations should install the customer-facing package, which
+re-exports the Core API:
 
 ```bash
-pip install kazenai
-# workspace contributor editable install:
-#   pip install -e ./kazenai-core
+python -m pip install "kazenai-finops==1.1.0" openai
 ```
 
-Only dependency footprint is the event schema + httpx/pydantic — it does not pull
-in the rest of the KazenAI workspace.
+Install Core directly when you specifically want the runtime package:
 
----
-
-## The whole product surface (6 imports)
-
-```python
-from kazenai import (
-    monitor,            # zero-code drop-in: wrap a client, get enforcement + audit
-    guarded_llm_call,   # explicit guard for ANY provider / custom call
-    BudgetExceeded,     # raised when a hard cap is hit
-    KazenCircuitBreaker,# raised when the breaker opens (runaway / overspend)
-    StreamCutoffError,  # raised when a stream is cut mid-flight on budget
-    FinOpsConfig,       # optional: tune soft-pause %, loop threshold
-)
+```bash
+python -m pip install "kazenai==1.1.0" openai
 ```
 
-Everything else in the package is internal/advanced — ignore it.
+Python 3.10, 3.11 and 3.12 are supported.
 
----
-
-## Mode 1 — zero-code drop-in (in-process enforcement)
+## 1. Put a local hard cap around a client
 
 ```python
-import openai
-from kazenai import monitor, KazenCircuitBreaker
+from openai import OpenAI
+from kazenai import BudgetExceeded, monitor
 
 client = monitor(
-    openai.OpenAI(),
+    OpenAI(),
+    agent_id="support-agent",
     org_id="acme",
-    max_budget_usd=5.00,      # hard ceiling for this client/run
-    stream_enforcement=True,  # cut a stream mid-flight if it would blow the cap
-    timeline_path="audit.jsonl",  # tamper-evident local audit log
+    max_budget_usd=5.00,
 )
 
 try:
-    while True:  # a runaway agent loop
-        client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": "keep going..."}],
-        )
-except KazenCircuitBreaker as e:
-    print("stopped before the bill ran away:", e)
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Summarize this ticket"}],
+    )
+except BudgetExceeded as exc:
+    print("The call was blocked before provider dispatch:", exc)
 ```
 
-No FinOps service needed. `monitor()` enforces the budget, opens a circuit breaker
-on runaway/overspend, runs loop-anomaly detection, and emits the `KazenEvent`
-stream locally (`audit.jsonl`). Anthropic clients are auto-detected.
+`max_budget_usd` is an in-process client/run limit. It is not an account-wide
+provider billing limit. For multiple workers or services sharing a budget, use
+the shared FinOps authority described below.
 
-## Mode 2 — hosted / atomic enforcement (multi-process, shared budgets)
-
-Point it at the FinOps service for atomic, cross-process reservation
-(run/day/month windows + per-run step caps, Redis-backed, fail-closed):
+## 2. Connect a shared FinOps authority
 
 ```bash
-export KAZENAI_FINOPS_INGEST_URL="https://finops.yourco.com"
-export KAZENAI_FINOPS_API_KEY="sk-..."
+export KAZENAI_FINOPS_URL="https://finops.example.com"
+export KAZENAI_FINOPS_API_KEY="kz_..."
+export KAZENAI_DEPLOYMENT_MODE="production"
 ```
 
-Same `monitor(...)` call — it now reserves against the shared budget before every
-call and reconciles actuals after. In production deployment modes this is
-fail-closed: if the budget service is unreachable, the call is denied, not waved through.
+The same `monitor(...)` call now reserves the estimated cost before dispatch
+and reconciles authoritative usage afterward. Production and staging modes fail
+closed when a required shared reservation cannot be obtained. Explicit
+development fail-open behavior retains only the local client safeguards; it
+does not preserve the shared budget guarantee.
 
-## Mode 3 — explicit guard (any provider / custom function)
+## 3. Stream with finalization-safe accounting
+
+OpenAI `create(stream=True)` is supported:
+
+```python
+from openai import OpenAI
+from kazenai import StreamCutoffError, monitor
+
+client = monitor(
+    OpenAI(),
+    max_budget_usd=1.00,
+    stream_cutoff_usd=0.05,  # optional observable-output guard
+)
+
+try:
+    with client.chat.completions.create(
+        model="gpt-4o-mini",
+        stream=True,
+        messages=[{"role": "user", "content": "Explain the result"}],
+    ) as stream:
+        for chunk in stream:
+            print(chunk)
+except StreamCutoffError:
+    # KazenAI attempted to close future output. Provider billing can remain
+    # pending when authoritative terminal usage was not received.
+    pass
+```
+
+The official lazy OpenAI helper is also supported. Provider dispatch and the
+shared reservation's `provider_started` transition occur when the context
+manager is entered, not when it is constructed:
+
+```python
+with client.chat.completions.stream(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Explain the result"}],
+) as stream:
+    for event in stream:
+        print(event)
+```
+
+Anthropic's synchronous manager follows the same accounting lifecycle:
+
+```python
+from anthropic import Anthropic
+from kazenai import monitor
+
+client = monitor(Anthropic(), max_budget_usd=1.00)
+
+with client.messages.stream(
+    model="claude-sonnet-4-5",
+    max_tokens=256,
+    messages=[{"role": "user", "content": "Explain the result"}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="")
+```
+
+For a streamed call, KazenAI records a reservation, marks it
+`provider_started` at dispatch, and settles it when authoritative terminal usage
+arrives. Cancellation, provider failure, or missing final usage produces an
+`outcome_unknown`/pending-reconciliation state. It is never treated as an exact
+zero-cost call and never released as though dispatch did not happen.
+
+`stream_cutoff_usd` estimates only output visible to the client. It cannot see
+hidden reasoning or guarantee that the provider immediately stopped generating
+or billing. `stream_enforcement=True` is deprecated; configure
+`stream_cutoff_usd` explicitly if you accept that limitation.
+
+## 4. Guard a custom synchronous call explicitly
 
 ```python
 from kazenai import guarded_llm_call
 
-resp = guarded_llm_call(
+response = guarded_llm_call(
     lambda: my_provider.generate(prompt),
-    model="claude-opus-4-8",
+    model="my-priced-model",
     org_id="acme",
     run_id="run-123",
-    projected_cost_usd=0.02,   # pre-call reservation amount
+    projected_cost_usd=0.02,
     feature="summarizer",
 )
 ```
 
-Reserve → call → reconcile actual cost → emit `model.call` + budget events.
-`aguarded_llm_call` is the async variant.
+This explicit guard can reserve around a custom callable, but it does not make
+arbitrary provider response parsing a certified integration. The caller remains
+responsible for passing valid price and usage information.
 
----
+## Supported boundary in 1.1.0
 
-## The audit trail (this is the asset, not just a log)
-
-Every call emits structured `KazenEvent`s:
-
-| event_type | when |
+| Path | Status |
 |---|---|
-| `finops.budget.reserve` | pre-call reservation granted |
-| `finops.budget.denied` | reservation refused (cap/step limit) |
-| `model.call` | call completed, with `tokens_used`, `cost_usd`, `latency_ms` |
-| `finops.circuit_breaker.opened` | runaway/overspend tripped the breaker |
-| `finops.loop.anomaly` | repeated near-identical calls detected |
+| Sync OpenAI `chat.completions.create` | Supported, non-streaming and `stream=True` |
+| Sync OpenAI `chat.completions.stream` | Supported |
+| Sync Anthropic `messages.create` | Supported, non-streaming and `stream=True` |
+| Sync Anthropic `messages.stream` | Supported |
+| Async provider clients | Not supported |
+| OpenAI Responses streaming | Not supported |
+| OpenAI Realtime/WebSocket | Not supported |
+| Bedrock/Vertex Anthropic wrappers | Not supported |
+| Framework helpers | Evaluation surface; wrap the underlying supported client |
 
-Sinks: in-memory (always), `timeline_path` JSONL (local audit), and HTTP to the
-FinOps service when configured. This per-org event stream is the compounding,
-hard-to-copy data layer — keep it from day one.
+## Next references
 
----
-
-## Environment variables
-
-| Var | Purpose |
-|---|---|
-| `KAZENAI_FINOPS_INGEST_URL` | hosted FinOps base URL (enables atomic reserve) |
-| `KAZENAI_FINOPS_API_KEY` | auth for the FinOps service |
-| `KAZENAI_TIMELINE_PATH` | path for the local JSONL audit timeline |
-| `KAZENAI_FINOPS_RESERVE_TIMEOUT_S` | reserve call timeout (default 0.8s) |
-| `KAZENAI_DEPLOYMENT_MODE` | `production`/`staging` → enforcement fail-closed |
-
----
-
-## Before you demo this to anyone
-
-This is a **cost** product. The number has to be right. There is a known
-mispricing in the usage→cost matching path (the per-1k rate table itself is
-correct; the bug is in model-name resolution / `from_usage`). Fix and add a
-regression test pinning real provider invoices before the first design-partner
-call — a wrong number is the one thing that kills a FinOps tool on contact.
+- [README.md](README.md) — capability overview and configuration
+- [DEPLOY.md](DEPLOY.md) — application deployment guidance
+- [RELEASING.md](RELEASING.md) — maintainer release procedure
+- [docs.kazenai.com](https://docs.kazenai.com/) — product documentation

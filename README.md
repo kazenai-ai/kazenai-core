@@ -141,13 +141,30 @@ reconciliation—never an exact zero and never released as an unstarted call.
 hidden reasoning or guarantee that the provider stopped generating or billing
 immediately. `stream_enforcement=True` is deprecated.
 
+The official lazy OpenAI helper is supported as well. Its reservation is marked
+`provider_started` when the context manager is entered:
+
+```python
+with client.chat.completions.stream(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Explain this result"}],
+) as stream:
+    for event in stream:
+        ...
+```
+
 ---
 
-## Why local enforcement matters
+## Local and shared enforcement
 
 - **Hard cap works without FinOps network** — deny even when ingest is offline
 - **Low overhead** — budget and loop checks stay on the hot path
-- **Backend outage ≠ unprotected spend** on the local hard-cap path
+- **Shared policies can fail closed** — production/staging modes deny when a
+  required shared reservation cannot be obtained
+
+An explicitly configured development fail-open path retains only the local
+client safeguards. It does not preserve a cross-process or account-wide budget
+guarantee.
 
 ---
 
@@ -155,10 +172,15 @@ immediately. `stream_enforcement=True` is deprecated.
 
 | Variable | Purpose |
 |----------|---------|
-| `KAZENAI_FINOPS_INGEST_URL` / `KAZENAI_FINOPS_URL` | Base URL for event ingest |
-| `KAZENAI_FINOPS_API_KEY` | API key for `POST /v1/events` |
-| `KAZENAI_BUDGET_USD` | Soft per-run budget for the circuit breaker |
-| `KAZENAI_ORG_ID` / `KAZENAI_PROJECT_ID` | Tenant labels on events |
+| `KAZENAI_FINOPS_INGEST_URL` / `KAZENAI_FINOPS_URL` | FinOps base URL for shared reservations and event ingest |
+| `KAZENAI_FINOPS_API_KEY` | Credential for FinOps budget and event requests |
+| `KAZENAI_DEPLOYMENT_MODE` | `production` / `staging` require fail-closed shared reservations |
+| `KAZENAI_FINOPS_RESERVE_TIMEOUT_S` | Timeout for a shared pre-call reservation |
+| `KAZENAI_TIMELINE_PATH` | Optional local JSONL evidence path |
+
+Pass `max_budget_usd`, `org_id`, `project_id`, `workspace_id` and attribution
+fields directly to `monitor()`; they are not inferred from similarly named
+environment variables.
 
 ---
 
@@ -175,6 +197,9 @@ immediately. `stream_enforcement=True` is deprecated.
 ## Contributing
 
 Issues and PRs that improve budget/loop reliability are welcome. Keep claims aligned with the supported paths above.
+
+Maintainers: follow [RELEASING.md](RELEASING.md) for the clean-checkout and
+public-PyPI verification sequence.
 
 Products and design-partner enquiries: [kazenai.com](https://kazenai.com) · **founder@kazenai.com**
 

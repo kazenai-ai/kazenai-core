@@ -1,46 +1,89 @@
-# kazenai-core — Deploy
+# Deploying KazenAI Core
 
-Python SDK for agent monitoring, FinOps budget enforcement, and event ingest. Published to PyPI as `kazenai`; not a standalone HTTP service.
+`kazenai` is a Python SDK embedded in an application process. This repository
+does not publish or run a standalone Core HTTP service. The optional shared
+budget authority and event ingest endpoint are supplied by Agent FinOps.
 
-## Prerequisites
+## Supported runtime
 
-- Python 3.10+
-- Optional: FinOps ingest endpoint for cloud telemetry
+- Python 3.10, 3.11 or 3.12
+- Synchronous OpenAI Chat Completions clients
+- Synchronous Anthropic Messages clients
 
-## Build / test
+See [QUICKSTART.md](QUICKSTART.md) for the exact supported call paths and known
+streaming limits.
+
+## Verify a source checkout
+
+Use a fresh virtual environment and install the development extras:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+ruff check kazenai tests
+mypy kazenai
 pytest --cov=kazenai --cov-fail-under=80
-python -m build   # wheel + sdist (requires build package)
 ```
 
-## Docker
+CI must pass on Python 3.10, 3.11 and 3.12 before a release. Maintainers should
+follow [RELEASING.md](RELEASING.md) rather than publishing artifacts made from a
+working tree.
 
-No first-party runtime image. Embed in your agent container:
+## Build an application image
+
+Pin the released version in the application that embeds the SDK:
 
 ```dockerfile
-RUN pip install kazenai
-ENV KAZENAI_FINOPS_INGEST_URL=https://finops.example.com
-ENV KAZENAI_FINOPS_API_KEY=kz_...
+FROM python:3.12-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN python -m pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+CMD ["python", "-m", "your_application"]
 ```
 
-## Required environment (runtime)
+```text
+# requirements.txt
+kazenai==1.1.0
+openai>=1
+```
+
+Most customer integrations should pin `kazenai-finops==1.1.0` instead; that
+package installs a compatible Core version transitively.
+
+## Runtime configuration
+
+Secrets belong in the deployment platform's secret manager, not in the image or
+repository.
 
 | Variable | Purpose |
-|----------|---------|
-| `KAZENAI_FINOPS_INGEST_URL` | FinOps base URL for event batch ingest |
-| `KAZENAI_FINOPS_API_KEY` | API key for `POST /v1/events` |
-| `KAZENAI_BUDGET_USD` | Per-run soft budget / circuit breaker |
-| `KAZENAI_ORG_ID` / `KAZENAI_PROJECT_ID` | Tenant labels on events |
+|---|---|
+| `KAZENAI_FINOPS_URL` / `KAZENAI_FINOPS_INGEST_URL` | Shared FinOps authority and event-ingest base URL |
+| `KAZENAI_FINOPS_API_KEY` | Credential used for FinOps requests |
+| `KAZENAI_DEPLOYMENT_MODE` | Use `production` or `staging` to require fail-closed shared reservations |
+| `KAZENAI_FINOPS_RESERVE_TIMEOUT_S` | Timeout for a shared pre-call reservation |
+| `KAZENAI_TIMELINE_PATH` | Optional local JSONL evidence path |
 
-## Health / verification
+The local `max_budget_usd` passed to `monitor()` remains an in-process guard. A
+shared cross-process guarantee requires the FinOps authority to be configured
+and successfully reserving calls. Pass tenant and attribution values directly
+to `monitor()` rather than relying on application-specific environment names.
 
-SDK has no HTTP health endpoint. Verify FinOps connectivity:
+## Deployment smoke test
 
-```bash
-curl -sf "${KAZENAI_FINOPS_INGEST_URL}/health"
-```
+Core has no HTTP health endpoint. Exercise the same provider path that the
+application will use and verify all of the following in a non-production
+tenant:
 
-Or run the package smoke test: `pytest tests/ -q`.
+1. A permitted request completes and records exactly one accounting lifecycle.
+2. A request above the configured budget is denied before provider dispatch.
+3. A completed stream settles authoritative usage once.
+4. A cancelled or failed stream remains pending/outcome-unknown rather than
+   settling to zero.
+5. In production mode, an unavailable required FinOps authority denies the call.
+
+Keep provider keys and FinOps credentials out of captured test output.
