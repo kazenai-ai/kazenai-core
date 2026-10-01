@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kazenai"  # Matches your README installation instructions
-version = "1.0.5"
+version = "1.0.6"
 description = "KazenAI core SDK: monitor() budget and loop enforcement for OpenAI/Anthropic (Control-certified sync path)"
 readme = "README.md"
 requires-python = ">=3.10" # v4 TDD specifies 3.10+ for modern Typing/ContextVars
@@ -13,7 +13,7 @@ authors = [{ name = "KazenAI", email = "hello@kazenai.com" }]
 keywords = ["llm", "agents", "observability", "finops", "langchain"]
 
 dependencies = [
-  "kazen-event-schema>=0.6.2,<0.7",
+  "kazen-event-schema>=0.6.3,<0.7",
   "httpx>=0.25",
   "pydantic>=2.6.0",
   "structlog>=24.1.0",
