@@ -136,7 +136,6 @@ def test_p41_required_unsupported_exclusions_present():
     by_id = {c["id"]: c for c in data["cells"]}
     required_unsupported = [
         "mode.async_clients",
-        "mode.streaming.control",
         "provider.openai.responses",
         "capability.generic_replay",
         "capability.drift_calibration",
@@ -153,6 +152,11 @@ def test_p41_required_unsupported_exclusions_present():
     for cid in required_unsupported:
         assert cid in by_id, f"missing exclusion cell {cid}"
         assert by_id[cid]["status"] == "unsupported", cid
+
+    # Train B: Control streaming is certified (sync OpenAI + Anthropic surfaces).
+    assert by_id["mode.streaming.control"]["status"] in ADVERTISED
+    assert by_id["provider.openai.chat_completions.sync.stream"]["status"] in ADVERTISED
+    assert by_id["provider.anthropic.messages.sync.stream"]["status"] in ADVERTISED
 
 
 def test_p41_langgraph_not_advertised_as_verified():

@@ -8,6 +8,7 @@ from .guard import (
     ReservationHandle,
     reserve_budget,
     reserve_budget_async,
+    signal_reservation_event,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "ReservationHandle",
     "reserve_budget",
     "reserve_budget_async",
+    "signal_reservation_event",
 ]

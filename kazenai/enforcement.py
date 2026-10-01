@@ -158,6 +158,25 @@ class Enforcement:
             used = self._cumulative_cost_usd + self._pending_projected_usd
             return max(0.0, self._max_cost_usd - used)
 
+    def release_projection(self, projected_cost_usd: float) -> None:
+        """Release a pre-call hold when dispatch never became a provider attempt.
+
+        Unlike :meth:`record_call`, this does not increment the rate-limit call
+        counter.  It is used when shared admission denies/unavailable or request
+        preparation fails after the local hold was acquired.
+        """
+        try:
+            released = float(projected_cost_usd or 0.0)
+            if released <= 0:
+                return
+            with self._lock:
+                self._pending_projected_usd = max(
+                    0.0,
+                    self._pending_projected_usd - released,
+                )
+        except Exception:
+            self._log.exception("kazenai.enforcement.release_projection_failed")
+
     def record_call(
         self,
         *,

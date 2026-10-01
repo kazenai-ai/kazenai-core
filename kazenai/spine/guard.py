@@ -11,9 +11,9 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, TypeVar, Union
 
-from ..context import RunContext, get_current_context
+from ..context import get_current_context
 from ..cost_engine import TokenCostEngine
 from ..deployment import enforcement_fail_closed, finops_reservation_fail_closed
 from ..enforcement import BudgetExceeded, BudgetUnavailable
@@ -770,6 +770,90 @@ def reconcile_budget(
             pass
 
     threading.Thread(target=_do, daemon=True).start()
+
+
+def signal_reservation_event(
+    *,
+    org_id: str,
+    run_id: str,
+    reserved_cost_usd: float | ReservationHandle,
+    event: str,
+    actual_cost_usd: float | None = None,
+    required: bool = False,
+) -> bool:
+    """Synchronously advance one lifecycle reservation.
+
+    Streaming calls use this at the provider-dispatch boundary so an abandoned
+    or failed stream cannot later expire as though the provider was never
+    called.  Legacy float reservations have no lifecycle to advance and are a
+    successful no-op.
+    """
+    if not isinstance(reserved_cost_usd, ReservationHandle):
+        return True
+    handle = reserved_cost_usd
+    if not (handle.lifecycle and handle.reservation_id):
+        return True
+
+    allowed_events = {
+        "provider_started": "started",
+        "usage_known": "usage",
+        "outcome_unknown": "unknown",
+        "cancel_before_call": "cancelled",
+    }
+    if event not in allowed_events:
+        raise ValueError(f"unsupported reservation lifecycle event: {event}")
+    if event == "usage_known" and actual_cost_usd is None:
+        raise ValueError("actual_cost_usd is required for usage_known")
+
+    base = _finops_url()
+    if not base:
+        if required:
+            raise BudgetUnavailable("FinOps URL not configured for reservation lifecycle")
+        return False
+
+    payload: dict[str, Any] = {
+        "lifecycle_version": "reservation.lifecycle.v1",
+        "reservation_id": handle.reservation_id,
+        "call_id": handle.call_id or f"call_{run_id}",
+        "attempt": int(handle.attempt or 1),
+        "idempotency_key": (
+            f"settle:{handle.reservation_id}:{allowed_events[event]}"
+        ),
+        "event": event,
+        "org_id": org_id,
+    }
+    if event == "usage_known":
+        payload["actual_usd_micros"] = _usd_to_micros_ceil(
+            float(actual_cost_usd or 0.0)
+        )
+
+    req = urllib.request.Request(
+        f"{base}/v1/budget/settle",
+        data=json.dumps(payload).encode("utf-8"),
+        headers=_finops_headers(org_id),
+        method="POST",
+    )
+    try:
+        timeout_s = float(
+            os.getenv("KAZENAI_FINOPS_RESERVE_TIMEOUT_S", "0.8") or "0.8"
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s):
+            pass
+        return True
+    except urllib.error.HTTPError as exc:
+        if required:
+            raise BudgetUnavailable(
+                f"reservation lifecycle {event} failed with HTTP {exc.code}"
+            ) from exc
+        _log.debug("reservation lifecycle %s failed", event, exc_info=True)
+        return False
+    except Exception as exc:
+        if required:
+            raise BudgetUnavailable(
+                f"reservation lifecycle {event} unavailable"
+            ) from exc
+        _log.debug("reservation lifecycle %s failed", event, exc_info=True)
+        return False
 
 
 def _resolve_context(

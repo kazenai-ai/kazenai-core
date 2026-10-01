@@ -1,4 +1,4 @@
-__version__ = "1.0.6"
+__version__ = "1.1.0"
 
 # Prefer the installed distribution version. Fallback is only for editable /
 # source checkouts where package metadata is unavailable.
@@ -7,7 +7,7 @@ try:
 
     __version__ = _pkg_version("kazenai")
 except PackageNotFoundError:  # pragma: no cover - source-tree only
-    __version__ = "1.0.6"
+    __version__ = "1.1.0"
 
 from .context import BackgroundTaskContext, RunContext, get_current_context, use_context
 from .attribution import (
@@ -44,7 +44,7 @@ from .loop_detector import LoopDetector
 #     use `importlib.import_module("kazenai.monitor")` to get the module.
 from .monitor import monitor, patch_anthropic, patch_openai
 from .capture_policy import CaptureMode, inputs_absent, redact_secrets, resolve_capture_mode
-from .cost_engine import TokenCostEngine
+from .cost_engine import TokenCostEngine, UnknownModelError
 from .trajectory import CostTrajectoryPredictor
 from .circuit_breaker import CircuitBreaker, KazenCircuitBreaker, StateSerializer
 from .sinks import EventSink, HttpSink, HttpSinkConfig, JsonlSink, MemorySink, MultiSink
@@ -107,6 +107,7 @@ __all__ = [
     "LoopDetected",
     "LoopDetector",
     "TokenCostEngine",
+    "UnknownModelError",
     "RateLimitExceeded",
     "StreamCutoffError",
     "UnsupportedModeError",

@@ -98,10 +98,48 @@ Illustrative debug output — not a customer bill or savings claim.
 
 | Path | Status |
 |------|--------|
-| Sync OpenAI `chat.completions.create` (non-streaming) | Supported via `monitor()` |
-| Sync Anthropic `messages.create` (non-streaming) | Supported via `monitor()` |
-| Streaming / Responses API / async clients | Not on the supported control path |
+| Sync OpenAI `chat.completions.create` (non-streaming and `stream=True`) / `chat.completions.stream` | Supported via `monitor()` |
+| Sync Anthropic `messages.create` / `messages.stream` | Supported via `monitor()` |
+| OpenAI Responses API / async clients / Realtime | Not on the supported control path |
 | LangChain / CrewAI / LangGraph / AutoGen helpers | Available for evaluation — wrap the underlying client with `monitor()` for the supported path |
+
+### Streaming
+
+```python
+from kazenai import StreamCutoffError, monitor
+from openai import OpenAI
+
+client = monitor(
+    OpenAI(),
+    max_budget_usd=1.00,
+    stream_cutoff_usd=0.01,  # optional local observable-output guard
+)
+
+try:
+    with client.chat.completions.create(
+        model="gpt-4o-mini",
+        stream=True,
+        messages=[{"role": "user", "content": "Explain this result"}],
+    ) as stream:
+        for chunk in stream:
+            ...
+except StreamCutoffError:
+    # The client attempted to close future output. Final provider billing may
+    # remain pending when authoritative final usage was not received.
+    pass
+```
+
+`monitor()` requests final OpenAI usage and settles exact cost when authoritative
+usage arrives. OpenAI `chat.completions.stream(...)`, Anthropic
+`messages.create(..., stream=True)`, and the
+`messages.stream(...)` context manager follow the same finalize-once accounting
+lifecycle. A shared reservation is marked in-flight at provider dispatch. Early
+cancellation, provider failure, or missing final usage moves it to pending
+reconciliation—never an exact zero and never released as an unstarted call.
+
+`stream_cutoff_usd` estimates only output observable by the client. It cannot see
+hidden reasoning or guarantee that the provider stopped generating or billing
+immediately. `stream_enforcement=True` is deprecated.
 
 ---
 

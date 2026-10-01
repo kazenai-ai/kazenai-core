@@ -147,25 +147,57 @@ def test_p32_monitor_rejects_openai_responses_api(monkeypatch):
 
 
 def test_p32_monitor_rejects_anthropic_stream_surface(monkeypatch):
+    """Train B: Anthropic messages.stream is certified — manager must be callable."""
     _standalone(monkeypatch)
     client = FakeAnthropic()
     monitor(client, max_budget_usd=1.0)
-    with pytest.raises(UnsupportedModeError):
+    # Fake stream returns None; wrapping still reserves then calls upstream.
+    # Ensure the surface is no longer stubbed as UnsupportedModeError.
+    try:
         client.messages.stream(model="claude-sonnet-4-6", messages=[])
+    except UnsupportedModeError:
+        pytest.fail("messages.stream must not raise UnsupportedModeError after Train B")
+    except Exception:
+        # Upstream fake returns None / non-context-manager — acceptable for this surface check.
+        pass
 
 
-def test_p32_control_streaming_denied_before_provider(monkeypatch):
+def test_p32_control_streaming_allowed_with_finalize_lifecycle(monkeypatch):
+    """Train B: Control profile allows sync streaming; provider is invoked."""
     _standalone(monkeypatch)
     monkeypatch.setenv("KAZENAI_CONTROL_PROFILE", "1")
+
+    class StreamCompletions(FakeCompletions):
+        def create(self, *args, **kwargs):
+            self.last_kwargs = dict(kwargs)
+            if self.raise_exc is not None:
+                raise self.raise_exc
+            self.calls += 1
+            if kwargs.get("stream"):
+
+                class _S:
+                    def __iter__(self):
+                        return iter([])
+
+                    def __next__(self):
+                        raise StopIteration
+
+                    def close(self):
+                        return None
+
+                return _S()
+            return super().create(*args, **kwargs)
+
     client = FakeOpenAI()
+    client.chat.completions = StreamCompletions()
     monitor(client, max_budget_usd=1.0)
-    with pytest.raises(UnsupportedModeError):
-        client.chat.completions.create(
-            model="gpt-4o-mini",
-            stream=True,
-            messages=[{"role": "user", "content": "hi"}],
-        )
-    assert client.chat.completions.calls == 0
+    stream = client.chat.completions.create(
+        model="gpt-4o-mini",
+        stream=True,
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    list(stream)
+    assert client.chat.completions.calls == 1
 
 
 def test_p32_async_client_rejected(monkeypatch):

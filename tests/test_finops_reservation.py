@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import json
-import threading
 import time
 import unittest
 import urllib.error
 import urllib.request
 from io import BytesIO
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from kazenai.enforcement import BudgetExceeded, BudgetUnavailable
 from kazenai.monitor import _try_reconcile_budget, _try_reserve_budget
+from kazenai.spine.guard import ReservationHandle, signal_reservation_event
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +193,56 @@ class TestReconcileFiresAfterCall(unittest.TestCase):
         payload = reconcile_calls[0]
         self.assertEqual(payload["org_id"], "test-org")
         self.assertAlmostEqual(payload["actual_cost_usd"], 0.004, places=5)
+
+    def test_stream_lifecycle_events_use_idempotent_settle_contract(self):
+        requests: list[dict] = []
+        mock_resp = _make_http_response(200, {"status": "ok"})
+
+        def fake_urlopen(req, timeout=None):
+            requests.append(json.loads(req.data.decode("utf-8")))
+            return mock_resp
+
+        handle = ReservationHandle(
+            reserved_cost_usd=0.5,
+            reservation_id="res_stream_contract",
+            call_id="call_stream_contract",
+            attempt=2,
+            lifecycle=True,
+        )
+        with patch.dict(
+            "os.environ", {"KAZENAI_FINOPS_URL": "http://localhost:8090"}, clear=True
+        ):
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                self.assertTrue(
+                    signal_reservation_event(
+                        org_id="test-org",
+                        run_id="run-stream",
+                        reserved_cost_usd=handle,
+                        event="provider_started",
+                        required=True,
+                    )
+                )
+                self.assertTrue(
+                    signal_reservation_event(
+                        org_id="test-org",
+                        run_id="run-stream",
+                        reserved_cost_usd=handle,
+                        event="outcome_unknown",
+                    )
+                )
+
+        self.assertEqual(
+            [request["event"] for request in requests],
+            ["provider_started", "outcome_unknown"],
+        )
+        self.assertEqual(
+            [request["idempotency_key"] for request in requests],
+            [
+                "settle:res_stream_contract:started",
+                "settle:res_stream_contract:unknown",
+            ],
+        )
+        self.assertTrue(all(request["attempt"] == 2 for request in requests))
 
     def test_no_finops_url_skips_reserve(self):
         """No FinOps URL: dev/fail-open skips the reserve ($0, no HTTP); prod fails closed."""

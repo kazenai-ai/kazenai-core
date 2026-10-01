@@ -48,9 +48,20 @@ FINOPS_MODEL_PRICING: Dict[str, Tuple[float, float]] = {
 _DEFAULT_MAX_OUTPUT: Dict[str, int] = {
     "gpt-4o": 4096,
     "gpt-4o-mini": 16384,
+    "gpt-4-turbo": 4096,
+    "gpt-4": 4096,
+    "gpt-3.5-turbo": 4096,
+    "o1": 8192,
+    "o1-mini": 8192,
+    "o3-mini": 8192,
     "claude-sonnet-4-6": 8192,
+    "claude-sonnet-4-5": 8192,
     "claude-opus-4-7": 8192,
+    "claude-opus-4-8": 8192,
     "claude-haiku-4-5": 8192,
+    "claude-3-5-sonnet-20241022": 8192,
+    "claude-3-5-haiku-20241022": 8192,
+    "claude-3-haiku-20240307": 4096,
     "gemini-2.0-flash": 8192,
     "gemini-2.5-pro": 8192,
 }
@@ -125,7 +136,12 @@ def model_cost_usd_per_million(
 
 
 def default_max_output_tokens(model: str) -> Optional[int]:
-    key = resolve_model_pricing_key(model)
+    # Output limits cover a wider provider surface than the FinOps reporting
+    # table. Resolve against the limit keys themselves so a model priced by the
+    # Core cost engine (for example ``claude-opus-4-8``) cannot accidentally
+    # lose its pre-dispatch bound merely because another table lags behind.
+    limit_keys = {key: (0.0, 0.0) for key in _DEFAULT_MAX_OUTPUT}
+    key = resolve_model_pricing_key(model, pricing=limit_keys)
     if key and key in _DEFAULT_MAX_OUTPUT:
         return _DEFAULT_MAX_OUTPUT[key]
     return None

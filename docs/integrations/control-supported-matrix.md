@@ -2,17 +2,18 @@
 
 **Machine-readable source of truth:** [`control-supported-matrix.json`](./control-supported-matrix.json)
 
-This matrix records what Control FINAL_1 **actually certifies**. Fake/local
-transport proves integration only — not live-provider operation. Adding a
+This matrix records what Control FINAL_1 plus the Train B streaming release
+**actually certifies**. Official SDKs with hermetic mock transports prove the
+client integration only — not live-provider operation. Adding a
 capability requires deferred tests **before** raising its status above
 `implemented-unverified`.
 
-## Envelope (locked 2026-09-16)
+## Envelope (streaming extension verified 2026-10-02)
 
 | Dimension | Control FINAL_1 |
 |-----------|-----------------|
-| Adapter | Sync non-streaming **OpenAI Chat Completions** + **Anthropic Messages** via `kazenai.monitor` |
-| Package | `from kazenai import monitor` (distribution `kazenai` 1.0.1 local) |
+| Adapter | Sync **OpenAI Chat Completions** + **Anthropic Messages**, non-streaming and selected streaming surfaces, via `kazenai.monitor` |
+| Package | `from kazenai import monitor` (distribution `kazenai` 1.1.0 prepared) |
 | Demo | Fake provider + real local Control services |
 | Live provider | Separate USER-GO (`live-verified` not claimed) |
 | Topology | Additive Control compose; Brain / Builder / Copilot / Home **absent** |
@@ -34,7 +35,10 @@ capability requires deferred tests **before** raising its status above
 |----|--------|----------|
 | `sdk.kazenai.monitor` | fixture-verified | P3-1, P3-2 |
 | `provider.openai.chat_completions.sync` | fixture-verified | P3-2 |
+| `provider.openai.chat_completions.sync.stream` | fixture-verified | official OpenAI SDK + mock transport; `create(stream=True)` and `.stream()` helper |
 | `provider.anthropic.messages.sync` | fixture-verified | P3-2 |
+| `provider.anthropic.messages.sync.stream` | fixture-verified | official Anthropic SDK + mock transport |
+| `mode.streaming.control` | fixture-verified | Train B cleanup artifact `cleanup-train-b-streaming-verification-20261002T012400Z.json` |
 | `admission.pg_reserve_settle` | integration-verified | P2-2, P2-3, ADR-015 |
 | `admission.local_max_budget_usd` | fixture-verified | P3-1 / G06 |
 | `pricing.token_cost_engine` | fixture-verified | P3-1 |
@@ -59,7 +63,7 @@ notification, remote deployment, customer validation, causal improvement or ROI.
 
 | ID | Status | Why |
 |----|--------|-----|
-| OpenAI Responses / async / Control streaming | unsupported | Rejected on certified path (P3-2) |
+| OpenAI Responses / async / Realtime | unsupported | Rejected or outside the certified path |
 | LangChain / CrewAI / AutoGen | unsupported | Not Control-certified |
 | LangGraph example / adapter | implemented-unverified | P4-5 D1: fake-client offline only; ChatAnthropic unverified |
 | `example.control_loop_and_failure` | fixture-verified | P4-5 / D2–D7 fixture path |

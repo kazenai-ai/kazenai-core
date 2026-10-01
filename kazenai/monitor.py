@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 
 import asyncio
 import inspect
-import json
 import logging
 import os
 import threading
 import time
-import urllib.request
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 try:
@@ -30,6 +29,7 @@ from .loop_detector import LoopDetector, LoopScores
 from .finops import FinOpsConfig, FinOpsController
 from .schema import KazenEvent, new_id, now_ms
 from .sinks import EventSink, HttpSink, HttpSinkConfig, JsonlSink, MemorySink, MultiSink
+from .pricing_policy import UnknownModelError
 
 
 
@@ -58,13 +58,17 @@ _EXPECTED_FAIL_OPEN = (
 )
 
 
-def _control_profile_denies_streaming() -> bool:
-    """FINAL_1 Control: streaming ticks/extensions are unsupported at the caller boundary."""
+def _streaming_explicitly_denied() -> bool:
+    """Hard kill-switch only. Control-certified sync streaming is allowed by default (Train B)."""
+    val = os.getenv("KAZENAI_DENY_STREAMING", "").strip().lower()
+    return val in ("1", "true", "yes")
+
+
+def _control_profile_active() -> bool:
     for key in (
         "KAZENAI_CONTROL_PROFILE",
         "KAZENAI_FINOPS_CONTROL_PROFILE",
         "KAZENAI_PROFILE",
-        "KAZENAI_DENY_STREAMING",
     ):
         val = os.getenv(key, "").strip().lower()
         if val in ("1", "true", "yes", "control"):
@@ -72,20 +76,49 @@ def _control_profile_denies_streaming() -> bool:
     return False
 
 
+def _control_profile_denies_streaming() -> bool:
+    """Deprecated name: only the explicit deny switch blocks certified streaming now."""
+    return _streaming_explicitly_denied()
+
+
 def _reject_streaming_if_unsupported(kwargs: Mapping[str, Any]) -> None:
     if not kwargs.get("stream"):
         return
-    if _control_profile_denies_streaming():
+    if _streaming_explicitly_denied():
         raise UnsupportedModeError(
-            "Streaming is unsupported in the Control profile; use non-streaming Chat Completions / Messages",
+            "Streaming is disabled by KAZENAI_DENY_STREAMING",
             error_code="unsupported_mode",
         )
 
 
-
-# FINAL_1 P3-2: certified Control provider-client contract (sync non-streaming).
+# FINAL_1 / Train B: certified Control sync Chat Completions + Messages (stream + non-stream).
 SUPPORTED_OPENAI_METHOD = "openai.chat.completions.create"
 SUPPORTED_ANTHROPIC_METHOD = "anthropic.messages.create"
+SUPPORTED_OPENAI_STREAM_METHOD = "openai.chat.completions.create.stream"
+SUPPORTED_OPENAI_STREAM_MANAGER = "openai.chat.completions.stream"
+SUPPORTED_ANTHROPIC_STREAM_METHOD = "anthropic.messages.create.stream"
+SUPPORTED_ANTHROPIC_STREAM_MANAGER = "anthropic.messages.stream"
+
+_HELPER_INNER_CREATE_BYPASS: ContextVar[bool] = ContextVar(
+    "kazenai_helper_inner_create_bypass", default=False
+)
+
+
+@contextmanager
+def _helper_inner_create_bypass():
+    """Let an outer official SDK helper own the one Control lifecycle.
+
+    Both official ``.stream()`` managers dispatch through their provider's
+    ``create(stream=True)`` method during ``__enter__``.  The outer helper
+    wrapper already reserved and owns finalization, so the nested patched
+    create must call the original SDK method without creating a second hold,
+    reservation, or event.
+    """
+    token = _HELPER_INNER_CREATE_BYPASS.set(True)
+    try:
+        yield
+    finally:
+        _HELPER_INNER_CREATE_BYPASS.reset(token)
 
 
 def _reject_async_client(client: Any) -> None:
@@ -170,6 +203,84 @@ _COST_ENGINE: Any = None
 _PRECALL_MIN_TOKENS = 2000
 
 
+def _estimate_input_tokens(kwargs: Mapping[str, Any]) -> int:
+    """Return a conservative, content-free upper estimate for request input.
+
+    Provider tokenizers are intentionally not a Core dependency.  A byte-count
+    upper estimate avoids the unsafe ``len(text) // 4`` undercount for JSON,
+    tools and non-Latin text while keeping request content in memory only.
+    """
+
+    excluded = {
+        "model",
+        "stream",
+        "stream_options",
+        "max_tokens",
+        "max_completion_tokens",
+    }
+
+    def _size(value: Any, *, depth: int = 0) -> int:
+        if depth > 32:
+            return 64
+        if value is None:
+            return 0
+        if isinstance(value, bytes):
+            return len(value)
+        if isinstance(value, str):
+            return len(value.encode("utf-8", errors="replace"))
+        if isinstance(value, (bool, int, float)):
+            return len(str(value))
+        if isinstance(value, Mapping):
+            total = 2
+            for key, item in value.items():
+                total += _size(str(key), depth=depth + 1)
+                total += _size(item, depth=depth + 1)
+                total += 2
+            return total
+        if isinstance(value, (list, tuple, set)):
+            return 2 + sum(_size(item, depth=depth + 1) + 1 for item in value)
+        try:
+            return len(repr(value).encode("utf-8", errors="replace"))
+        except Exception:
+            return 64
+
+    request_body = {key: value for key, value in (kwargs or {}).items() if key not in excluded}
+    # Keep the historical floor for request framing/provider overhead.  Above
+    # that floor one UTF-8 byte is treated as at most one token.
+    return max(_PRECALL_MIN_TOKENS, _size(request_body) + 64)
+
+
+def _max_output_tokens(kwargs: Mapping[str, Any]) -> int:
+    for key in ("max_completion_tokens", "max_tokens"):
+        value = (kwargs or {}).get(key)
+        if value is None:
+            continue
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            break
+    try:
+        from .model_pricing import default_max_output_tokens
+
+        return int(default_max_output_tokens(str((kwargs or {}).get("model") or "")) or 0)
+    except Exception:
+        return 0
+
+
+def _stream_output_rate_usd_per_1k(model: str, explicit_rate: Optional[float]) -> float:
+    """Resolve the local observable-output cutoff rate from canonical pricing."""
+    if explicit_rate is not None and float(explicit_rate) > 0:
+        return float(explicit_rate)
+    if not model:
+        return 0.0
+    global _COST_ENGINE
+    if _COST_ENGINE is None:
+        from .cost_engine import TokenCostEngine
+
+        _COST_ENGINE = TokenCostEngine()
+    return float(_COST_ENGINE.price(model).output_per_1k)
+
+
 
 def _postcall_cost_usd(
     *,
@@ -215,7 +326,7 @@ def _postcall_cost_usd(
 
 
 def _precall_projection_usd(kwargs: Mapping[str, Any], usd_per_1k_tokens: Optional[float]) -> float:
-    """Conservative pre-call cost floor (USD), derived from the real per-model price table.
+    """Bounded pre-call exposure from estimated input plus enforced output cap.
 
     Passed as ``projected_cost_usd`` to ``Enforcement.check_local`` so a single expensive run
     at the budget edge is denied before execution. Falls back to ``usd_per_1k_tokens`` and
@@ -223,6 +334,8 @@ def _precall_projection_usd(kwargs: Mapping[str, Any], usd_per_1k_tokens: Option
     price-less callers are unaffected.
     """
     model = str((kwargs or {}).get("model") or "").strip()
+    input_tokens = _estimate_input_tokens(kwargs)
+    output_tokens = _max_output_tokens(kwargs)
     try:
         if model:
             global _COST_ENGINE
@@ -231,14 +344,20 @@ def _precall_projection_usd(kwargs: Mapping[str, Any], usd_per_1k_tokens: Option
 
                 _COST_ENGINE = TokenCostEngine()
             cost = _COST_ENGINE.cost_usd(
-                model=model, input_tokens=_PRECALL_MIN_TOKENS, output_tokens=_PRECALL_MIN_TOKENS
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
             if cost and cost > 0:
                 return float(cost)
-    except Exception as exc:  # pragma: no cover - pricing must never break the call path
+    except UnknownModelError:
+        # A configured block policy is part of the public financial-control
+        # contract, not an internal pricing failure that may fail open.
+        raise
+    except Exception as exc:  # pragma: no cover - unexpected pricing internals fail open
         _log_fail_open("precall_projection", exc)
     if usd_per_1k_tokens:
-        return float(usd_per_1k_tokens) * (_PRECALL_MIN_TOKENS / 1000.0)
+        return float(usd_per_1k_tokens) * ((input_tokens + output_tokens) / 1000.0)
     return 0.0
 
 
@@ -286,6 +405,8 @@ def _try_reserve_budget(
     operation_id: Optional[str] = None,
     attempt_id: Optional[str] = None,
     feature: Optional[str] = None,
+    model: str = "",
+    input_tokens: int = 0,
 ):
     """Pre-call reservation via canonical spine (raises on fail-closed deny).
 
@@ -301,6 +422,8 @@ def _try_reserve_budget(
             run_id=run_id,
             increment_step=False,
             call_id=call_id,
+            model=model,
+            input_tokens=input_tokens,
             estimated_cost_usd=estimated_cost_usd,
             business_subject_ref=business_subject_ref,
             feature_id=feature_id,
@@ -315,55 +438,20 @@ def _try_reserve_budget(
         raise
 
 
-def _try_stream_tick(
+def _reserve_with_local_hold(
     *,
-    org_id: str,
-    workspace_id: str,
-    run_id: str,
-    incremental_cost_usd: float,
-    model: str = "",
-) -> bool:
-    """Mid-stream budget tick; returns False when FinOps returns HTTP 402."""
-    finops_url = os.getenv("KAZENAI_FINOPS_URL", "").rstrip("/")
-    if not finops_url or incremental_cost_usd <= 0:
-        return True
-
-    api_key = os.getenv("KAZENAI_FINOPS_API_KEY", "")
-    body = json.dumps(
-        {
-            "org_id": org_id,
-            "workspace_id": workspace_id,
-            "run_id": run_id,
-            "incremental_cost_usd": incremental_cost_usd,
-            "model": model,
-        }
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        f"{finops_url}/v1/budget/stream-tick",
-        data=body,
-        headers={"Content-Type": "application/json", "X-API-Key": api_key},
-        method="POST",
-    )
+    enforcement: Enforcement,
+    projected_cost_usd: float,
+    reserve_kwargs: Mapping[str, Any],
+) -> Tuple[float, Any]:
+    """Acquire local + shared admission and unwind local state on denial."""
+    held_projection = enforcement.check_local(projected_cost_usd=projected_cost_usd)
     try:
-        timeout_s = float(os.getenv("KAZENAI_FINOPS_RESERVE_TIMEOUT_S", "0.8") or "0.8")
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            return resp.status < 400
-    except urllib.error.HTTPError as exc:
-        if exc.code == 402:
-            return False
-        from .deployment import finops_reservation_fail_closed
-
-        if finops_reservation_fail_closed():
-            raise StreamCutoffError(f"stream tick HTTP {exc.code}") from exc
-        return True
-    except StreamCutoffError:
+        reserved = _try_reserve_budget(**dict(reserve_kwargs))
+    except Exception:
+        enforcement.release_projection(held_projection)
         raise
-    except Exception as exc:
-        from .deployment import finops_reservation_fail_closed
-
-        if finops_reservation_fail_closed():
-            raise StreamCutoffError(f"stream tick unavailable: {exc}") from exc
-        return True
+    return held_projection, reserved
 
 
 def _try_reconcile_budget(
@@ -384,6 +472,89 @@ def _try_reconcile_budget(
         reserved_cost_usd=reserved_cost_usd,
         actual_cost_usd=actual_cost_usd,
     )
+
+
+def _try_start_stream_reservation(
+    *,
+    org_id: str,
+    workspace_id: str,
+    run_id: str,
+    reserved_cost_usd: Any,
+) -> bool:
+    """Mark a lifecycle reservation in-flight at the provider dispatch boundary."""
+    del workspace_id
+    from .deployment import finops_reservation_fail_closed
+    from .spine.guard import signal_reservation_event
+
+    return signal_reservation_event(
+        org_id=org_id,
+        run_id=run_id,
+        reserved_cost_usd=reserved_cost_usd,
+        event="provider_started",
+        required=finops_reservation_fail_closed(),
+    )
+
+
+def _try_settle_stream_budget(
+    *,
+    org_id: str,
+    workspace_id: str,
+    run_id: str,
+    reserved_cost_usd: Any,
+    actual_cost_usd: float,
+) -> bool:
+    """Settle exact terminal stream usage after provider_started was recorded."""
+    del workspace_id
+    from .spine.guard import signal_reservation_event
+
+    return signal_reservation_event(
+        org_id=org_id,
+        run_id=run_id,
+        reserved_cost_usd=reserved_cost_usd,
+        event="usage_known",
+        actual_cost_usd=actual_cost_usd,
+    )
+
+
+def _try_mark_stream_pending(
+    *,
+    org_id: str,
+    workspace_id: str,
+    run_id: str,
+    reserved_cost_usd: Any,
+) -> bool:
+    """Keep shared exposure pending when terminal provider usage is unknown."""
+    del workspace_id
+    from .spine.guard import signal_reservation_event
+
+    return signal_reservation_event(
+        org_id=org_id,
+        run_id=run_id,
+        reserved_cost_usd=reserved_cost_usd,
+        event="outcome_unknown",
+    )
+
+
+def _mark_stream_started_or_release(
+    *,
+    enforcement: Enforcement,
+    held_projection: float,
+    org_id: str,
+    workspace_id: str,
+    run_id: str,
+    reserved_cost_usd: Any,
+) -> None:
+    """Fail before provider dispatch if strict lifecycle state cannot be recorded."""
+    try:
+        _try_start_stream_reservation(
+            org_id=org_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved_cost_usd,
+        )
+    except Exception:
+        enforcement.release_projection(held_projection)
+        raise
 
 
 def _extract_openai_input(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any:
@@ -484,69 +655,191 @@ def _wrap_stream_iterator(
     model: str,
     stream_enforcement: bool,
     usd_per_1k_tokens: float,
+    stream_cutoff_usd: Optional[float] = None,
 ) -> Any:
-    """Wrap OpenAI-style stream chunks with mid-flight FinOps ticks."""
-    if not stream_enforcement:
+    """Legacy OpenAI-style wrapper.
+
+    Control-certified streaming uses ``kazenai.streaming`` (finalize-once lifecycle).
+    This helper remains for non-Control ``stream_enforcement`` compatibility tests and
+    maps to *local* cutoff only — it does **not** call ``/v1/budget/stream-tick``.
+    """
+    if not stream_enforcement and stream_cutoff_usd is None:
         return stream
 
-    usd_per_token = float(usd_per_1k_tokens) / 1000.0 if usd_per_1k_tokens else 0.000002
-    pending_tokens = 0
-    pending_usd = 0.0
+    from .streaming.lifecycle import StreamAttempt
+    from .streaming.openai import wrap_openai_stream
 
-    def _chunk_text(chunk: Any) -> str:
+    cutoff = stream_cutoff_usd
+    if cutoff is None and stream_enforcement and usd_per_1k_tokens:
+        # Legacy flag: approximate a local cutoff after modest estimated spend.
+        cutoff = max(0.01, float(usd_per_1k_tokens) * 0.05)
+
+    attempt = StreamAttempt(
+        surface=SUPPORTED_OPENAI_STREAM_METHOD,
+        step_ctx=step_ctx,
+        enforcement=Enforcement(),  # local-only; caller already reserved via main path when used there
+        held_projection=0.0,
+        reserved_cost_usd=None,
+        model=model or "",
+        method=SUPPORTED_OPENAI_STREAM_METHOD,
+        usd_per_1k_tokens=float(usd_per_1k_tokens or 0.0),
+        capture_mode=CaptureMode.METADATA,
+        agent_role="agent",
+        stream_cutoff_usd=cutoff,
+    )
+    return wrap_openai_stream(stream, attempt)
+
+
+def _emit_stream_model_call(
+    attempt: Any,
+    *,
+    settle_cost: float,
+    tokens_used: Optional[int],
+    error: Optional[BaseException],
+    org_id: str,
+    project_id: str,
+    workspace_id: str,
+    agent_id: str,
+    agent_role: str,
+    capture_mode: CaptureMode,
+    event_sink: Optional[EventSink],
+    finops: Optional[FinOpsController],
+    endpoint_url: Optional[str],
+    endpoint_headers: Optional[Mapping[str, str]],
+    log: Any,
+) -> None:
+    step_ctx = attempt.step_ctx
+    elapsed_ms = (time.perf_counter() - attempt.started_perf) * 1000.0
+    first_byte_ms = None
+    if attempt.first_byte_perf is not None:
+        first_byte_ms = (attempt.first_byte_perf - attempt.started_perf) * 1000.0
+    usage_dict = attempt.observed_usage.as_openai_style()
+    def _bounded_identifier(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        raw = str(value)[:128]
+        safe = "".join(ch for ch in raw if ch.isalnum() or ch in "-_.:/")
+        return safe or None
+
+    error_meta = None
+    if error is not None:
+        status = getattr(error, "status_code", None)
         try:
-            choices = getattr(chunk, "choices", None) or (chunk.get("choices") if isinstance(chunk, dict) else None)
-            if choices:
-                delta = getattr(choices[0], "delta", None) or (
-                    choices[0].get("delta") if isinstance(choices[0], dict) else None
-                )
-                if delta:
-                    content = getattr(delta, "content", None)
-                    if content is None and isinstance(delta, dict):
-                        content = delta.get("content")
-                    return str(content or "")
-        except Exception:
-            pass
-        return ""
+            status = int(status) if status is not None else None
+        except (TypeError, ValueError):
+            status = None
+        error_meta = {
+            "type": type(error).__name__,
+            "code": _bounded_identifier(
+                getattr(error, "error_code", None) or getattr(error, "code", None)
+            ),
+            "status_code": status,
+            "request_id": _bounded_identifier(getattr(error, "request_id", None)),
+        }
+        error_meta = {key: value for key, value in error_meta.items() if value is not None}
 
-    def _flush() -> None:
-        nonlocal pending_tokens, pending_usd
-        if pending_usd <= 0:
-            return
-        usd = pending_usd
-        tokens = pending_tokens
-        pending_usd = 0.0
-        pending_tokens = 0
-        allowed = _try_stream_tick(
-            org_id=step_ctx.org_id,
-            workspace_id=step_ctx.workspace_id,
+    try:
+        event = KazenEvent(
+            schema_version="1.2",
+            ts_ms=now_ms(),
+            event_id=new_id(),
+            org_id=org_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            surface="kazenai-core",
+            agent_id=agent_id,
+            agent_role=agent_role,
             run_id=step_ctx.run_id,
-            incremental_cost_usd=usd,
-            model=model or "",
+            root_run_id=step_ctx.run_id,
+            step_id=step_ctx.step_id,
+            parent_step_id=step_ctx.parent_step_id,
+            event_type="model.call",
+            tokens_used=tokens_used,
+            cost_usd=(
+                settle_cost
+                if str(attempt.cost_confidence).startswith("exact")
+                else None
+            ),
+            payload={
+                **_reservation_payload_fields(attempt.reserved_cost_usd),
+                "method": attempt.method,
+                "model": attempt.model,
+                "stream": True,
+                "stream_surface": attempt.surface,
+                "terminal_outcome": (
+                    attempt.terminal_outcome.value if attempt.terminal_outcome is not None else None
+                ),
+                "financial_pending": attempt.financial_pending,
+                "cost_confidence": attempt.cost_confidence,
+                "upstream_close_attempted": attempt.upstream_close_attempted,
+                "upstream_close_ok": attempt.upstream_close_ok,
+                "elapsed_ms": elapsed_ms,
+                "first_byte_ms": first_byte_ms,
+                "usage": usage_dict,
+                "pricing_version": attempt.pricing_version,
+                "capture": capture_disclosure(capture_mode),
+                "error": error_meta,
+            },
         )
-        if not allowed:
-            raise StreamCutoffError(
-                "stream cutoff: budget exceeded mid-flight",
-                blocked_usd=usd,
-                total_tokens=tokens,
-            )
+    except Exception:
+        log.exception("kazenai.stream_event_build_failed")
+        return
 
-    class _GuardedStream:
-        def __iter__(self) -> Any:
-            nonlocal pending_tokens, pending_usd
-            for chunk in stream:
-                text = _chunk_text(chunk)
-                if text:
-                    tokens = max(1, len(text) // 4)
-                    pending_tokens += tokens
-                    pending_usd += tokens * usd_per_token
-                    if pending_tokens >= 16:
-                        _flush()
-                yield chunk
-            if pending_usd > 0:
-                _flush()
+    if event_sink is not None:
+        try:
+            event_sink.emit(event)
+        except Exception as exc:
+            _log_fail_open("event_sink_emit", exc)
+    if finops is not None and not attempt.financial_pending:
+        try:
+            derived = finops.handle_llm_call(event)
+        except Exception as exc:
+            if isinstance(exc, _EXPECTED_FAIL_OPEN):
+                raise
+            _log_fail_open("finops_stream_handle", exc)
+        else:
+            for key, ev in derived.items():
+                if key.startswith("_"):
+                    continue
+                try:
+                    if event_sink is not None:
+                        event_sink.emit(ev)
+                except Exception as exc:
+                    _log_fail_open("event_sink_emit_derived", exc)
+            # This is a deliberate product-control decision, not a telemetry
+            # failure. Keep it outside the fail-open handler above.
+            FinOpsController.raise_if_blocked(derived)
+    if endpoint_url:
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None and not loop.is_closed():
+                loop.create_task(
+                    _post_event(
+                        endpoint_url=endpoint_url,
+                        event=event,
+                        headers=endpoint_headers,
+                    )
+                )
+            else:
+                def _post_in_thread() -> None:
+                    try:
+                        asyncio.run(
+                            _post_event(
+                                endpoint_url=endpoint_url,
+                                event=event,
+                                headers=endpoint_headers,
+                            )
+                        )
+                    except Exception as exc:
+                        _log_fail_open("stream_endpoint_emit", exc)
 
-    return _GuardedStream()
+                threading.Thread(target=_post_in_thread, daemon=True).start()
+        except Exception as exc:
+            _log_fail_open("stream_endpoint_dispatch", exc)
+    _log_event_safe(log, event)
 
 
 def patch_openai(
@@ -567,6 +860,7 @@ def patch_openai(
     event_sink: Optional[EventSink] = None,
     finops: Optional[FinOpsController] = None,
     stream_enforcement: bool = False,
+    stream_cutoff_usd: Optional[float] = None,
     certified_surface: bool = False,
     capture_mode: CaptureMode = CaptureMode.METADATA,
     business_subject_ref: Optional[str] = None,
@@ -617,6 +911,8 @@ def patch_openai(
 
     def _wrap(fn: Callable[..., Any], *, method: str) -> Callable[..., Any]:
         def wrapped(*args: Any, **kwargs: Any) -> Any:
+            if _HELPER_INNER_CREATE_BYPASS.get():
+                return fn(*args, **kwargs)
             ctx = get_current_context() or ctx0
             step_ctx = ctx.child_step()
             with ExitStack() as stack:
@@ -657,38 +953,129 @@ def patch_openai(
                 # FINAL_1 P3-2: enforceable output token bound before dispatch.
                 _apply_output_token_bound(kwargs)
 
-                # FINAL_1 P3-1: local cap first (fail closed), then shared FinOps reserve.
-                projected = _precall_projection_usd(kwargs, usd_per_1k_tokens)
-                held_projection = enforcement.check_local(projected_cost_usd=projected)
+                call_kwargs = dict(kwargs)
+                is_stream = bool(call_kwargs.get("stream"))
+                if is_stream:
+                    from .streaming.lifecycle import StreamAttempt, StreamOutcome
+                    from .streaming.openai import merge_stream_options, wrap_openai_stream
 
-                # Pre-call server-side budget reservation (fails open if service unavailable)
-                reserved_cost_usd = _try_reserve_budget(
-                    org_id=step_ctx.org_id,
-                    workspace_id=step_ctx.workspace_id,
-                    run_id=step_ctx.run_id,
-                    call_id=str(getattr(step_ctx, "step_id", None) or "") or None,
-                    estimated_cost_usd=projected,
-                    business_subject_ref=attr_defaults.get("business_subject_ref"),
-                    feature_id=attr_defaults.get("feature_id"),
-                    workflow_id=attr_defaults.get("workflow_id"),
-                    operation_id=attr_defaults.get("operation_id"),
-                    attempt_id=attr_defaults.get("attempt_id"),
-                )
-                started = time.perf_counter()
-                try:
-                    resp = fn(*args, **kwargs)
-                    if kwargs.get("stream") and stream_enforcement:
-                        model_name = str(kwargs.get("model") or "")
-                        resp = _wrap_stream_iterator(
-                            resp,
-                            step_ctx=step_ctx,
-                            model=model_name,
-                            stream_enforcement=True,
-                            usd_per_1k_tokens=usd_per_1k_tokens,
+                    call_kwargs = merge_stream_options(call_kwargs)
+
+                model_name = str(call_kwargs.get("model") or "")
+                cutoff = stream_cutoff_usd
+                output_rate = 0.0
+                if is_stream:
+                    output_rate = _stream_output_rate_usd_per_1k(
+                        model_name,
+                        usd_per_1k_tokens,
+                    )
+                    if cutoff is None and stream_enforcement:
+                        import warnings
+
+                        warnings.warn(
+                            "stream_enforcement is deprecated; use stream_cutoff_usd for local "
+                            "observable-output cutoff. Control streaming finalizes at stream end.",
+                            DeprecationWarning,
+                            stacklevel=2,
                         )
-                except Exception:
-                    enforcement.record_call(cost_usd=0.0, released_projection=held_projection)
+                        if output_rate > 0:
+                            cutoff = max(0.01, output_rate * 0.05)
+                    if cutoff is not None and output_rate <= 0:
+                        raise UnsupportedModeError(
+                            "stream_cutoff_usd requires known model pricing or an explicit "
+                            "usd_per_1k_tokens rate",
+                            error_code="stream_cutoff_pricing_unavailable",
+                        )
+
+                # FINAL_1 P3-1: local cap first (fail closed), then shared FinOps reserve.
+                projected = _precall_projection_usd(call_kwargs, usd_per_1k_tokens)
+                held_projection, reserved_cost_usd = _reserve_with_local_hold(
+                    enforcement=enforcement,
+                    projected_cost_usd=projected,
+                    reserve_kwargs={
+                        "org_id": step_ctx.org_id,
+                        "workspace_id": step_ctx.workspace_id,
+                        "run_id": step_ctx.run_id,
+                        "call_id": str(getattr(step_ctx, "step_id", None) or "") or None,
+                        "estimated_cost_usd": projected,
+                        "business_subject_ref": attr_defaults.get("business_subject_ref"),
+                        "feature_id": attr_defaults.get("feature_id"),
+                        "workflow_id": attr_defaults.get("workflow_id"),
+                        "operation_id": attr_defaults.get("operation_id"),
+                        "attempt_id": attr_defaults.get("attempt_id"),
+                        "model": model_name,
+                        "input_tokens": _estimate_input_tokens(call_kwargs),
+                    },
+                )
+                if is_stream:
+                    _mark_stream_started_or_release(
+                        enforcement=enforcement,
+                        held_projection=held_projection,
+                        org_id=step_ctx.org_id,
+                        workspace_id=step_ctx.workspace_id,
+                        run_id=step_ctx.run_id,
+                        reserved_cost_usd=reserved_cost_usd,
+                    )
+
+                started = time.perf_counter()
+                attempt = None
+                if is_stream:
+                    def _emit(attempt, settle_cost, tokens_used, error):
+                        _emit_stream_model_call(
+                            attempt,
+                            settle_cost=settle_cost,
+                            tokens_used=tokens_used,
+                            error=error,
+                            org_id=step_ctx.org_id,
+                            project_id=step_ctx.project_id,
+                            workspace_id=step_ctx.workspace_id,
+                            agent_id=step_ctx.agent_id,
+                            agent_role=agent_role,
+                            capture_mode=capture_mode,
+                            event_sink=event_sink,
+                            finops=finops,
+                            endpoint_url=endpoint_url,
+                            endpoint_headers=endpoint_headers,
+                            log=log,
+                        )
+
+                    attempt = StreamAttempt(
+                        surface=SUPPORTED_OPENAI_STREAM_METHOD,
+                        step_ctx=step_ctx,
+                        enforcement=enforcement,
+                        held_projection=held_projection,
+                        reserved_cost_usd=reserved_cost_usd,
+                        model=model_name,
+                        method=SUPPORTED_OPENAI_STREAM_METHOD,
+                        usd_per_1k_tokens=output_rate,
+                        capture_mode=capture_mode,
+                        agent_role=agent_role,
+                        event_sink=event_sink,
+                        finops=finops,
+                        stream_cutoff_usd=cutoff,
+                        reconcile_fn=_try_settle_stream_budget,
+                        pending_fn=_try_mark_stream_pending,
+                        postcall_cost_fn=_postcall_cost_usd,
+                        reservation_payload_fn=_reservation_payload_fields,
+                        emit_event_fn=_emit,
+                        started_perf=started,
+                    )
+                try:
+                    resp = fn(*args, **call_kwargs)
+                except Exception as exc:
+                    if attempt is not None:
+                        attempt.finalize(StreamOutcome.PROVIDER_ERROR, error=exc)
+                    else:
+                        enforcement.record_call(
+                            cost_usd=0.0,
+                            released_projection=held_projection,
+                        )
                     raise
+
+                if is_stream:
+                    assert attempt is not None
+                    return wrap_openai_stream(resp, attempt)
+
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
 
                 tokens_used, usage = _extract_usage(resp)
@@ -831,6 +1218,130 @@ def patch_openai(
         patches.append((obj, name, orig))
         setattr(obj, name, _wrap(orig, method=event_type))
 
+    # Train B: the official SDK exposes a lazy ChatCompletionStreamManager on
+    # ``chat.completions.stream``. It bypasses ``create``, so guard it directly.
+    try:
+        completions = client.chat.completions
+        if hasattr(completions, "stream"):
+            orig_stream = completions.stream
+            if callable(orig_stream):
+
+                def _stream_manager(*s_args: Any, **s_kwargs: Any) -> Any:
+                    from .streaming.lifecycle import StreamAttempt
+                    from .streaming.openai import merge_stream_options, wrap_openai_manager
+
+                    _reject_streaming_if_unsupported({"stream": True})
+                    ctx = get_current_context() or ctx0
+                    step_ctx = ctx.child_step()
+                    call_kwargs = dict(s_kwargs)
+                    _apply_output_token_bound(call_kwargs)
+                    call_kwargs = merge_stream_options(call_kwargs)
+                    # The helper itself sets stream=True and does not accept a
+                    # public ``stream`` keyword.
+                    call_kwargs.pop("stream", None)
+                    model_name = str(call_kwargs.get("model") or "")
+                    output_rate = _stream_output_rate_usd_per_1k(
+                        model_name,
+                        usd_per_1k_tokens,
+                    )
+                    cutoff = stream_cutoff_usd
+                    if cutoff is None and stream_enforcement and output_rate > 0:
+                        cutoff = max(0.01, output_rate * 0.05)
+                    if cutoff is not None and output_rate <= 0:
+                        raise UnsupportedModeError(
+                            "stream_cutoff_usd requires known model pricing or an explicit "
+                            "usd_per_1k_tokens rate",
+                            error_code="stream_cutoff_pricing_unavailable",
+                        )
+                    projected = _precall_projection_usd(call_kwargs, usd_per_1k_tokens)
+                    # Construction is lazy; reserve only when __enter__ is called.
+                    manager = orig_stream(*s_args, **call_kwargs)
+
+                    def _attempt_factory() -> StreamAttempt:
+                        with ExitStack() as stack:
+                            stack.enter_context(use_context(step_ctx))
+                            stack.enter_context(claim_enforcement_owner("sdk"))
+                            stack.enter_context(use_attribution(**attr_defaults))
+                            held_projection, reserved_cost_usd = _reserve_with_local_hold(
+                                enforcement=enforcement,
+                                projected_cost_usd=projected,
+                                reserve_kwargs={
+                                    "org_id": step_ctx.org_id,
+                                    "workspace_id": step_ctx.workspace_id,
+                                    "run_id": step_ctx.run_id,
+                                    "call_id": str(getattr(step_ctx, "step_id", None) or "") or None,
+                                    "estimated_cost_usd": projected,
+                                    "business_subject_ref": attr_defaults.get("business_subject_ref"),
+                                    "feature_id": attr_defaults.get("feature_id"),
+                                    "workflow_id": attr_defaults.get("workflow_id"),
+                                    "operation_id": attr_defaults.get("operation_id"),
+                                    "attempt_id": attr_defaults.get("attempt_id"),
+                                    "model": model_name,
+                                    "input_tokens": _estimate_input_tokens(call_kwargs),
+                                },
+                            )
+                            _mark_stream_started_or_release(
+                                enforcement=enforcement,
+                                held_projection=held_projection,
+                                org_id=step_ctx.org_id,
+                                workspace_id=step_ctx.workspace_id,
+                                run_id=step_ctx.run_id,
+                                reserved_cost_usd=reserved_cost_usd,
+                            )
+                        started = time.perf_counter()
+
+                        def _emit(attempt, settle_cost, tokens_used, error):
+                            _emit_stream_model_call(
+                                attempt,
+                                settle_cost=settle_cost,
+                                tokens_used=tokens_used,
+                                error=error,
+                                org_id=step_ctx.org_id,
+                                project_id=step_ctx.project_id,
+                                workspace_id=step_ctx.workspace_id,
+                                agent_id=step_ctx.agent_id,
+                                agent_role=agent_role,
+                                capture_mode=capture_mode,
+                                event_sink=event_sink,
+                                finops=finops,
+                                endpoint_url=endpoint_url,
+                                endpoint_headers=endpoint_headers,
+                                log=log,
+                            )
+
+                        return StreamAttempt(
+                            surface=SUPPORTED_OPENAI_STREAM_MANAGER,
+                            step_ctx=step_ctx,
+                            enforcement=enforcement,
+                            held_projection=held_projection,
+                            reserved_cost_usd=reserved_cost_usd,
+                            model=model_name,
+                            method=SUPPORTED_OPENAI_STREAM_MANAGER,
+                            usd_per_1k_tokens=output_rate,
+                            capture_mode=capture_mode,
+                            agent_role=agent_role,
+                            event_sink=event_sink,
+                            finops=finops,
+                            stream_cutoff_usd=cutoff,
+                            reconcile_fn=_try_settle_stream_budget,
+                            pending_fn=_try_mark_stream_pending,
+                            postcall_cost_fn=_postcall_cost_usd,
+                            reservation_payload_fn=_reservation_payload_fields,
+                            emit_event_fn=_emit,
+                            started_perf=started,
+                        )
+
+                    return wrap_openai_manager(
+                        manager,
+                        attempt_factory=_attempt_factory,
+                        enter_scope=_helper_inner_create_bypass,
+                    )
+
+                patches.append((completions, "stream", orig_stream))
+                setattr(completions, "stream", _stream_manager)
+    except Exception:
+        pass
+
     # FINAL_1 P3-2: certified monitor must not silently leave Responses unguarded.
     if certified_surface:
         try:
@@ -891,6 +1402,7 @@ def patch_anthropic(
     debug: bool = False,
     event_sink: Optional[EventSink] = None,
     finops: Optional[FinOpsController] = None,
+    stream_cutoff_usd: Optional[float] = None,
     certified_surface: bool = False,
     capture_mode: CaptureMode = CaptureMode.METADATA,
     business_subject_ref: Optional[str] = None,
@@ -914,7 +1426,6 @@ def patch_anthropic(
         log = logging.getLogger(__name__)
     enforcement = enforcement or Enforcement()
     loop_detector = loop_detector or LoopDetector()
-    dbg = DebugPrinter(enabled=debug)
 
     from .attribution import use_attribution
     from .enforcement_owner import claim_enforcement_owner
@@ -940,6 +1451,8 @@ def patch_anthropic(
 
     def _wrap(fn: Callable[..., Any], *, method: str) -> Callable[..., Any]:
         def wrapped(*args: Any, **kwargs: Any) -> Any:
+            if _HELPER_INNER_CREATE_BYPASS.get():
+                return fn(*args, **kwargs)
             ctx = get_current_context() or ctx0
             step_ctx = ctx.child_step()
             with ExitStack() as stack:
@@ -969,29 +1482,113 @@ def patch_anthropic(
                 # FINAL_1 P3-2: enforceable output token bound before dispatch.
                 _apply_output_token_bound(kwargs)
 
-                # FINAL_1 P3-1: local cap first (fail closed), then shared FinOps reserve.
-                projected = _precall_projection_usd(kwargs, usd_per_1k_tokens)
-                held_projection = enforcement.check_local(projected_cost_usd=projected)
+                call_kwargs = dict(kwargs)
+                is_stream = bool(call_kwargs.get("stream"))
+                model_name = str(call_kwargs.get("model") or "")
+                output_rate = 0.0
+                if is_stream:
+                    output_rate = _stream_output_rate_usd_per_1k(
+                        model_name,
+                        usd_per_1k_tokens,
+                    )
+                    if stream_cutoff_usd is not None and output_rate <= 0:
+                        raise UnsupportedModeError(
+                            "stream_cutoff_usd requires known model pricing or an explicit "
+                            "usd_per_1k_tokens rate",
+                            error_code="stream_cutoff_pricing_unavailable",
+                        )
 
-                # Pre-call server-side budget reservation (fails open if service unavailable)
-                reserved_cost_usd = _try_reserve_budget(
-                    org_id=step_ctx.org_id,
-                    workspace_id=step_ctx.workspace_id,
-                    run_id=step_ctx.run_id,
-                    call_id=str(getattr(step_ctx, "step_id", None) or "") or None,
-                    estimated_cost_usd=projected,
-                    business_subject_ref=attr_defaults.get("business_subject_ref"),
-                    feature_id=attr_defaults.get("feature_id"),
-                    workflow_id=attr_defaults.get("workflow_id"),
-                    operation_id=attr_defaults.get("operation_id"),
-                    attempt_id=attr_defaults.get("attempt_id"),
+                # FINAL_1 P3-1: local cap first (fail closed), then shared FinOps reserve.
+                projected = _precall_projection_usd(call_kwargs, usd_per_1k_tokens)
+                held_projection, reserved_cost_usd = _reserve_with_local_hold(
+                    enforcement=enforcement,
+                    projected_cost_usd=projected,
+                    reserve_kwargs={
+                        "org_id": step_ctx.org_id,
+                        "workspace_id": step_ctx.workspace_id,
+                        "run_id": step_ctx.run_id,
+                        "call_id": str(getattr(step_ctx, "step_id", None) or "") or None,
+                        "estimated_cost_usd": projected,
+                        "business_subject_ref": attr_defaults.get("business_subject_ref"),
+                        "feature_id": attr_defaults.get("feature_id"),
+                        "workflow_id": attr_defaults.get("workflow_id"),
+                        "operation_id": attr_defaults.get("operation_id"),
+                        "attempt_id": attr_defaults.get("attempt_id"),
+                        "model": model_name,
+                        "input_tokens": _estimate_input_tokens(call_kwargs),
+                    },
                 )
+                if is_stream:
+                    _mark_stream_started_or_release(
+                        enforcement=enforcement,
+                        held_projection=held_projection,
+                        org_id=step_ctx.org_id,
+                        workspace_id=step_ctx.workspace_id,
+                        run_id=step_ctx.run_id,
+                        reserved_cost_usd=reserved_cost_usd,
+                    )
                 started = time.perf_counter()
+                attempt = None
+                if is_stream:
+                    from .streaming.anthropic import wrap_anthropic_event_stream
+                    from .streaming.lifecycle import StreamAttempt, StreamOutcome
+
+                    def _emit(attempt, settle_cost, tokens_used, error):
+                        _emit_stream_model_call(
+                            attempt,
+                            settle_cost=settle_cost,
+                            tokens_used=tokens_used,
+                            error=error,
+                            org_id=step_ctx.org_id,
+                            project_id=step_ctx.project_id,
+                            workspace_id=step_ctx.workspace_id,
+                            agent_id=step_ctx.agent_id,
+                            agent_role=agent_role,
+                            capture_mode=capture_mode,
+                            event_sink=event_sink,
+                            finops=finops,
+                            endpoint_url=endpoint_url,
+                            endpoint_headers=endpoint_headers,
+                            log=log,
+                        )
+
+                    attempt = StreamAttempt(
+                        surface=SUPPORTED_ANTHROPIC_STREAM_METHOD,
+                        step_ctx=step_ctx,
+                        enforcement=enforcement,
+                        held_projection=held_projection,
+                        reserved_cost_usd=reserved_cost_usd,
+                        model=model_name,
+                        method=SUPPORTED_ANTHROPIC_STREAM_METHOD,
+                        usd_per_1k_tokens=output_rate,
+                        capture_mode=capture_mode,
+                        agent_role=agent_role,
+                        event_sink=event_sink,
+                        finops=finops,
+                        stream_cutoff_usd=stream_cutoff_usd,
+                        reconcile_fn=_try_settle_stream_budget,
+                        pending_fn=_try_mark_stream_pending,
+                        postcall_cost_fn=_postcall_cost_usd,
+                        reservation_payload_fn=_reservation_payload_fields,
+                        emit_event_fn=_emit,
+                        started_perf=started,
+                    )
                 try:
-                    resp = fn(*args, **kwargs)
-                except Exception:
-                    enforcement.record_call(cost_usd=0.0, released_projection=held_projection)
+                    resp = fn(*args, **call_kwargs)
+                except Exception as exc:
+                    if attempt is not None:
+                        attempt.finalize(StreamOutcome.PROVIDER_ERROR, error=exc)
+                    else:
+                        enforcement.record_call(
+                            cost_usd=0.0,
+                            released_projection=held_projection,
+                        )
                     raise
+
+                if is_stream:
+                    assert attempt is not None
+                    return wrap_anthropic_event_stream(resp, attempt)
+
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
 
                 tokens_used, usage = _extract_anthropic_usage(resp)
@@ -1115,21 +1712,120 @@ def patch_anthropic(
         patches.append((obj, name, orig))
         setattr(obj, name, _wrap(orig, method=event_type))
 
-    if certified_surface:
-        try:
-            if hasattr(client, "messages") and hasattr(client.messages, "stream"):
-                orig_stream = client.messages.stream
+    # Train B: wrap messages.stream manager with finalize-once lifecycle.
+    try:
+        if hasattr(client, "messages") and hasattr(client.messages, "stream"):
+            orig_stream = client.messages.stream
+            if callable(orig_stream):
+
+                def _stream_manager(*s_args: Any, **s_kwargs: Any) -> Any:
+                    from .streaming.lifecycle import StreamAttempt
+                    from .streaming.anthropic import wrap_anthropic_manager
+
+                    ctx = get_current_context() or ctx0
+                    step_ctx = ctx.child_step()
+                    call_kwargs = dict(s_kwargs)
+                    _apply_output_token_bound(call_kwargs)
+                    model_name = str(call_kwargs.get("model") or "")
+                    output_rate = _stream_output_rate_usd_per_1k(
+                        model_name,
+                        usd_per_1k_tokens,
+                    )
+                    if stream_cutoff_usd is not None and output_rate <= 0:
+                        raise UnsupportedModeError(
+                            "stream_cutoff_usd requires known model pricing or an explicit "
+                            "usd_per_1k_tokens rate",
+                            error_code="stream_cutoff_pricing_unavailable",
+                        )
+                    projected = _precall_projection_usd(call_kwargs, usd_per_1k_tokens)
+                    # Anthropic's helper returns a lazy manager.  Constructing it
+                    # is not provider dispatch, so do not reserve until __enter__.
+                    manager = orig_stream(*s_args, **call_kwargs)
+
+                    def _attempt_factory() -> StreamAttempt:
+                        with ExitStack() as stack:
+                            stack.enter_context(use_context(step_ctx))
+                            stack.enter_context(claim_enforcement_owner("sdk"))
+                            stack.enter_context(use_attribution(**attr_defaults))
+                            held_projection, reserved_cost_usd = _reserve_with_local_hold(
+                                enforcement=enforcement,
+                                projected_cost_usd=projected,
+                                reserve_kwargs={
+                                    "org_id": step_ctx.org_id,
+                                    "workspace_id": step_ctx.workspace_id,
+                                    "run_id": step_ctx.run_id,
+                                    "call_id": str(getattr(step_ctx, "step_id", None) or "") or None,
+                                    "estimated_cost_usd": projected,
+                                    "business_subject_ref": attr_defaults.get("business_subject_ref"),
+                                    "feature_id": attr_defaults.get("feature_id"),
+                                    "workflow_id": attr_defaults.get("workflow_id"),
+                                    "operation_id": attr_defaults.get("operation_id"),
+                                    "attempt_id": attr_defaults.get("attempt_id"),
+                                    "model": model_name,
+                                    "input_tokens": _estimate_input_tokens(call_kwargs),
+                                },
+                            )
+                            _mark_stream_started_or_release(
+                                enforcement=enforcement,
+                                held_projection=held_projection,
+                                org_id=step_ctx.org_id,
+                                workspace_id=step_ctx.workspace_id,
+                                run_id=step_ctx.run_id,
+                                reserved_cost_usd=reserved_cost_usd,
+                            )
+                        started = time.perf_counter()
+
+                        def _emit(attempt, settle_cost, tokens_used, error):
+                            _emit_stream_model_call(
+                                attempt,
+                                settle_cost=settle_cost,
+                                tokens_used=tokens_used,
+                                error=error,
+                                org_id=step_ctx.org_id,
+                                project_id=step_ctx.project_id,
+                                workspace_id=step_ctx.workspace_id,
+                                agent_id=step_ctx.agent_id,
+                                agent_role=agent_role,
+                                capture_mode=capture_mode,
+                                event_sink=event_sink,
+                                finops=finops,
+                                endpoint_url=endpoint_url,
+                                endpoint_headers=endpoint_headers,
+                                log=log,
+                            )
+
+                        return StreamAttempt(
+                            surface=SUPPORTED_ANTHROPIC_STREAM_MANAGER,
+                            step_ctx=step_ctx,
+                            enforcement=enforcement,
+                            held_projection=held_projection,
+                            reserved_cost_usd=reserved_cost_usd,
+                            model=model_name,
+                            method=SUPPORTED_ANTHROPIC_STREAM_MANAGER,
+                            usd_per_1k_tokens=output_rate,
+                            capture_mode=capture_mode,
+                            agent_role=agent_role,
+                            event_sink=event_sink,
+                            finops=finops,
+                            stream_cutoff_usd=stream_cutoff_usd,
+                            reconcile_fn=_try_settle_stream_budget,
+                            pending_fn=_try_mark_stream_pending,
+                            postcall_cost_fn=_postcall_cost_usd,
+                            reservation_payload_fn=_reservation_payload_fields,
+                            emit_event_fn=_emit,
+                            started_perf=started,
+                        )
+
+                    return wrap_anthropic_manager(
+                        manager,
+                        attempt_factory=_attempt_factory,
+                        enter_scope=_helper_inner_create_bypass,
+                    )
+
                 patches.append((client.messages, "stream", orig_stream))
-                setattr(
-                    client.messages,
-                    "stream",
-                    _unsupported_mode_stub(
-                        "Anthropic streaming is unsupported on the certified Control path; "
-                        "use sync non-streaming messages.create"
-                    ),
-                )
-        except Exception:
-            pass
+                setattr(client.messages, "stream", _stream_manager)
+    except Exception:
+        pass
 
     def undo() -> None:
         for obj, name, orig in patches:
@@ -1181,6 +1877,7 @@ def monitor(
     soft_pause_pct: float = 0.90,
     loop_anomaly_threshold: float = 0.90,
     stream_enforcement: bool = False,
+    stream_cutoff_usd: Optional[float] = None,
     debug: bool = False,
     timeline_path: Optional[str] = None,
     capture_mode: Optional[str] = None,
@@ -1195,30 +1892,42 @@ def monitor(
     """
     High-level entrypoint for Agent FinOps on raw OpenAI-style or Anthropic clients.
 
-    Certified Control contract (FINAL_1):
-    - Sync non-streaming OpenAI ``chat.completions.create``
-    - Sync non-streaming Anthropic ``messages.create``
+    Certified Control contract (FINAL_1 + Train B):
+    - Sync OpenAI ``chat.completions.create`` (stream=False|True) and
+      ``chat.completions.stream``
+    - Sync Anthropic ``messages.create`` (stream=False|True) and ``messages.stream``
     - Hard local cap raises ``BudgetExceeded`` before provider dispatch
     - Shared authority deny raises ``BudgetExceeded`` / unreachable raises ``BudgetUnavailable``
     - Loop guard raises ``LoopDetected`` before provider dispatch
     - Soft trajectory pause raises ``KazenCircuitBreaker`` after a completed call
-    - Async clients, OpenAI Responses API, and Control streaming raise ``UnsupportedModeError``
+    - Async clients and OpenAI Responses API raise ``UnsupportedModeError``
+    - Streaming records provider start before dispatch, then settles at stream end
+      or remains pending on cancel/error/missing usage; never at create-return
 
     API keys are env-only (``KAZENAI_FINOPS_API_KEY`` / ``KAZENAI_API_KEY``), not kwargs.
 
     Also enables:
     - model.call KazenEvent emission
     - finops.trajectory / finops.loop.anomaly derived events
-    - optional mid-stream cutoff when ``stream_enforcement=True`` outside Control
-      (raises StreamCutoffError; unsupported under Control profile)
+    - optional local observable-output cutoff with ``stream_cutoff_usd``
+      (raises ``StreamCutoffError``; final provider billing may still be pending)
     - optional HttpSink when FinOps ingest env is set
     - optional JsonlSink when ``timeline_path`` or ``KAZENAI_TIMELINE_PATH`` is set
     - private-by-default capture (``capture_mode=metadata``); bodies require explicit opt-in
     """
 
-    if stream_enforcement and _control_profile_denies_streaming():
+    if stream_enforcement:
+        import warnings
+
+        warnings.warn(
+            "stream_enforcement is deprecated; Control-certified streaming uses automatic "
+            "finalize-once accounting. Prefer stream_cutoff_usd for optional local cutoff.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    if _streaming_explicitly_denied() and stream_enforcement:
         raise UnsupportedModeError(
-            "stream_enforcement is unsupported in the Control profile",
+            "Streaming is disabled by KAZENAI_DENY_STREAMING",
             error_code="unsupported_mode",
         )
 
@@ -1266,12 +1975,18 @@ def monitor(
         attempt_id=attempt_id,
     )
     if _detect_client_kind(client) == "anthropic":
-        patch_anthropic(client, **patch_kwargs, certified_surface=True)
+        patch_anthropic(
+            client,
+            **patch_kwargs,
+            stream_cutoff_usd=stream_cutoff_usd,
+            certified_surface=True,
+        )
     else:
         patch_openai(
             client,
             **patch_kwargs,
             stream_enforcement=stream_enforcement,
+            stream_cutoff_usd=stream_cutoff_usd,
             certified_surface=True,
         )
     return client

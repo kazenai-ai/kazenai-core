@@ -1,7 +1,7 @@
 {
   "schema_version": "final1.p4-1.v1",
   "title": "KazenAI Control FINAL_1 + FINAL_LENS supported integration matrix",
-  "recorded_at": "2026-09-28T20:30:00Z",
+  "recorded_at": "2026-10-02T00:00:00Z",
   "authority": "FIX_LOOP_PROMPT_FINAL_1 P4-1 + FIX_LOOP_PROMPT_FINAL_LENS P6-3",
   "evidence_tiers": [
     "unsupported",
@@ -23,11 +23,12 @@
     "adding_capability_requires_deferred_tests_first": true
   },
   "envelope": {
-    "adapter": "sync non-streaming OpenAI Chat Completions + Anthropic Messages via kazenai.monitor",
+    "adapter": "sync OpenAI Chat Completions + Anthropic Messages via kazenai.monitor (non-streaming and streaming)",
     "package": "from kazenai import monitor (distribution kazenai)",
     "demo_mode": "fake/local transport + real local Control services",
     "live_provider": "USER-GO separate; does not block honestly labelled DEMO_READY",
-    "topology": "additive Control compose; Brain/Builder/Copilot/Home absent"
+    "topology": "additive Control compose; Brain/Builder/Copilot/Home absent",
+    "sdk_pins_ci": "openai>=1.40,<2 ; anthropic>=0.39,<1 (dev extra)"
   },
   "cells": [
     {
@@ -69,6 +70,21 @@
       ]
     },
     {
+      "id": "provider.openai.chat_completions.sync.stream",
+      "category": "provider",
+      "name": "OpenAI Chat Completions sync streaming",
+      "detail": "create(stream=True) and chat.completions.stream helper with finalize-once reservation lifecycle; include_usage merge",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/cleanup-train-b-streaming-verification-20261002T012400Z.json"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_train_b_streaming.py",
+        "kazenai-core/tests/test_train_b_streaming_hardening.py",
+        "kazenai-core/tests/test_train_b_official_sdks.py"
+      ]
+    },
+    {
       "id": "provider.anthropic.messages.sync",
       "category": "provider",
       "name": "Anthropic Messages sync non-streaming",
@@ -79,6 +95,21 @@
       ],
       "tests": [
         "kazenai-core/tests/test_final1_p3_2_provider_contract.py"
+      ]
+    },
+    {
+      "id": "provider.anthropic.messages.sync.stream",
+      "category": "provider",
+      "name": "Anthropic Messages sync streaming",
+      "detail": "create(stream=True) and messages.stream manager with finalize-once lifecycle",
+      "status": "fixture-verified",
+      "evidence": [
+        "artifacts/cleanup-train-b-streaming-verification-20261002T012400Z.json"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_train_b_streaming.py",
+        "kazenai-core/tests/test_train_b_streaming_hardening.py",
+        "kazenai-core/tests/test_train_b_official_sdks.py"
       ]
     },
     {
@@ -106,12 +137,16 @@
       "id": "mode.streaming.control",
       "category": "mode",
       "name": "Streaming under Control profile",
-      "status": "unsupported",
+      "status": "fixture-verified",
+      "detail": "Train B: sync OpenAI create(stream=True)/chat.completions.stream + Anthropic create(stream=True)/messages.stream; provider-start is recorded before dispatch, then exact settlement or pending reconciliation",
       "evidence": [
-        "artifacts/final-1-p2-5-verification-20260916T201000Z.json"
+        "artifacts/cleanup-train-b-streaming-verification-20261002T012400Z.json"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1_p3_2_provider_contract.py::test_p32_control_streaming_denied_before_provider"
+        "kazenai-core/tests/test_train_b_streaming.py",
+        "kazenai-core/tests/test_train_b_streaming_hardening.py",
+        "kazenai-core/tests/test_train_b_official_sdks.py",
+        "kazenai-core/tests/test_final1_p3_2_provider_contract.py::test_p32_control_streaming_allowed_with_finalize_lifecycle"
       ]
     },
     {
@@ -147,7 +182,7 @@
       "id": "pricing.token_cost_engine",
       "category": "pricing_admission",
       "name": "TokenCostEngine model price table",
-      "detail": "Pre/post call projection for known models; unknown model \u2192 0 projection",
+      "detail": "Pre/post call projection for known models; unknown models block in production-like modes and warn/fail open only when explicitly configured",
       "status": "fixture-verified",
       "evidence": [
         "artifacts/final-1-p3-1-verification-20260916T195500Z.json"
@@ -548,6 +583,11 @@
   "python_matrix": {
     "ci_verified": [
       "3.11"
+    ],
+    "ci_configured": [
+      "3.10",
+      "3.11",
+      "3.12"
     ],
     "declared": ">=3.10",
     "declared_not_ci_verified": [
