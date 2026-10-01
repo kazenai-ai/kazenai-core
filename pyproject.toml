@@ -33,7 +33,10 @@ dev = [
 
 [project.urls]
 "Homepage" = "https://kazenai.com"
+"Documentation" = "https://docs.kazenai.com/"
 "Repository" = "https://github.com/kazenai-ai/kazenai-core"
+"Changelog" = "https://github.com/kazenai-ai/kazenai-core/releases"
+"Bug Tracker" = "https://github.com/kazenai-ai/kazenai-core/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
