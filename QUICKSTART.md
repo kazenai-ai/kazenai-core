@@ -6,13 +6,13 @@ product integrations should install the customer-facing package, which
 re-exports the Core API:
 
 ```bash
-python -m pip install "kazenai-finops==1.1.0" openai
+python -m pip install "kazenai-finops==1.1.0" "openai>=1.40,<2"
 ```
 
 Install Core directly when you specifically want the runtime package:
 
 ```bash
-python -m pip install "kazenai==1.1.0" openai
+python -m pip install "kazenai==1.1.0" "openai>=1.40,<2"
 ```
 
 Python 3.10, 3.11 and 3.12 are supported.
@@ -154,7 +154,7 @@ responsible for passing valid price and usage information.
 | Sync Anthropic `messages.create` | Supported, non-streaming and `stream=True` |
 | Sync Anthropic `messages.stream` | Supported |
 | Async provider clients | Not supported |
-| OpenAI Responses streaming | Not supported |
+| OpenAI Responses API, including streaming | Not supported |
 | OpenAI Realtime/WebSocket | Not supported |
 | Bedrock/Vertex Anthropic wrappers | Not supported |
 | Framework helpers | Evaluation surface; wrap the underlying supported client |

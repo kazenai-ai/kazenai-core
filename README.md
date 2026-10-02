@@ -32,12 +32,16 @@ KazenAI:            Pre-flight check → BLOCKED → LLM call never made
 ## Install
 
 ```bash
-python -m pip install kazenai openai
+python -m pip install kazenai "openai>=1.40,<2"
 # Most teams install the customer package instead:
-python -m pip install kazenai-finops openai
+python -m pip install kazenai-finops "openai>=1.40,<2"
 ```
 
 `kazenai-finops` re-exports this SDK and is the recommended install for product integrations.
+
+The Control 1.1.0 certification covers `openai>=1.40,<2` and
+`anthropic>=0.39,<1`. Later provider-SDK major versions are unverified until
+they are added to the supported matrix.
 
 Requires Python 3.10+.
 
