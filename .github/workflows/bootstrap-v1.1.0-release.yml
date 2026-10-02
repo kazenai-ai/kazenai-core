@@ -1,0 +1,49 @@
+name: bootstrap-v1.1.0-release
+
+# One-shot: create the formal GitHub Release for the existing Trusted Publishing tag.
+# Safe to re-run; no-ops when the release already exists. Does not publish to PyPI.
+
+on:
+  push:
+    paths:
+      - ".github/workflows/bootstrap-v1.1.0-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Ensure formal GitHub Release for v1.1.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view v1.1.0 >/dev/null 2>&1; then
+            echo "Release v1.1.0 already exists"
+            gh release view v1.1.0
+            exit 0
+          fi
+          git rev-parse "v1.1.0^{}"
+          cat > /tmp/release-notes.md <<'EOF'
+          ## Summary
+          Control-certified sync OpenAI and Anthropic streaming for `monitor()`, with finalize-once lifecycle accounting (`provider_started` / `usage_known` / `outcome_unknown`).
+
+          ## Package
+          - PyPI: `kazenai==1.1.0`
+          - Requires: `kazen-event-schema>=0.6.3,<0.7`
+
+          ## Notes
+          Tag was published earlier via Trusted Publishing; this GitHub Release is the formal release-notes entry used by public trust audits.
+          EOF
+          # Strip the common leading indent introduced by this workflow file.
+          sed -i 's/^          //' /tmp/release-notes.md
+          gh release create v1.1.0 \
+            --title "kazenai 1.1.0" \
+            --verify-tag \
+            --notes-file /tmp/release-notes.md
