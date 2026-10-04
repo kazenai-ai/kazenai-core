@@ -4,6 +4,21 @@ This procedure is for maintainers publishing the Core package to public PyPI.
 Release Core before `kazenai-finops`, because the FinOps 1.1.1 package requires
 `kazenai>=1.1.1,<2.0`.
 
+## Architecture / modularization debt
+
+`kazenai/monitor.py` is the certified Control entrypoint implementation and is
+currently oversized. The next engineering track is a **behavior-preserving**
+split (documented in [`ARCHITECTURE.md`](./ARCHITECTURE.md)):
+
+- `monitor_openai.py` / `monitor_anthropic.py`
+- `monitor_emit.py` (`model.call` payload builders)
+- keep `monitor()` as a thin facade; `from kazenai import monitor` stays stable
+- new surfaces must not grow the god file
+
+Do **not** block a security/install hotfix on that refactor. Prefer shipping
+modularization as its own PR(s) with the full test suite green, and only bump
+PyPI when you intentionally publish those commits.
+
 ## 1. Prepare one releasable commit
 
 - Confirm `pyproject.toml`, `kazenai/__init__.py`, tests and user-facing docs all

@@ -127,6 +127,8 @@ class StreamAttempt:
     endpoint_headers: Optional[Mapping[str, str]] = None
     stream_cutoff_usd: Optional[float] = None
     pricing_version: str = "kazenai.cost_engine.v1"
+    # Captured at stream start so finalize can emit attribution after ContextVar exit.
+    attribution: Optional[Mapping[str, Any]] = None
     reconcile_fn: Optional[Callable[..., Any]] = None
     pending_fn: Optional[Callable[..., Any]] = None
     postcall_cost_fn: Optional[Callable[..., Optional[float]]] = None

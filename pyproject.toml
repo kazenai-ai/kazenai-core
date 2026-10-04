@@ -63,8 +63,11 @@ omit = [
 fail_under = 80
 
 [tool.pytest.ini_options]
+markers = [
+  "live: paid OpenAI/Anthropic network smoke (requires KAZENAI_LIVE_PROVIDER_SMOKE=1)",
+]
 testpaths = ["tests"]
-addopts = "--cov=kazenai --cov-report=term-missing"
+addopts = "--cov=kazenai --cov-report=term-missing -m 'not live'"
 
 [tool.ruff]
 line-length = 100

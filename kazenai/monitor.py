@@ -392,6 +392,40 @@ def _reservation_payload_fields(reserved) -> dict:
     except Exception:
         return {}
 
+
+def _attribution_payload_fields(explicit: Optional[Mapping[str, Any]] = None) -> dict:
+    """Emit commercial attribution on every model.call (local + shared-reserve paths).
+
+    Prefer an explicit mapping (stream attempts capture defaults at start). Fall back
+    to the ambient AttributionContext installed by patch wrappers.
+    """
+    src: Dict[str, Any] = {}
+    if explicit:
+        src.update({k: explicit.get(k) for k in (
+            "business_subject_ref",
+            "feature_id",
+            "workflow_id",
+            "operation_id",
+            "attempt_id",
+        )})
+    else:
+        try:
+            from .attribution import get_attribution
+
+            attr = get_attribution()
+        except Exception:
+            attr = None
+        if attr is not None:
+            for key in (
+                "business_subject_ref",
+                "feature_id",
+                "workflow_id",
+                "operation_id",
+                "attempt_id",
+            ):
+                src[key] = getattr(attr, key, None)
+    return {k: v for k, v in src.items() if v is not None and v != ""}
+
 def _try_reserve_budget(
     *,
     org_id: str,
@@ -762,6 +796,7 @@ def _emit_stream_model_call(
             ),
             payload={
                 **_reservation_payload_fields(attempt.reserved_cost_usd),
+                **_attribution_payload_fields(getattr(attempt, "attribution", None)),
                 "method": attempt.method,
                 "model": attempt.model,
                 "stream": True,
@@ -1058,6 +1093,7 @@ def patch_openai(
                         postcall_cost_fn=_postcall_cost_usd,
                         reservation_payload_fn=_reservation_payload_fields,
                         emit_event_fn=_emit,
+                        attribution=attr_defaults,
                         started_perf=started,
                     )
                 try:
@@ -1127,6 +1163,7 @@ def patch_openai(
                         cost_usd=cost_usd,
                         payload={
                             **_reservation_payload_fields(reserved_cost_usd),
+                            **_attribution_payload_fields(),
                             "method": method,
                             "model": (kwargs.get("model") if isinstance(kwargs, dict) else None)
                             or (payload.get("model") if isinstance(payload, dict) else None),
@@ -1328,6 +1365,7 @@ def patch_openai(
                             postcall_cost_fn=_postcall_cost_usd,
                             reservation_payload_fn=_reservation_payload_fields,
                             emit_event_fn=_emit,
+                            attribution=attr_defaults,
                             started_perf=started,
                         )
 
@@ -1571,6 +1609,7 @@ def patch_anthropic(
                         postcall_cost_fn=_postcall_cost_usd,
                         reservation_payload_fn=_reservation_payload_fields,
                         emit_event_fn=_emit,
+                        attribution=attr_defaults,
                         started_perf=started,
                     )
                 try:
@@ -1631,6 +1670,7 @@ def patch_anthropic(
                         cost_usd=cost_usd,
                         payload={
                             **_reservation_payload_fields(reserved_cost_usd),
+                            **_attribution_payload_fields(),
                             "method": method,
                             "model": kwargs.get("model") or (
                                 payload.get("model") if isinstance(payload, dict) else None
@@ -1813,6 +1853,7 @@ def patch_anthropic(
                             postcall_cost_fn=_postcall_cost_usd,
                             reservation_payload_fn=_reservation_payload_fields,
                             emit_event_fn=_emit,
+                            attribution=attr_defaults,
                             started_perf=started,
                         )
 
