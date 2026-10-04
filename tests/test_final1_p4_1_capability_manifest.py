@@ -104,6 +104,7 @@ def test_p41_advertised_cells_have_evidence_and_tests():
                 or path.startswith("docs/")
                 or path.startswith("kazenai-agent-")
                 or path.startswith("kazenai-examples/")
+                or path.startswith("kazenai-finops-sdk/")
                 or path.startswith("kazenai-contracts/")
                 or path.startswith("scripts/")
                 or path.startswith("tests/e2e/")
