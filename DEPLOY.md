@@ -48,12 +48,12 @@ CMD ["python", "-m", "your_application"]
 
 ```text
 # requirements.txt
-kazenai==1.1.0
-openai>=1
+kazenai[openai]==1.1.1
 ```
 
-Most customer integrations should pin `kazenai-finops==1.1.0` instead; that
-package installs a compatible Core version transitively.
+Most customer integrations should pin `kazenai-finops[openai]==1.1.1` instead; that
+package installs a compatible Core version transitively and constrains the
+certified provider SDK range.
 
 ## Runtime configuration
 

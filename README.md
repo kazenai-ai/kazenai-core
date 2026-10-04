@@ -32,16 +32,23 @@ KazenAI:            Pre-flight check → BLOCKED → LLM call never made
 ## Install
 
 ```bash
-python -m pip install kazenai "openai>=1.40,<2"
+python -m pip install "kazenai[openai]==1.1.1"
 # Most teams install the customer package instead:
-python -m pip install kazenai-finops "openai>=1.40,<2"
+python -m pip install "kazenai-finops[openai]==1.1.1"
+# Anthropic:
+# python -m pip install "kazenai-finops[anthropic]==1.1.1"
+# Both providers:
+# python -m pip install "kazenai-finops[providers]==1.1.1"
 ```
 
 `kazenai-finops` re-exports this SDK and is the recommended install for product integrations.
+Provider extras pin the certified SDK ranges so a first-run install cannot silently
+resolve OpenAI 3.x or Anthropic 1.x.
 
-The Control 1.1.0 certification covers `openai>=1.40,<2` and
+The Control 1.1.x certification covers `openai>=1.40,<2` and
 `anthropic>=0.39,<1`. Later provider-SDK major versions are unverified until
-they are added to the supported matrix.
+they are added to the supported matrix. Release `1.1.1` is a
+compatibility/distribution patch, not a new runtime capability line.
 
 Requires Python 3.10+.
 

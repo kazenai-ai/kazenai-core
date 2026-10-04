@@ -1,4 +1,4 @@
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 # Prefer the installed distribution version. Fallback is only for editable /
 # source checkouts where package metadata is unavailable.
@@ -7,7 +7,7 @@ try:
 
     __version__ = _pkg_version("kazenai")
 except PackageNotFoundError:  # pragma: no cover - source-tree only
-    __version__ = "1.1.0"
+    __version__ = "1.1.1"
 
 from .context import BackgroundTaskContext, RunContext, get_current_context, use_context
 from .attribution import (

@@ -1,8 +1,8 @@
 # Releasing `kazenai`
 
 This procedure is for maintainers publishing the Core package to public PyPI.
-Release Core before `kazenai-finops`, because the FinOps 1.1.0 package requires
-`kazenai>=1.1.0,<2.0`.
+Release Core before `kazenai-finops`, because the FinOps 1.1.1 package requires
+`kazenai>=1.1.1,<2.0`.
 
 ## 1. Prepare one releasable commit
 
@@ -53,11 +53,11 @@ repository to `PYTHONPATH`:
 python3 -m venv .venv-wheel
 source .venv-wheel/bin/activate
 python -m pip install --upgrade pip
-python -m pip install dist/kazenai-1.1.0-py3-none-any.whl openai anthropic
+python -m pip install "dist/kazenai-1.1.1-py3-none-any.whl[openai,anthropic]"
 python -c "import kazenai; print(kazenai.__version__)"
 ```
 
-The printed version must be `1.1.0`. Use mocked provider transports or a
+The printed version must be `1.1.1`. Use mocked provider transports or a
 non-production tenant for behavioral smoke tests; never place live secrets in
 logs.
 
@@ -83,16 +83,17 @@ local indexes, editable installs or sibling repositories:
 python3 -m venv .venv-public
 source .venv-public/bin/activate
 python -m pip install --upgrade pip
-python -m pip install --no-cache-dir "kazenai==1.1.0" openai anthropic
+python -m pip install --no-cache-dir "kazenai[openai,anthropic]==1.1.1"
 python -c "import importlib.metadata as m; print(m.version('kazenai'))"
 ```
 
+Confirm resolved provider SDK majors remain OpenAI `<2` and Anthropic `<1`.
 Rerun the supported package smoke test. Only after this succeeds should
-`kazenai-finops==1.1.0` be built and published.
+`kazenai-finops==1.1.1` be built and published.
 
 ## 7. Tag and document the release
 
-- Tag the exact published commit as `v1.1.0`.
+- Tag the exact published commit as `v1.1.1`.
 - Create a GitHub Release that links the tested commit and summarizes supported
   paths, compatibility and known limitations.
 - Record artifact hashes and the CI run used as release evidence.

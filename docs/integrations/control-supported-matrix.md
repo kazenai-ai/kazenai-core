@@ -13,7 +13,7 @@ capability requires deferred tests **before** raising its status above
 | Dimension | Control FINAL_1 |
 |-----------|-----------------|
 | Adapter | Sync **OpenAI Chat Completions** + **Anthropic Messages**, non-streaming and selected streaming surfaces, via `kazenai.monitor` |
-| Package | `from kazenai import monitor` (distribution `kazenai` 1.1.0 prepared) |
+| Package | `from kazenai import monitor` (distribution `kazenai` 1.1.1 prepared) |
 | Demo | Fake provider + real local Control services |
 | Live provider | Separate USER-GO (`live-verified` not claimed) |
 | Topology | Additive Control compose; Brain / Builder / Copilot / Home **absent** |
@@ -34,6 +34,7 @@ capability requires deferred tests **before** raising its status above
 | ID | Status | Evidence |
 |----|--------|----------|
 | `sdk.kazenai.monitor` | fixture-verified | P3-1, P3-2 |
+| `sdk.kazenai_finops.wrapper` | fixture-verified | identity re-export only (`monitor is kazenai.monitor`) |
 | `provider.openai.chat_completions.sync` | fixture-verified | P3-2 |
 | `provider.openai.chat_completions.sync.stream` | fixture-verified | official OpenAI SDK + mock transport; `create(stream=True)` and `.stream()` helper |
 | `provider.anthropic.messages.sync` | fixture-verified | P3-2 |

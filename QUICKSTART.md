@@ -6,13 +6,13 @@ product integrations should install the customer-facing package, which
 re-exports the Core API:
 
 ```bash
-python -m pip install "kazenai-finops==1.1.0" "openai>=1.40,<2"
+python -m pip install "kazenai-finops[openai]==1.1.1"
 ```
 
 Install Core directly when you specifically want the runtime package:
 
 ```bash
-python -m pip install "kazenai==1.1.0" "openai>=1.40,<2"
+python -m pip install "kazenai[openai]==1.1.1"
 ```
 
 Python 3.10, 3.11 and 3.12 are supported.
@@ -145,7 +145,7 @@ This explicit guard can reserve around a custom callable, but it does not make
 arbitrary provider response parsing a certified integration. The caller remains
 responsible for passing valid price and usage information.
 
-## Supported boundary in 1.1.0
+## Supported boundary in 1.1.x
 
 | Path | Status |
 |---|---|

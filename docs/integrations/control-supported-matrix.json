@@ -50,11 +50,17 @@
       "id": "sdk.kazenai_finops.wrapper",
       "category": "sdk",
       "name": "kazenai-finops re-export wrapper",
-      "detail": "Optional customer name; not DEMO_READY prerequisite",
-      "status": "implemented-unverified",
-      "evidence": [],
-      "tests": [],
-      "notes": "Optional Apache-2.0 wrapper; Control certification uses kazenai directly"
+      "detail": "Thin re-export of kazenai.monitor; not a separate control surface",
+      "status": "fixture-verified",
+      "evidence": [
+        "kazenai-finops-sdk/tests/test_package_smoke.py",
+        "kazenai-finops-sdk/tests/test_package_metadata.py"
+      ],
+      "tests": [
+        "kazenai-finops-sdk/tests/test_package_smoke.py",
+        "kazenai-finops-sdk/tests/test_package_metadata.py"
+      ],
+      "notes": "Identity-only re-export proven by installed-package smoke; no functionality beyond kazenai.monitor"
     },
     {
       "id": "provider.openai.chat_completions.sync",
