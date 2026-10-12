@@ -1,4 +1,4 @@
-"""Regression tests for streaming wrappers (Train B local cutoff; no stream-tick)."""
+"""Regression tests for streaming wrappers (local cutoff; no stream-tick)."""
 
 from __future__ import annotations
 

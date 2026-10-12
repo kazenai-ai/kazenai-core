@@ -1,4 +1,4 @@
-"""FINAL_1 P3-5 — ingest URL normalization for Control FinOps/Lens endpoints."""
+"""Ingest URL normalization for Control FinOps/Lens endpoints."""
 
 from __future__ import annotations
 

@@ -1,17 +1,12 @@
-# kazenai 1.1.2 (release candidate)
+# kazenai 1.1.2
 
-Control 1.1.x line. Promotes the FINAL_1_b_final working tree and the Phase 1
-bug fixes from the 2026-10-11 re-audit. Capability claims are bounded by
-[`docs/integrations/control-supported-matrix.md`](docs/integrations/control-supported-matrix.md);
-nothing here widens that matrix.
+Async clients, one budget across several clients, accurate streamed pricing,
+LangChain `ChatAnthropic`, multi-provider graphs, and a refreshed price table.
+Supported paths are listed in
+[Supported integrations](docs/integrations/control-supported-matrix.md).
 
-## Release order
-
-1. `kazen-event-schema` 0.6.4 — this release requires `kazen-event-schema>=0.6.4,<0.7`.
-2. `kazenai` 1.1.2.
-3. Agent FinOps and Agent Lens images (both require `kazenai>=1.1.2,<2.0`).
-
-`kazenai-finops` 1.1.1 (`kazenai>=1.1.1,<2.0`) resolves 1.1.2 without a re-release.
+Requires `kazen-event-schema>=0.6.4,<0.7`. Agent FinOps and Agent Lens require
+`kazenai>=1.1.2`.
 
 ## New: one budget across several clients (`SharedBudget`)
 
@@ -135,26 +130,26 @@ development-only opt-in and is ignored in production-like deployments.
   cost equal to the pricing table on the reported usage, and pre-dispatch
   `BudgetExceeded`.
 
-- **Settlement spool is safe across processes (A1).** Each
+- **Settlement spool is safe across processes.** Each
   `(org, FinOps URL, idempotency_key)` binds exactly one intent fingerprint
   through an atomic claim file. Conflicting reuse raises `SettleIntentConflict`
   in every process sharing the queue directory; previously two processes could
   both persist different amounts under one key.
-- **Settlement recovery is operable (A5).** `python -m kazenai.spine.settle_queue
+- **Settlement recovery is operable.** `python -m kazenai.spine.settle_queue
   flush|stats` with a single-owner lock and exit codes; `queue_stats()`
   (depth, oldest age, quarantined, last flush); corrupt records are quarantined
   with a WARNING instead of skipped; directory metadata is fsynced on POSIX. See
   [`docs/settlement-recovery.md`](docs/settlement-recovery.md).
-- **CrewAI listener routes real events (A2).** Ownership is resolved from the
+- **CrewAI listener routes real events.** Ownership is resolved from the
   crew's agents, tasks, LLMs, and tools, the event's agent/task references, and
   the active kickoff scope. CrewAI 1.15.26 LLM/task/tool events were previously
-  dropped. CrewAI remains outside the supported matrix.
+  dropped. CrewAI is still a preview integration.
 - **Event registry.** `finops.trajectory` and `finops.loop.anomaly`, which the SDK
   emits, are registered in `kazen-event-schema` 0.6.4, so strict consumers accept them.
 
 ## Also included since 1.1.1
 
-The FINAL_1_b_final working tree: journal-before-send settlement, shared
+Journal-before-send settlement, shared
 JWT issuer policy (`kazenai.auth.jwt`, including `extract_role`), async provider
 paths, LangChain/LangGraph/LiteLLM adapter contracts, and OTel control spans.
 Agent FinOps and Agent Lens import these APIs, which is why they require 1.1.2.

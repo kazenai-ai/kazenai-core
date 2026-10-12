@@ -53,7 +53,7 @@ def _enforcement_mode_value(name: str) -> str:
 def enforcement_fail_closed() -> bool:
     """Consumer-side FinOps unavailability policy.
 
-    U09: always execute the lifecycle resolver's effective ``failure_policy``
+    Always execute the lifecycle resolver's effective ``failure_policy``
     so diagnostics and runtime cannot disagree.
     """
     try:
@@ -100,7 +100,7 @@ _ENFORCEMENT_VARS = (
 
 
 def validate_prod_fail_closed_posture(service_name: str) -> None:
-    """Refuse startup when prod-like deployment enables fail-open enforcement (P0-2)."""
+    """Refuse startup when prod-like deployment enables fail-open enforcement."""
     if not is_saas_deployment():
         return
     import logging

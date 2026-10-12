@@ -62,7 +62,7 @@ _EXPECTED_FAIL_OPEN = (
 
 
 def _streaming_explicitly_denied() -> bool:
-    """Hard kill-switch only. Control-certified sync streaming is allowed by default (Train B)."""
+    """Hard kill-switch only. Control-certified sync streaming is allowed by default."""
     val = os.getenv("KAZENAI_DENY_STREAMING", "").strip().lower()
     return val in ("1", "true", "yes")
 
@@ -88,7 +88,7 @@ def _reject_streaming_if_unsupported(kwargs: Mapping[str, Any]) -> None:
         )
 
 
-# FINAL_1 / Train B: certified Control sync Chat Completions + Messages (stream + non-stream).
+# Certified Control sync Chat Completions + Messages (stream + non-stream).
 SUPPORTED_OPENAI_METHOD = "openai.chat.completions.create"
 SUPPORTED_ANTHROPIC_METHOD = "anthropic.messages.create"
 SUPPORTED_OPENAI_STREAM_METHOD = "openai.chat.completions.create.stream"
@@ -271,7 +271,7 @@ def _log_fail_open(context: str, exc: BaseException) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pre-call cost projection (SEC-R2-9)
+# Pre-call cost projection
 # ---------------------------------------------------------------------------
 
 _COST_ENGINE: Any = None
@@ -688,7 +688,7 @@ async def _try_mark_stream_pending_async(
     reserved_cost_usd: Any,
     actual_cost_usd: float | None = None,
 ) -> bool:
-    """Async twin of ``_try_mark_stream_pending`` (U02 exact-amount pending)."""
+    """Async twin of ``_try_mark_stream_pending`` (exact-amount pending)."""
     del workspace_id
     from .spine.guard import signal_reservation_event_async
 
@@ -805,7 +805,7 @@ def _try_mark_stream_pending(
     """Keep shared exposure pending when settlement is not financially acknowledged.
 
     When ``actual_cost_usd`` is known, re-signal ``usage_known`` so the exact amount
-    remains the lifecycle intent (U02). Only fall back to ``outcome_unknown`` when
+    remains the lifecycle intent. Only fall back to ``outcome_unknown`` when
     usage/pricing is unavailable.
     """
     del workspace_id
@@ -1316,9 +1316,9 @@ def patch_openai(
                     loop_scores=loop_scores,
                 )
 
-                # FINAL_1 P2-5: reject streaming before any network/provider work.
+                # Reject streaming before any network/provider work.
                 _reject_streaming_if_unsupported(kwargs)
-                # FINAL_1 P3-2: enforceable output token bound before dispatch.
+                # Enforceable output token bound before dispatch.
                 _apply_output_token_bound(kwargs)
 
                 call_kwargs = dict(kwargs)
@@ -1355,7 +1355,7 @@ def patch_openai(
                             error_code="stream_cutoff_pricing_unavailable",
                         )
 
-                # FINAL_1 P3-1: local cap first (fail closed), then shared FinOps reserve.
+                # Local cap first (fail closed), then shared FinOps reserve.
                 projected = _precall_projection_usd(call_kwargs, usd_per_1k_tokens)
                 held_projection, reserved_cost_usd = _reserve_with_local_hold(
                     enforcement=enforcement,
@@ -1375,7 +1375,7 @@ def patch_openai(
                         "input_tokens": _estimate_input_tokens(call_kwargs),
                     },
                 )
-                # R02: durable provider_started before every potential dispatch (stream + non-stream).
+                # Durable provider_started before every potential dispatch (stream + non-stream).
                 _mark_stream_started_or_release(
                     enforcement=enforcement,
                     held_projection=held_projection,
@@ -1431,7 +1431,7 @@ def patch_openai(
                         started_perf=started,
                     )
                 try:
-                    # R16: duration span around the real provider attempt (no-op when OTel off).
+                    # Duration span around the real provider attempt (no-op when OTel off).
                     from .otel import build_control_attributes, control_span
 
                     if attempt is not None:
@@ -1501,7 +1501,7 @@ def patch_openai(
                     usd_per_1k_tokens=usd_per_1k_tokens,
                 )
 
-                # R03/U02: missing usage/pricing → pending; false settle ack → pending
+                # Missing usage/pricing → pending; false settle ack → pending
                 # with exact known amount (never discard financial delivery failure).
                 if reserved_cost_usd is not None:
                     if cost_usd is None:
@@ -1657,7 +1657,7 @@ def patch_openai(
             pass
         setattr(obj, name, wrapped_fn)
 
-    # Train B: the official SDK exposes a lazy ChatCompletionStreamManager on
+    # The official SDK exposes a lazy ChatCompletionStreamManager on
     # ``chat.completions.stream``. It bypasses ``create``, so guard it directly.
     try:
         completions = client.chat.completions
@@ -1783,7 +1783,7 @@ def patch_openai(
     except Exception:
         pass
 
-    # FINAL_1 P3-2: certified monitor must not silently leave Responses unguarded.
+    # Certified monitor must not silently leave Responses unguarded.
     if certified_surface:
         try:
             if hasattr(client, "responses") and hasattr(client.responses, "create"):
@@ -1919,9 +1919,9 @@ def patch_anthropic(
                 except Exception:
                     loop_scores = None
 
-                # FINAL_1 P2-5: reject streaming before any network/provider work.
+                # Reject streaming before any network/provider work.
                 _reject_streaming_if_unsupported(kwargs)
-                # FINAL_1 P3-2: enforceable output token bound before dispatch.
+                # Enforceable output token bound before dispatch.
                 _apply_output_token_bound(kwargs)
 
                 call_kwargs = dict(kwargs)
@@ -1940,7 +1940,7 @@ def patch_anthropic(
                             error_code="stream_cutoff_pricing_unavailable",
                         )
 
-                # FINAL_1 P3-1: local cap first (fail closed), then shared FinOps reserve.
+                # Local cap first (fail closed), then shared FinOps reserve.
                 projected = _precall_projection_usd(call_kwargs, usd_per_1k_tokens)
                 held_projection, reserved_cost_usd = _reserve_with_local_hold(
                     enforcement=enforcement,
@@ -2217,7 +2217,7 @@ def patch_anthropic(
             pass
         setattr(obj, name, wrapped_fn)
 
-    # Train B: wrap messages.stream manager with finalize-once lifecycle.
+    # Wrap messages.stream manager with finalize-once lifecycle.
     try:
         if hasattr(client, "messages") and hasattr(client.messages, "stream"):
             orig_stream = client.messages.stream
@@ -2468,7 +2468,7 @@ def monitor(
     per provider in a multi-model workflow) draw from one local cap instead of
     one ``max_budget_usd`` each. Pass either ``budget`` or ``max_budget_usd``.
 
-    Certified Control contract (FINAL_1_b_final P5):
+    Certified Control contract:
     - Sync and async OpenAI ``chat.completions.create`` (stream=False|True) and
       ``chat.completions.stream``
     - Sync and async Anthropic ``messages.create`` (stream=False|True) and
@@ -2539,7 +2539,7 @@ def monitor(
             raise ValueError("pass either budget=SharedBudget(...) or max_budget_usd, not both")
     soft_budget = budget.max_usd if budget is not None else max_budget_usd
     finops = FinOpsController(cfg=FinOpsConfig(budget_usd=soft_budget, soft_pause_pct=soft_pause_pct, loop_anomaly_threshold=loop_anomaly_threshold))
-    # FINAL_1 P3-1 / G06: local max_budget_usd must feed the same pre-call Enforcement
+    # Local max_budget_usd must feed the same pre-call Enforcement
     # used on the patched provider path (not only FinOpsController post-call CB).
     if budget is not None:
         enforcement = budget.enforcement
@@ -2607,7 +2607,7 @@ def monitor(
     except Exception:
         pass
 
-    # U03/R06: clones must share the same Enforcement counter (not a fresh budget).
+    # Clones must share the same Enforcement counter (not a fresh budget).
     try:
         setattr(client, "_kazenai_enforcement", enforcement)
         setattr(client, "_kazenai_finops_controller", finops)

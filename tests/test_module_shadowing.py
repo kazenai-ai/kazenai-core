@@ -1,4 +1,4 @@
-"""P3-1: pin the deliberate monitor-function/submodule shadowing behavior.
+"""Pin the deliberate monitor-function/submodule shadowing behavior.
 
 kazenai/__init__.py re-exports the `monitor()` function under the same name as
 the `kazenai.monitor` submodule (public SDK API — cannot rename). These tests

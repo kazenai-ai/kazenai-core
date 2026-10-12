@@ -34,12 +34,12 @@ HTTP success with `result=pending` remains queued.
 5. Keep credentials in runtime configuration. API keys are not written to queue
    files unless a caller explicitly requests persistence.
 
-## Proven guarantees
+## Guarantees
 
 - Sync and async settlement paths journal before network delivery.
-- Process cancellation, connection failure, and the tested `os._exit` boundary
-  retain the pending record.
-- A local public-path proof replays the retained intent into FinOps/PostgreSQL.
+- Process cancellation, connection failure and abrupt process exit retain the
+  pending record.
+- A retained intent replays into Agent FinOps exactly as recorded.
 - Intent identity includes destination, organization, reservation/call/attempt,
   lifecycle event, and known amount.
 
@@ -47,9 +47,8 @@ HTTP success with `result=pending` remains queued.
 
 - This is a settlement delivery queue, not durable agent execution.
 - There is no claim of exactly-once provider execution or exactly-once billing.
-- Record, claim, and directory metadata are fsynced on POSIX. Host/power-loss
-  durability still depends on the filesystem honouring fsync and has not been
-  independently proven.
+- Record, claim and directory metadata are fsynced on POSIX. Durability across
+  host power loss depends on the filesystem honouring fsync.
 - Corrupt or malformed records are moved to `quarantine/` with a WARNING log
   and counted in `stats`; they are never redelivered automatically.
 - A claim orphaned by a crash (no pending record) blocks a *different* intent

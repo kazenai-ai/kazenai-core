@@ -41,9 +41,9 @@ class CrewExecutionScope:
         self.events: list[Any] = []
 
 
-# Stack per crew so overlapping executions do not overwrite each other (R15).
+# Stack per crew so overlapping executions do not overwrite each other.
 _ACTIVE_OPS: dict[int, list[CrewExecutionScope]] = {}
-# Task-local scope for concurrent kickoffs of the same crew (U07).
+# Task-local scope for concurrent kickoffs of the same crew.
 _TASK_SCOPE: contextvars.ContextVar[CrewExecutionScope | None] = contextvars.ContextVar(
     "kazenai_crew_task_scope",
     default=None,
@@ -113,7 +113,7 @@ def _ownership_graph(crew: Any) -> tuple[list[Any], set[str]]:
     CrewAI 1.15.x emits LLM events from ``agent.llm``, task events from the
     Task, and tool events from tool-usage helpers that reference the agent/task.
     None of those sources expose ``.crew`` reliably, so ownership is resolved
-    against this graph instead (A2).
+    against this graph instead.
     """
     objs: list[Any] = []
     keys: set[str] = set()
@@ -213,7 +213,7 @@ class KazenCrewListener:
         return local is not None and local.crew is owned
 
     def _op_for(self, crew: Any = None):
-        # Prefer task-local scope only when it belongs to this crew (F04).
+        # Prefer task-local scope only when it belongs to this crew.
         # Never fall back to another crew's ContextVar / top-of-stack.
         target = crew if crew is not None else self._crew_ref
         local = _TASK_SCOPE.get()
@@ -374,7 +374,7 @@ def _register_listener(crew: Any, listener: KazenCrewListener) -> None:
                             event = args[1] if len(args) > 1 else kwargs.get("event")
                             payload = event if event is not None else kwargs
                             owned = ltn._crew_ref or crew
-                            # F04/A2: route only sources owned by this crew's
+                            # Route only sources owned by this crew's
                             # graph or emitted inside its kickoff scope.
                             if not ltn.owns_event(source, event):
                                 return
@@ -535,7 +535,7 @@ class CrewAdapter:
             if guarded_client is not None:
                 reject_openai_responses_api(guarded_client)
                 require_control_client(guarded_client, label="CrewAI LLM client")
-                # R12: an unrelated monitored client must not certify Control.
+                # An unrelated monitored client must not certify Control.
                 if not crew_binds_guarded_client(crew, guarded_client):
                     raise UnsupportedFrameworkPath(
                         "CrewAI Control requires the guarded_client to be bound to the crew/agent "
@@ -777,7 +777,7 @@ def bind_crew_llm_client(crew_or_agent: Any, openai_client: Any, **monitor_kwarg
         except Exception:
             pass
     else:
-        # U05: automatic bind must prove a supported LLM path; use
+        # Automatic bind must prove a supported LLM path; use
         # declare_crew_control_boundary for explicit caller-owned wiring.
         raise UnsupportedFrameworkPath(
             "bind_crew_llm_client found no LLM/client path to bind; "

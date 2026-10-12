@@ -1,4 +1,4 @@
-"""Core re-export of P1-1 principal fixtures + JWT audience reuse."""
+"""Core re-export of principal fixtures + JWT audience reuse."""
 
 from __future__ import annotations
 

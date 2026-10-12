@@ -11,7 +11,7 @@ import pytest
 from kazenai import BudgetExceeded, SharedBudget, UnsupportedModeError, monitor
 from kazenai.integrations.adapter_contract import UnsupportedFrameworkPath
 from kazenai.model_pricing import model_cost_usd_per_million
-from test_final1b_final_eight_cell_cancel_matrix import ANTHROPIC_JSON, ANTHROPIC_SSE, OPENAI_JSON, OPENAI_SSE
+from test_async_cancel_matrix import ANTHROPIC_JSON, ANTHROPIC_SSE, OPENAI_JSON, OPENAI_SSE
 
 pytest.importorskip("langchain_anthropic")
 pytest.importorskip("langgraph")

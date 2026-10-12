@@ -1,0 +1,126 @@
+"""ReservationHandle carries decision_id + attribution through Core."""
+
+from __future__ import annotations
+
+import json
+from unittest.mock import patch
+
+from kazenai.spine.guard import ReservationHandle, reserve_budget
+
+
+def test_lifecycle_reserve_preserves_decision_id(monkeypatch):
+    monkeypatch.setenv("KAZENAI_FINOPS_URL", "http://finops.test")
+    monkeypatch.setenv("KAZENAI_FINOPS_CONTROL_PROFILE", "control")
+    monkeypatch.setenv("KAZENAI_FINOPS_API_KEY", "k")
+    monkeypatch.setenv("KAZENAI_ENFORCEMENT_MODE", "fail_open")
+    monkeypatch.setenv("KAZENAI_FINOPS_RESERVATION_MODE", "fail_open")
+    monkeypatch.delenv("KAZENAI_FINOPS_ENFORCEMENT_MODE", raising=False)
+
+    payload = {
+        "reservation_id": "rsv_1",
+        "call_id": "call_1",
+        "attempt": 1,
+        "reserved_usd_micros": 10_000,
+        "decision_id": "dec_xyz",
+        "decision_receipt": {
+            "decision_id": "dec_xyz",
+            "economics": {
+                "business_subject_ref": "cust-9",
+                "feature_id": "assist",
+                "workflow_id": "wf-9",
+            },
+            "execution": {"run_id": "r", "call_id": "call_1", "attempt": 1},
+        },
+    }
+    caps = {
+        "ok": True,
+        "effective_lifecycle": {
+            "profile": "control",
+            "lifecycle_version": "reservation.lifecycle.v1",
+        },
+        "capabilities": {"reservation_settlement": True},
+    }
+
+    class _Resp:
+        def __init__(self, body: dict):
+            self._body = body
+
+        def read(self):
+            return json.dumps(self._body).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def _urlopen(req, timeout=0):  # noqa: ARG001
+        url = getattr(req, "full_url", None) or req.get_full_url()
+        if "/lifecycle" in str(url):
+            return _Resp(caps)
+        return _Resp(payload)
+
+    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=_urlopen):
+        handle = reserve_budget(org_id="o", workspace_id="w", run_id="r")
+    assert isinstance(handle, ReservationHandle)
+    assert handle.decision_id == "dec_xyz"
+    assert handle.reservation_id == "rsv_1"
+    assert handle.business_subject_ref == "cust-9"
+    assert handle.feature_id == "assist"
+    assert handle.workflow_id == "wf-9"
+
+
+def test_lifecycle_reserve_falls_back_to_request_attribution(monkeypatch):
+    """A response missing echoed attribution must not erase caller context."""
+    monkeypatch.setenv("KAZENAI_FINOPS_URL", "http://finops.test")
+    monkeypatch.setenv("KAZENAI_FINOPS_CONTROL_PROFILE", "control")
+    monkeypatch.setenv("KAZENAI_FINOPS_API_KEY", "k")
+    monkeypatch.setenv("KAZENAI_ENFORCEMENT_MODE", "fail_open")
+    monkeypatch.setenv("KAZENAI_FINOPS_RESERVATION_MODE", "fail_open")
+    monkeypatch.delenv("KAZENAI_FINOPS_ENFORCEMENT_MODE", raising=False)
+
+    payload = {
+        "reservation_id": "rsv_2",
+        "reserved_usd_micros": 10_000,
+        "decision_receipt": {"decision_id": "dec_fallback"},
+    }
+    caps = {
+        "ok": True,
+        "effective_lifecycle": {
+            "profile": "control",
+            "lifecycle_version": "reservation.lifecycle.v1",
+        },
+        "capabilities": {"reservation_settlement": True},
+    }
+
+    class _Resp:
+        def __init__(self, body: dict):
+            self._body = body
+
+        def read(self):
+            return json.dumps(self._body).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def _urlopen(req, timeout=0):  # noqa: ARG001
+        url = getattr(req, "full_url", None) or req.get_full_url()
+        if "/lifecycle" in str(url):
+            return _Resp(caps)
+        return _Resp(payload)
+
+    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=_urlopen):
+        handle = reserve_budget(
+            org_id="o",
+            workspace_id="w",
+            run_id="r",
+            business_subject_ref="cust-request",
+            feature_id="feature-request",
+            workflow_id="workflow-request",
+        )
+    assert handle.business_subject_ref == "cust-request"
+    assert handle.feature_id == "feature-request"
+    assert handle.workflow_id == "workflow-request"

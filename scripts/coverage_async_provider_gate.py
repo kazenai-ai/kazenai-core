@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""U13/F08: coverage gate for ``kazenai._async_provider`` via real async fault suites.
+"""Coverage gate for ``kazenai._async_provider`` via real async fault suites.
 
 Measures line coverage while executing the maintained async/provider cancellation
 and settlement suites — not a vacuous import-only probe.
@@ -16,7 +16,7 @@ from pathlib import Path
 from textwrap import dedent
 
 ROOT = Path(__file__).resolve().parents[1]
-ARTIFACTS = ROOT.parent / "artifacts" / "final1b-final-reaudit-fix-20261011"
+ARTIFACTS = ROOT.parent / "artifacts" / "kazenai-core-async-coverage"
 # Meaningful floor once real suites execute the module. Raise as coverage grows.
 FAIL_UNDER = 35.0
 
@@ -37,9 +37,9 @@ COVERAGERC = dedent(
 
 # Prefer suites that exercise async provider / cancel paths when present.
 TEST_TARGETS = [
-    "tests/test_final1b_final_p5_async_providers.py",
-    "tests/test_final1b_final_p5_remaining.py",
-    "tests/test_final1b_final_eight_cell_cancel_matrix.py",
+    "tests/test_async_providers.py",
+    "tests/test_async_providers_retries.py",
+    "tests/test_async_cancel_matrix.py",
 ]
 
 
@@ -152,7 +152,7 @@ def main() -> int:
             and pct >= FAIL_UNDER
         ),
         "note": (
-            "F08: executes real async/provider suites under coverage; "
+            "Executes real async/provider suites under coverage; "
             "import-only probes are not accepted as regression protection."
         ),
     }

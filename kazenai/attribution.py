@@ -1,4 +1,4 @@
-"""SDK business attribution context (FINAL_1_b P1-3).
+"""SDK business attribution context.
 
 Attribution is **metadata only**. It cannot grant access, choose a workspace, or
 lower an authorized amount. Access-control identity remains org/workspace + principal

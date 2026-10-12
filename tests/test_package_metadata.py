@@ -1,4 +1,4 @@
-"""Package metadata and first-run install-contract checks for kazenai 1.1.2."""
+"""Package metadata and first-run install-contract checks for kazenai 1.1.3."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from pathlib import Path
 import kazenai
 
 _ROOT = Path(__file__).resolve().parents[1]
-_EXPECTED = "1.1.2"
-# Install range covers certified OpenAI 1.109.1 + 2.x lines (see SUPPORT pins).
+_EXPECTED = "1.1.3"
+# Install range covers the tested OpenAI 1.109.1 and 2.x lines.
 _OPENAI_BOUND = "openai>=1.40,<3"
 _ANTHROPIC_BOUND = "anthropic>=0.39,<1"
 

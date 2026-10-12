@@ -1,4 +1,4 @@
-"""FINAL_1 P3-3 — private-by-default content capture policy.
+"""Private-by-default content capture policy.
 
 Default is metadata-only: prompt/tool/result bodies are omitted from events,
 sinks, logs, and offline queues. Explicit opt-in modes:
@@ -36,7 +36,7 @@ _VALUE_SECRET_PATTERNS = (
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----"),
     re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*", re.IGNORECASE),
-    # Explicit test canary prefix used by P3-3 verification.
+    # Explicit test canary prefix used by the capture-privacy tests.
     re.compile(r"CANARY_SECRET_[A-Za-z0-9_\-]{8,}"),
 )
 

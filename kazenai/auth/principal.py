@@ -1,4 +1,4 @@
-"""Canonical principal helpers for kazenai-core (FINAL_1 P1-1 / LF-05).
+"""Canonical principal helpers for kazenai-core.
 
 Prefers shared ``kazenai_contracts.principal`` when installed; otherwise uses the
 in-tree mirror ``kazenai.auth._principal_impl``. No sibling-path ``sys.path``

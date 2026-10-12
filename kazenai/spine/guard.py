@@ -62,12 +62,12 @@ def _finops_headers(org_id: str = "", *, api_key: str | None = None) -> dict[str
     """Headers for FinOps budget calls.
 
     The spine guard runs inside services that authenticate to FinOps with a shared
-    service credential. FinOps org binding (Loop 25 H4) requires a service credential
+    service credential. FinOps org binding requires a service credential
     to assert the tenant org it operates on via ``X-Kazen-Act-As-Org``; without it,
     cross-org reserve/reconcile calls are rejected with 403 and enforcement fails closed.
 
     When ``api_key`` is supplied (frozen on a ReservationHandle), use it instead of
-    the current process environment (R09 immutable settlement binding).
+    the current process environment (immutable settlement binding).
     """
     key = (api_key if api_key is not None else _api_key()).strip()
     headers = {"Content-Type": "application/json", "X-API-Key": key}
@@ -95,7 +95,7 @@ def _agentlens_mirror_enabled() -> bool:
 
 
 def _default_sink() -> EventSink:
-    """Process-cached MultiSink — one HttpSink worker set per ingest config (P3-4)."""
+    """Process-cached MultiSink — one HttpSink worker set per ingest config."""
     global _default_sink_instance, _default_sink_key
     ingest = (
         os.getenv("KAZENAI_FINOPS_INGEST_URL")
@@ -333,7 +333,7 @@ def _lifecycle_budget_enabled() -> bool:
 class ReservationHandle:
     """Pre-call reservation result. Float-compatible for legacy callers.
 
-    R09: when ``lifecycle`` is True, settlement uses the frozen FinOps binding
+    When ``lifecycle`` is True, settlement uses the frozen FinOps binding
     captured at admission (URL/credential/org/workspace/failure policy), not the
     live process environment — so mid-flight env mutation cannot redirect cleanup.
     """
@@ -593,7 +593,7 @@ def _capture_settlement_binding(
     org_id: str,
     workspace_id: str,
 ) -> dict[str, str]:
-    """Freeze admit-time FinOps destination + effective lifecycle policy (R09)."""
+    """Freeze admit-time FinOps destination + effective lifecycle policy."""
     from kazenai.lifecycle_config import (
         map_accounting_owner_to_enforcement,
         resolve_effective_lifecycle,
@@ -613,7 +613,7 @@ def _capture_settlement_binding(
     }
 
 
-# Cache key: (base_url, org_id, api_key_fingerprint) — U09 identity-scoped.
+# Cache key: (base_url, org_id, api_key_fingerprint) — identity-scoped.
 _LIFECYCLE_CAP_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 
 
@@ -673,7 +673,7 @@ async def _fetch_server_lifecycle_capabilities_async(
     org_id: str = "",
     api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Native async GET /v1/budget/lifecycle (U09 — does not block the event loop)."""
+    """Native async GET /v1/budget/lifecycle (does not block the event loop)."""
     import time
 
     import httpx
@@ -742,7 +742,7 @@ def _ensure_server_lifecycle_compatible(
     org_id: str = "",
     api_key: str | None = None,
 ) -> None:
-    """Pre-dispatch Control gate: client/server lifecycle must agree (R09)."""
+    """Pre-dispatch Control gate: client/server lifecycle must agree."""
     from kazenai.lifecycle_config import resolve_effective_lifecycle
 
     if not resolve_effective_lifecycle().uses_reservation_settlement:
@@ -757,7 +757,7 @@ async def _ensure_server_lifecycle_compatible_async(
     org_id: str = "",
     api_key: str | None = None,
 ) -> None:
-    """Async twin of ``_ensure_server_lifecycle_compatible`` (U09)."""
+    """Async twin of ``_ensure_server_lifecycle_compatible``."""
     from kazenai.lifecycle_config import resolve_effective_lifecycle
 
     if not resolve_effective_lifecycle().uses_reservation_settlement:
@@ -927,7 +927,7 @@ def _reserve_lifecycle(
             economic_state="reserving",
         ),
     ) as span:
-        # U10: inject W3C headers inside the admission span.
+        # Inject W3C headers inside the admission span.
         req = urllib.request.Request(
             f"{base}/v1/budget/reserve",
             data=data,
@@ -1305,7 +1305,7 @@ def _journal_settle_intent(
     api_key: str | None,
     error: str = "pre_send",
 ) -> tuple[str, str]:
-    """Journal exact settle intent before delivery (F01). Returns (path, fingerprint)."""
+    """Journal exact settle intent before delivery. Returns (path, fingerprint)."""
     from kazenai.spine.settle_queue import intent_fingerprint, journal_settle_intent
 
     fp = intent_fingerprint(payload, org_id=org_id, base_url=base)
@@ -1314,7 +1314,7 @@ def _journal_settle_intent(
         error=error,
         base_url=base,
         org_id=org_id,
-        api_key=None,  # never persist credentials in the spool (F02)
+        api_key=None,  # never persist credentials in the spool
         persist_api_key=False,
     )
     return path, fp
@@ -1390,7 +1390,7 @@ def _post_settle_sync(
     journal_path: str | None = None
     journal_fp: str | None = None
     if journal_before_send and enqueue_on_failure:
-        # F01: exact intent must survive process death during the send window.
+        # Exact intent must survive process death during the send window.
         try:
             journal_path, journal_fp = _journal_settle_intent(
                 payload, base=base, org_id=org_id, api_key=api_key, error="pre_send"
@@ -1400,7 +1400,7 @@ def _post_settle_sync(
             raise
 
     try:
-        # U10: build/inject headers *inside* the settlement span so traceparent
+        # Build/inject headers *inside* the settlement span so traceparent
         # parentage matches the active client span.
         with span_cm:
             body = json.dumps(payload).encode("utf-8")
@@ -1467,7 +1467,7 @@ def reconcile_budget(
     else:
         reserved_f = float(reserved_cost_usd)
 
-    # R09: prefer frozen admit-time binding over live env.
+    # Prefer frozen admit-time binding over live env.
     base = handle.settlement_base_url() if handle is not None else _finops_url()
     settle_org = handle.settlement_org_id(org_id) if handle is not None else org_id
     settle_key = handle.settlement_api_key() if handle is not None else None
@@ -1487,7 +1487,7 @@ def reconcile_budget(
         return False
 
     if use_lifecycle and handle is not None and handle.reservation_id:
-        # provider_started must already have been recorded before dispatch (R02).
+        # provider_started must already have been recorded before dispatch.
         # Reconcile only settles known usage; never invents a second start.
         actual_micros = _usd_to_micros_ceil(float(actual_cost_usd))
         payload = build_settle_payload(
@@ -1581,7 +1581,7 @@ async def reconcile_budget_async(
                     actual_usd_micros=actual_micros,
                 )
                 lifecycle_payload = payload
-                # F01: journal before await so CancelledError / ConnectError keep intent.
+                # Journal before await so CancelledError / ConnectError keep intent.
                 journal_path, journal_fp = _journal_settle_intent(
                     payload,
                     base=base,
@@ -1779,7 +1779,7 @@ async def signal_reservation_event_async(
     journal_path: str | None = None
     journal_fp: str | None = None
     try:
-        # F01: journal before await so CancelledError / ConnectError keep intent.
+        # Journal before await so CancelledError / ConnectError keep intent.
         journal_path, journal_fp = _journal_settle_intent(
             payload,
             base=base,
@@ -1849,7 +1849,7 @@ def flush_pending_settlements(
     default_api_key: str | None = None,
     timeout_s: float = 2.0,
 ) -> dict[str, int]:
-    """Public SDK entry to redeliver durable settle intents after restart (U02)."""
+    """Public SDK entry to redeliver durable settle intents after restart."""
     from kazenai.spine.settle_queue import flush_pending_settlements as _flush
 
     return _flush(

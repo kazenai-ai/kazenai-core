@@ -1,4 +1,4 @@
-"""P3-3 — fail-open helper paths log unexpected exceptions."""
+"""Fail-open helper paths log unexpected exceptions."""
 
 from __future__ import annotations
 

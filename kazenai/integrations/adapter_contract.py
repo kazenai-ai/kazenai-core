@@ -1,4 +1,4 @@
-"""Shared framework adapter contract (FINAL_1_b_final P8).
+"""Shared framework adapter contract.
 
 Framework layers supply execution context and Observe spans. Economic admission
 stays at the guarded provider client or LiteLLM gateway hook — middleware must
@@ -226,7 +226,7 @@ def emit_framework_event(
             except Exception:
                 pass
         else:
-            # U12: default delivery through spine sinks when no callback is supplied.
+            # Default delivery through spine sinks when no callback is supplied.
             try:
                 from ..spine.guard import _emit_event
 

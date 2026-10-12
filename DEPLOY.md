@@ -10,9 +10,9 @@ budget authority and event ingest endpoint are supplied by Agent FinOps.
 - OpenAI Chat Completions clients, sync and async, streaming and non-streaming
 - Anthropic Messages clients, sync and async, streaming and non-streaming
 
-See [QUICKSTART.md](QUICKSTART.md) for the exact supported call paths and
-[docs/integrations/control-supported-matrix.md](docs/integrations/control-supported-matrix.md)
-for the evidence behind each one.
+See [QUICKSTART.md](QUICKSTART.md) for the supported call paths and
+[Supported integrations](docs/integrations/control-supported-matrix.md) for how
+each one is verified.
 
 ## Verify a source checkout
 
@@ -28,9 +28,7 @@ mypy kazenai
 pytest --cov=kazenai --cov-fail-under=80
 ```
 
-CI must pass on Python 3.10, 3.11 and 3.12 before a release. Maintainers should
-follow [RELEASING.md](RELEASING.md) rather than publishing artifacts made from a
-working tree.
+CI runs on Python 3.10, 3.11 and 3.12.
 
 ## Build an application image
 
@@ -49,10 +47,10 @@ CMD ["python", "-m", "your_application"]
 
 ```text
 # requirements.txt
-kazenai[openai]==1.1.2
+kazenai[openai]==1.1.3
 ```
 
-Most customer integrations should pin `kazenai-finops[openai]==1.1.2` instead; that
+Most customer integrations should pin `kazenai-finops[openai]==1.1.3` instead; that
 package installs a compatible Core version transitively and bounds the
 provider SDK range.
 

@@ -91,7 +91,7 @@ class EffectiveLifecycleConfig:
 
 
 def map_accounting_owner_to_enforcement(owner: str) -> str:
-    """Map lifecycle ``sdk|server`` to enforcement ``sdk|gateway`` (R09)."""
+    """Map lifecycle ``sdk|server`` to enforcement ``sdk|gateway``."""
     value = (owner or "").strip().lower()
     if value in {"server", "gateway"}:
         return "gateway"
@@ -233,7 +233,7 @@ def resolve_effective_lifecycle(
                 "ambiguous_migration: Control profile retained fail_closed despite "
                 "STRICT_BUDGET disable"
             )
-        # U09: fold explicit legacy fail_open into the *same* effective policy
+        # Fold explicit legacy fail_open into the *same* effective policy
         # that runtime reads — never leave diagnostics disagreeing with execution.
         enf = _norm(env.get("KAZENAI_ENFORCEMENT_MODE"))
         res = _norm(env.get("KAZENAI_FINOPS_RESERVATION_MODE"))
@@ -260,7 +260,7 @@ def resolve_effective_lifecycle(
                 )
             else:
                 failure_policy = "fail_open"
-        # Explicit mode env is part of the effective snapshot (U09).
+        # Explicit mode env is part of the effective snapshot.
         enf = _norm(env.get("KAZENAI_ENFORCEMENT_MODE"))
         res = _norm(env.get("KAZENAI_FINOPS_RESERVATION_MODE"))
         if enf in {"fail_open", "fail_closed"}:

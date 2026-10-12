@@ -1,4 +1,4 @@
-"""A7: the committed KazenEvent JSON Schema export must match the installed model."""
+"""The committed KazenEvent JSON Schema export must match the installed model."""
 
 from __future__ import annotations
 

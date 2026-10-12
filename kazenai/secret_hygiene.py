@@ -1,4 +1,4 @@
-"""Fail-closed startup checks for critical secret hygiene (Loop 25 P0-1).
+"""Fail-closed startup checks for critical secret hygiene.
 
 Compares secrets via digests only — never logs or echoes secret values.
 """

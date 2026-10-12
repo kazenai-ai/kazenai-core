@@ -88,7 +88,7 @@ class TokenCostEngine:
     def price(self, model: str) -> ModelPricing:
         # Resolve via the single shared resolver (exact → alias → longest-prefix
         # at a token boundary) so "known" and "priced" can never disagree.
-        # See pricing_policy.resolve_model_key / P0-2.
+        # See pricing_policy.resolve_model_key.
         resolved = resolve_model_key(model, self._pricing.keys(), _ALIASES)
         if resolved is not None:
             return self._pricing[resolved]

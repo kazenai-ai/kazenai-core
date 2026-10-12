@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/kazenai.svg)](https://pypi.org/project/kazenai/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/kazenai-ai/kazenai-core/blob/main/LICENSE)
 
 **Install:** [PyPI · kazenai](https://pypi.org/project/kazenai/) · **Customer SDK:** [`kazenai-finops`](https://pypi.org/project/kazenai-finops/) · **Docs:** [docs.kazenai.com](https://docs.kazenai.com/) · **Products:** [kazenai.com](https://kazenai.com)
 
@@ -32,26 +32,22 @@ KazenAI:            Pre-flight check → BLOCKED → LLM call never made
 ## Install
 
 ```bash
-python -m pip install "kazenai[openai]==1.1.2"
+python -m pip install "kazenai[openai]==1.1.3"
 # Most teams install the customer package instead:
-python -m pip install "kazenai-finops[openai]==1.1.2"
+python -m pip install "kazenai-finops[openai]==1.1.3"
 # Anthropic:
-# python -m pip install "kazenai-finops[anthropic]==1.1.2"
+# python -m pip install "kazenai-finops[anthropic]==1.1.3"
 # Both providers:
-# python -m pip install "kazenai-finops[providers]==1.1.2"
+# python -m pip install "kazenai-finops[providers]==1.1.3"
 ```
 
 `kazenai-finops` re-exports this SDK and is the recommended install for product integrations.
-Provider extras bound the SDK ranges so a first-run install cannot silently
-resolve OpenAI 3.x or Anthropic 1.x.
+Provider extras keep the provider SDKs within the supported ranges
+(`openai>=1.40,<3`, `anthropic>=0.39,<1`).
 
-Tested cells are OpenAI 1.109.1 and an isolated OpenAI 2.48.0 cell within the
-install range `openai>=1.40,<3`, plus Anthropic 0.125.0 within
-`anthropic>=0.39,<1`. Other versions in those ranges are compatible candidates,
-not independently verified versions. Verification uses synthetic provider
-transports and real local KazenAI services; the OpenAI and Anthropic paths are
-also verified against the live OpenAI and Anthropic APIs on 2026-10-12 (gpt-6-luna, claude-sonnet-5-5) (`tests/test_live_provider_smoke.py`, opt-in). Source of truth:
-[docs/integrations/control-supported-matrix.md](docs/integrations/control-supported-matrix.md).
+KazenAI is tested on OpenAI 1.109.1 and 2.48.0 and Anthropic 0.125.0, and the
+OpenAI and Anthropic paths are verified against the live APIs. Full list:
+[Supported integrations](https://github.com/kazenai-ai/kazenai-core/blob/main/docs/integrations/control-supported-matrix.md).
 
 Requires Python 3.10+.
 
@@ -112,14 +108,13 @@ Illustrative debug output — not a customer bill or savings claim.
 
 | Path | Status |
 |------|--------|
-| OpenAI `chat.completions.create`, sync/async, non-streaming and streaming | Fixture-verified and live-verified (2026-10-12) via `monitor()` |
-| Anthropic `messages.create`, sync/async, non-streaming and streaming | Fixture-verified and live-verified (2026-10-12) via `monitor()` |
-| OpenAI Responses API / Realtime | Unsupported on the Control path |
-| LangChain | Fixture- and live-verified (2026-10-12) when the actual provider client is monitored/bound (`ChatOpenAI` via `bind_monitored_chat_openai`, `ChatAnthropic` via `bind_monitored_chat_anthropic`) |
-| LangGraph | Fixture- and live-verified (2026-10-12) with an explicit declared boundary; arbitrary raw clients in nodes are not intercepted |
-| LiteLLM proxy | Live-verified (2026-10-12): app-owned and gateway-owned accounting with Agent FinOps; gateway-owned streaming settlement not yet verified |
-| CrewAI | Not in the supported matrix. 1.1.2 routes CrewAI 1.15.26 LLM/task/tool events to the owning crew (tested on the real event bus); cancellation and native `akickoff` cells are still unverified |
-| AutoGen | Unsupported |
+| OpenAI `chat.completions.create` / `.stream` / `.parse`, sync and async, streaming and non-streaming | Supported, verified against the live API |
+| Anthropic `messages.create` / `.stream`, sync and async, streaming and non-streaming | Supported, verified against the live API |
+| LangChain `ChatOpenAI` / `ChatAnthropic` | Supported when bound with `bind_monitored_chat_openai` / `bind_monitored_chat_anthropic` |
+| LangGraph | Supported when the graph declares every provider client its nodes use; raw clients created inside nodes are not intercepted |
+| LiteLLM proxy | Supported with application-owned or gateway-owned accounting (gateway-owned streaming settlement not yet verified) |
+| CrewAI | Preview: `bind_crew_llm_client` works for sequential crews; not yet a supported path |
+| OpenAI Responses API / Realtime, AutoGen | Not supported |
 
 ### Streaming
 
@@ -227,9 +222,9 @@ Pass `max_budget_usd` (or `budget=SharedBudget(...)`), `org_id`, `project_id`,
 `workspace_id` and attribution fields directly to `monitor()`; they are not
 inferred from similarly named environment variables.
 
-For shared Control deployments, read [Settlement recovery](docs/settlement-recovery.md).
-The current queue requires an explicitly supervised flusher and one process per
-queue directory; it is not a general multiprocess job queue.
+For shared Control deployments, read [Settlement recovery](https://github.com/kazenai-ai/kazenai-core/blob/main/docs/settlement-recovery.md).
+Run the settlement flusher on a schedule; processes on one host can share a
+queue directory, but the queue does not coordinate across hosts.
 
 ---
 
@@ -245,10 +240,9 @@ queue directory; it is not a general multiprocess job queue.
 
 ## Contributing
 
-Issues and PRs that improve budget/loop reliability are welcome. Keep claims aligned with the supported paths above.
-
-Maintainers: follow [RELEASING.md](RELEASING.md) for the clean-checkout and
-public-PyPI verification sequence.
+Issues and pull requests that improve budget and loop reliability are welcome —
+see [CONTRIBUTING.md](https://github.com/kazenai-ai/kazenai-core/blob/main/CONTRIBUTING.md).
+Maintainers release with [RELEASING.md](https://github.com/kazenai-ai/kazenai-core/blob/main/RELEASING.md).
 
 Products and design-partner enquiries: [kazenai.com](https://kazenai.com) · **founder@kazenai.com**
 
@@ -256,4 +250,4 @@ Products and design-partner enquiries: [kazenai.com](https://kazenai.com) · **f
 
 ## License
 
-Apache License 2.0. See LICENSE and NOTICE.
+Apache License 2.0. See [LICENSE](https://github.com/kazenai-ai/kazenai-core/blob/main/LICENSE) and [NOTICE](https://github.com/kazenai-ai/kazenai-core/blob/main/NOTICE).

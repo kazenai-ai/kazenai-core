@@ -157,7 +157,7 @@ class StreamAttempt:
     terminal_outcome: Optional[StreamOutcome] = None
     financial_pending: bool = False
     cost_confidence: str = "unknown"
-    # U10: model-attempt span that outlives stream object return.
+    # Model-attempt span that outlives stream object return.
     _otel_span: Any = field(default=None, repr=False)
     _otel_token: Any = field(default=None, repr=False)
 
@@ -173,7 +173,7 @@ class StreamAttempt:
         reservation_id: str | None = None,
         decision_id: str | None = None,
     ) -> None:
-        """Start ``kazenai.model_attempt`` for the full stream lifetime (U10)."""
+        """Start ``kazenai.model_attempt`` for the full stream lifetime."""
         if self._otel_span is not None:
             return
         try:
@@ -390,7 +390,7 @@ class StreamAttempt:
     ) -> None:
         """Async twin of finalize — awaits native FinOps settle/pending callbacks.
 
-        R04: do not set ``_finalized`` until settlement/pending delivery finishes
+        Do not set ``_finalized`` until settlement/pending delivery finishes
         (or a cancellation-safe pending mark is attempted). Cancellation mid-await
         must not strand an obligation behind a once-only flag.
         """
@@ -486,7 +486,7 @@ class StreamAttempt:
             self.financial_pending = pend
             self.cost_confidence = conf
             # Match sync finalize: exact provider usage stays on the local counter
-            # even when remote settlement acknowledgment is still pending (U02).
+            # even when remote settlement acknowledgment is still pending.
             recorded = settle_cost if conf.startswith("exact") else 0.0
             try:
                 self.enforcement.record_call(
@@ -508,7 +508,7 @@ class StreamAttempt:
                 self._finalize_in_progress = False
 
         # Await network outside the lock.
-        # R04: cancellation mid-settlement must still finish local bookkeeping and
+        # Cancellation mid-settlement must still finish local bookkeeping and
         # leave financial_pending=True after a durable pending mark.
         try:
             if has_settlement_obligation and not pending and reconcile is not None:

@@ -1,4 +1,4 @@
-"""Conductor access_list context fencing (Loop 24 P1-7)."""
+"""Conductor access_list context fencing."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Loop 25 P0-3 / H2 — shared model pricing resolution."""
+"""Shared model pricing resolution."""
 
 from __future__ import annotations
 

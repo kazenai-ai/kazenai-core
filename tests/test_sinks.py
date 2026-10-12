@@ -52,7 +52,7 @@ def test_jsonl_sink_appends_line(tmp_path):
 
 
 def test_jsonl_sink_closes_file_handle(tmp_path):
-    """P3-2 — emit must not leak an open file handle (ResourceWarning)."""
+    """Emit must not leak an open file handle (ResourceWarning)."""
     import warnings
 
     path = str(tmp_path / "events.jsonl")

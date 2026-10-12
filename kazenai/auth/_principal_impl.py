@@ -1,4 +1,4 @@
-"""Local mirror of kazenai_contracts.principal (FINAL_1 LF-05).
+"""Local mirror of kazenai_contracts.principal.
 
 Kept in-tree so public ``kazenai`` installs work without a sibling
 ``kazenai-contracts`` checkout or sys.path injection. Prefer the installed

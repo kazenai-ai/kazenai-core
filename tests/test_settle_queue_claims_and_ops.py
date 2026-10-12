@@ -1,4 +1,4 @@
-"""Settlement spool A1 (cross-process identity) and A5 (operated recovery) tests."""
+"""Settlement spool: cross-process identity and operated recovery."""
 
 from __future__ import annotations
 

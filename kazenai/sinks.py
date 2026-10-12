@@ -1,4 +1,4 @@
-"""Event sinks with bounded, lifecycle-managed HTTP delivery (FINAL_1 P3-4)."""
+"""Event sinks with bounded, lifecycle-managed HTTP delivery."""
 
 from __future__ import annotations
 

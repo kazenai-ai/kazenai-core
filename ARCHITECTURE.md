@@ -1,63 +1,60 @@
-# Architecture notes — `kazenai` Core
+# Architecture
 
-This document is for maintainers and open-source readers. It describes current
-shape and planned modularization. Public import paths stay stable unless a
-release notes a breaking change.
+`kazenai` is an in-process SDK. It wraps OpenAI and Anthropic clients, checks
+each call against a budget before it is sent, and records what the call cost
+once the provider reports usage. It can work entirely locally or with Agent
+FinOps as a shared spending authority.
 
-## Public API (stable)
+## Public API
 
 ```python
-from kazenai import monitor, BudgetExceeded, Enforcement
+from kazenai import monitor, SharedBudget, BudgetExceeded, Enforcement
 ```
 
-`monitor()` remains the certified Control entrypoint for OpenAI Chat
-Completions and Anthropic Messages, sync and async, streaming and non-streaming
-(see the supported-surfaces matrix and docs). Callers must not depend on private
-module layout.
+`monitor()` is the entry point for OpenAI Chat Completions and Anthropic
+Messages, sync and async, streaming and non-streaming. Import from the package
+root; module layout below it is internal and may change between releases.
 
-## Known concentration: `kazenai/monitor.py`
+## How a call flows
 
-`monitor.py` is currently the certified Control entrypoint implementation and
-has grown into a large module (OpenAI patch, Anthropic patch, streaming
-finalize/emit, local hold + shared reserve helpers, event payload assembly).
+1. **Admission.** `monitor()` estimates the call's cost from the model's price
+   and output limit, checks the local budget (`max_budget_usd` or a
+   `SharedBudget`) and loop detector, and — when Agent FinOps is configured —
+   reserves the estimate there. A call that does not fit is refused with
+   `BudgetExceeded` before anything is sent.
+2. **Dispatch.** The reservation is marked as started, then the provider SDK
+   sends the request.
+3. **Settlement.** When the provider reports usage, the call is priced on its
+   input and output tokens and the reservation settles at that amount. If usage
+   never arrives (cancellation, timeout, server error), the reservation stays
+   pending for reconciliation instead of settling at zero. A definitive provider
+   refusal (HTTP 4xx) settles at $0.
+4. **Evidence.** Each step emits a `KazenEvent` (from `kazen-event-schema`) to
+   the configured sinks and, optionally, an OpenTelemetry span.
 
-This is tracked technical debt, not an invitation to rewrite behavior ad hoc.
-
-### Next engineering track — mechanical split (no behavior change)
-
-Planned extractions modules (same tests, same public API):
+## Modules
 
 | Module | Responsibility |
 |--------|----------------|
-| `kazenai/monitor_openai.py` | OpenAI `chat.completions` patch + stream manager wiring |
-| `kazenai/monitor_anthropic.py` | Anthropic `messages` patch + stream manager wiring |
-| `kazenai/monitor_emit.py` | `model.call` payload builders (reservation + attribution fields) |
-| reserve helpers | Local hold / FinOps reserve wrappers (stay near spine or a small helper module) |
+| `kazenai/monitor.py` | `monitor()` and the OpenAI / Anthropic sync wrappers |
+| `kazenai/_async_provider.py` | Async OpenAI / Anthropic wrappers |
+| `kazenai/streaming/` | Stream lifecycle and provider stream wrappers |
+| `kazenai/enforcement.py`, `kazenai/budget.py` | Local caps; `SharedBudget` shares one cap across clients |
+| `kazenai/loop_detector.py` | Repeated-call (loop) detection |
+| `kazenai/model_pricing.py` | The price table (`PRICING_LAST_VERIFIED`, `PRICING_SOURCES`) |
+| `kazenai/provider_errors.py` | Which provider errors settle at $0 and which stay pending |
+| `kazenai/spine/` | Shared reservations with Agent FinOps and the settlement journal |
+| `kazenai/attribution.py` | Customer, feature and workflow attribution |
+| `kazenai/integrations/` | LangChain, LangGraph, LiteLLM and CrewAI adapters |
+| `kazenai/otel.py` | Optional OpenTelemetry spans |
 
-`kazenai/monitor.py` becomes a **thin facade**: `monitor()`, shared constants,
-and re-exports used by tests. `from kazenai import monitor` does not change.
+## Design rules
 
-### Rule going forward
-
-- **New surfaces** do not grow the god file; they land in new modules.
-- Splits must be mechanical: move code, keep tests green, no semantic change.
-- Do not couple a modularization PR to a product feature or a forced PyPI bump
-  unless the release explicitly ships the refactor.
-
-## Related modules (already split)
-
-- `kazenai/streaming/` — stream lifecycle, OpenAI/Anthropic stream wrappers
-- `kazenai/spine/guard.py` — shared FinOps reservation
-- `kazenai/attribution.py` — ContextVar attribution
-- `kazenai/enforcement.py` — local hard caps
-- `kazenai/budget.py` — `SharedBudget`, one local cap shared across clients
-- `kazenai/model_pricing.py` — the single verified price table
-- `kazenai/provider_errors.py` — which provider errors settle at $0 vs pending
-- `kazenai/integrations/` — LangChain (`bind_monitored_chat_openai` /
-  `bind_monitored_chat_anthropic`), LangGraph, LiteLLM, CrewAI adapters
-
-## Versioning note
-
-Attribution-on-`model.call` and gated live provider smokes may land on `main`
-before a PyPI patch. Until a patch release is published, public PyPI install
-truth remains the last tagged package version (see `RELEASING.md`).
+- **Fail closed in production.** When a shared reservation is required and
+  cannot be obtained, the call is refused.
+- **Never record an unknown outcome as zero.** Missing usage means pending, not
+  free.
+- **Metadata by default.** Prompts and completions are not captured unless
+  explicitly enabled; secrets are redacted before any sink.
+- **No hidden network calls on import.** Everything optional (FinOps, OTel,
+  frameworks) is enabled by configuration or extras.

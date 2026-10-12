@@ -72,7 +72,7 @@ class TestUnknownModelPolicy(unittest.TestCase):
 
 
 class TestKnownPricedInvariant(unittest.TestCase):
-    """P0-2: is_known_model and price must share one resolver.
+    """Is_known_model and price must share one resolver.
 
     Invariant: for every model string, is_known_model(m) is True iff
     price(m) returns a real (non-fallback) pricing row.

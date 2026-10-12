@@ -1,8 +1,7 @@
 {
-  "schema_version": "final1.p4-1.v1",
-  "title": "KazenAI Control FINAL_1 + FINAL_LENS supported integration matrix",
+  "schema_version": "kazenai.support-matrix.v1",
+  "title": "KazenAI Control \u2014 supported integrations",
   "recorded_at": "2026-10-11T17:29:39Z",
-  "authority": "FIX_LOOP_PROMPT_FINAL_1_b_final P8",
   "evidence_tiers": [
     "unsupported",
     "planned",
@@ -38,12 +37,11 @@
       "detail": "kazenai Apache-2.0; from kazenai import monitor; sync and async OpenAI+Anthropic fixture-verified",
       "status": "fixture-verified",
       "evidence": [
-        "artifacts/final-1-p3-1-verification-20260916T195500Z.json",
-        "artifacts/final-1-p3-2-verification-20260916T200620Z.json"
+        "Verification run, 2026-09-16"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1_p0_2_monitor_tiny_cap.py",
-        "kazenai-core/tests/test_final1_p3_2_provider_contract.py"
+        "kazenai-core/tests/test_monitor_tiny_cap.py",
+        "kazenai-core/tests/test_provider_contract.py"
       ]
     },
     {
@@ -69,11 +67,11 @@
       "detail": "Patched chat.completions.create; fake transport certified",
       "status": "live-verified",
       "evidence": [
-        "artifacts/final-1-p3-2-verification-20260916T200620Z.json",
-        "artifacts/live-provider-smoke-20261012T123544Z.json"
+        "Verification run, 2026-09-16",
+        "Live provider run, 2026-10-12"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1_p3_2_provider_contract.py",
+        "kazenai-core/tests/test_provider_contract.py",
         "kazenai-core/tests/test_live_provider_smoke.py"
       ],
       "notes": "Live-verified 2026-10-12 against paid OpenAI (gpt-6-luna, openai 2.54.0) and Anthropic (claude-sonnet-5-5, anthropic 0.125.0) APIs through monitor(): real response, recorded cost equal to the pricing table on the provider-reported input/output usage (streamed and non-streamed), and pre-dispatch BudgetExceeded. Opt-in test; not run in default CI."
@@ -85,8 +83,8 @@
       "detail": "create(stream=True) and chat.completions.stream helper with finalize-once reservation lifecycle; include_usage merge",
       "status": "live-verified",
       "evidence": [
-        "artifacts/cleanup-train-b-streaming-verification-20261002T012400Z.json",
-        "artifacts/live-provider-smoke-20261012T123544Z.json"
+        "Verification run, 2026-10-02",
+        "Live provider run, 2026-10-12"
       ],
       "tests": [
         "kazenai-core/tests/test_train_b_streaming.py",
@@ -103,11 +101,11 @@
       "detail": "Patched messages.create; fake transport certified",
       "status": "live-verified",
       "evidence": [
-        "artifacts/final-1-p3-2-verification-20260916T200620Z.json",
-        "artifacts/live-provider-smoke-20261012T123544Z.json"
+        "Verification run, 2026-09-16",
+        "Live provider run, 2026-10-12"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1_p3_2_provider_contract.py",
+        "kazenai-core/tests/test_provider_contract.py",
         "kazenai-core/tests/test_live_provider_smoke.py"
       ],
       "notes": "Live-verified 2026-10-12 against paid OpenAI (gpt-6-luna, openai 2.54.0) and Anthropic (claude-sonnet-5-5, anthropic 0.125.0) APIs through monitor(): real response, recorded cost equal to the pricing table on the provider-reported input/output usage (streamed and non-streamed), and pre-dispatch BudgetExceeded. Opt-in test; not run in default CI."
@@ -119,8 +117,8 @@
       "detail": "create(stream=True) and messages.stream manager with finalize-once lifecycle",
       "status": "live-verified",
       "evidence": [
-        "artifacts/cleanup-train-b-streaming-verification-20261002T012400Z.json",
-        "artifacts/live-provider-smoke-20261012T123544Z.json"
+        "Verification run, 2026-10-02",
+        "Live provider run, 2026-10-12"
       ],
       "tests": [
         "kazenai-core/tests/test_train_b_streaming.py",
@@ -137,7 +135,7 @@
       "status": "unsupported",
       "evidence": [],
       "tests": [
-        "kazenai-core/tests/test_final1_p3_2_provider_contract.py::test_p32_monitor_rejects_openai_responses_api"
+        "kazenai-core/tests/test_provider_contract.py::test_p32_monitor_rejects_openai_responses_api"
       ],
       "notes": "monitor() stubs responses.create with UnsupportedModeError"
     },
@@ -146,15 +144,14 @@
       "category": "mode",
       "name": "Async OpenAI/Anthropic clients",
       "status": "live-verified",
-      "detail": "FINAL_1_b_final P5: AsyncOpenAI chat.completions + AsyncAnthropic messages; non-stream and stream; native async admission/settle",
+      "detail": "AsyncOpenAI chat.completions + AsyncAnthropic messages; non-stream and stream; native async admission/settle",
       "evidence": [
-        "artifacts/final1b-final-p5-20261009T185055Z/verification.json",
-        "artifacts/final1b-final-p5-remaining-20261009T195952Z/verification.json",
-        "artifacts/live-provider-smoke-20261012T123544Z.json"
+        "Verification run, 2026-10-09",
+        "Live provider run, 2026-10-12"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1b_final_p5_async_providers.py",
-        "kazenai-core/tests/test_final1b_final_p5_remaining.py",
+        "kazenai-core/tests/test_async_providers.py",
+        "kazenai-core/tests/test_async_providers_retries.py",
         "kazenai-core/tests/test_live_provider_smoke.py"
       ],
       "notes": "Runtime fixture cells pass; OpenAI Responses remains unsupported. The dedicated Core CI gate runs three maintained behavioral suites and passes locally at 69% module coverage versus a 35% floor, requiring both pytest and coverage success. Live-verified 2026-10-12 against paid OpenAI (gpt-6-luna, openai 2.54.0) and Anthropic (claude-sonnet-5-5, anthropic 0.125.0) APIs through monitor(): real response, recorded cost equal to the pricing table on the provider-reported input/output usage (streamed and non-streamed), and pre-dispatch BudgetExceeded. Opt-in test; not run in default CI."
@@ -164,16 +161,16 @@
       "category": "mode",
       "name": "Streaming under Control profile",
       "status": "live-verified",
-      "detail": "Train B: sync OpenAI create(stream=True)/chat.completions.stream + Anthropic create(stream=True)/messages.stream; provider-start is recorded before dispatch, then exact settlement or pending reconciliation",
+      "detail": "sync OpenAI create(stream=True)/chat.completions.stream + Anthropic create(stream=True)/messages.stream; provider-start is recorded before dispatch, then exact settlement or pending reconciliation",
       "evidence": [
-        "artifacts/cleanup-train-b-streaming-verification-20261002T012400Z.json",
-        "artifacts/live-provider-smoke-20261012T123544Z.json"
+        "Verification run, 2026-10-02",
+        "Live provider run, 2026-10-12"
       ],
       "tests": [
         "kazenai-core/tests/test_train_b_streaming.py",
         "kazenai-core/tests/test_train_b_streaming_hardening.py",
         "kazenai-core/tests/test_train_b_official_sdks.py",
-        "kazenai-core/tests/test_final1_p3_2_provider_contract.py::test_p32_control_streaming_allowed_with_finalize_lifecycle",
+        "kazenai-core/tests/test_provider_contract.py::test_p32_control_streaming_allowed_with_finalize_lifecycle",
         "kazenai-core/tests/test_live_provider_smoke.py"
       ],
       "notes": "Live-verified 2026-10-12 against paid OpenAI (gpt-6-luna, openai 2.54.0) and Anthropic (claude-sonnet-5-5, anthropic 0.125.0) APIs through monitor(): real response, recorded cost equal to the pricing table on the provider-reported input/output usage (streamed and non-streamed), and pre-dispatch BudgetExceeded. Opt-in test; not run in default CI."
@@ -181,17 +178,15 @@
     {
       "id": "admission.pg_reserve_settle",
       "category": "pricing_admission",
-      "name": "PostgreSQL reserve/settle lifecycle (ADR-015)",
+      "name": "PostgreSQL reserve/settle lifecycle",
       "detail": "micro-USD; applied|duplicate|pending; PG sole accounting authority",
       "status": "integration-verified",
       "evidence": [
-        "artifacts/final-1-p2-2-verification-20260916T191000Z.json",
-        "artifacts/final-1-p2-3-verification-20260916T192000Z.json",
-        "docs/adr/ADR-015-reservation-lifecycle.md"
+        "Verification run, 2026-09-16",
+        "Design record"
       ],
       "tests": [
-        "kazenai-agent-finops/backend/tests/test_pg_atomic_admit_p22.py",
-        "kazenai-agent-finops/backend/tests/test_pg_settle_p23.py",
+        "Agent FinOps test suite",
         "kazenai-core/tests/test_settle_queue_claims_and_ops.py"
       ],
       "notes": "SDK settlement journal: one immutable fingerprint per (org, FinOps URL, idempotency key) across processes sharing a local queue directory (1.1.2); not cross-host coordination; no exactly-once claim."
@@ -202,11 +197,11 @@
       "name": "Local monitor max_budget_usd pre-call Enforcement",
       "status": "fixture-verified",
       "evidence": [
-        "artifacts/final-1-p3-1-verification-20260916T195500Z.json"
+        "Verification run, 2026-09-16"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1_p0_2_monitor_tiny_cap.py",
-        "kazenai-core/tests/test_final1_p3_1_monitor_cap.py"
+        "kazenai-core/tests/test_monitor_tiny_cap.py",
+        "kazenai-core/tests/test_monitor_budget_cap.py"
       ]
     },
     {
@@ -216,10 +211,10 @@
       "detail": "Pre/post call projection for known models; unknown models block in production-like modes and warn/fail open only when explicitly configured",
       "status": "fixture-verified",
       "evidence": [
-        "artifacts/final-1-p3-1-verification-20260916T195500Z.json"
+        "Verification run, 2026-09-16"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1_p3_1_monitor_cap.py"
+        "kazenai-core/tests/test_monitor_budget_cap.py"
       ]
     },
     {
@@ -228,11 +223,11 @@
       "name": "Private-by-default capture (metadata)",
       "status": "fixture-verified",
       "evidence": [
-        "artifacts/final-1-p3-3-verification-20260916T202223Z.json",
-        "docs/security/capture-and-retention.md"
+        "Verification run, 2026-09-16",
+        "Capture and retention policy"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1_p3_3_capture_privacy.py"
+        "kazenai-core/tests/test_capture_privacy.py"
       ]
     },
     {
@@ -242,11 +237,11 @@
       "detail": "org/workspace/run/root_run_id/trace_id; reservation_id/call_id/attempt in payload",
       "status": "fixture-verified",
       "evidence": [
-        "artifacts/final-1-p3-5-verification-20260916T203920Z.json",
-        "docs/adr/ADR-016-control-event-topology.md"
+        "Verification run, 2026-09-16",
+        "Design record"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1_p3_5_event_path.py"
+        "kazenai-core/tests/test_event_path.py"
       ]
     },
     {
@@ -255,10 +250,10 @@
       "name": "Bounded HttpSink + RetryQueue lease/ack",
       "status": "fixture-verified",
       "evidence": [
-        "artifacts/final-1-p3-4-verification-20260916T203004Z.json"
+        "Verification run, 2026-09-16"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1_p3_4_sink_lifecycle.py"
+        "kazenai-core/tests/test_sink_lifecycle.py"
       ]
     },
     {
@@ -268,11 +263,11 @@
       "detail": "FinOps settle-only; Lens metadata mirror",
       "status": "fixture-verified",
       "evidence": [
-        "artifacts/final-1-p3-5-verification-20260916T203920Z.json",
-        "docs/adr/ADR-016-control-event-topology.md"
+        "Verification run, 2026-09-16",
+        "Design record"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1_p3_5_event_path.py"
+        "kazenai-core/tests/test_event_path.py"
       ]
     },
     {
@@ -282,12 +277,12 @@
       "detail": "otel/opentelemetry-collector-contrib 0.128.0 Datadog exporter, DD_SITE=datadoghq.com; synthetic GenAI span visible in APM Traces (service/env/resource correct, no secrets or prompt bodies). APM only: Datadog LLM Observability product path and ddtrace instrumentation not claimed",
       "status": "live-verified",
       "evidence": [
-        "artifacts/final1b-final-datadog-remote-20261012T165334Z.json",
-        "docs/runbooks/DATADOG_OTLP.md"
+        "Datadog APM delivery check, 2026-10-12",
+        "Operator runbook"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1b_final_p7_otel.py",
-        "kazenai-core/tests/test_final1b_final_p7_otel_live_interop.py"
+        "kazenai-core/tests/test_otel.py",
+        "kazenai-core/tests/test_otel_collector_lens_interop.py"
       ]
     },
     {
@@ -296,10 +291,10 @@
       "name": "Control identity + browser boundaries",
       "status": "integration-verified",
       "evidence": [
-        "artifacts/final-1-p1-4-verification-20260916T181600Z.json"
+        "Verification run, 2026-09-16"
       ],
       "tests": [
-        "scripts/final1_p1_4_live_bringup.sh"
+        "Live bring-up script"
       ]
     },
     {
@@ -309,10 +304,10 @@
       "detail": "postgres+redis+finops+lens+platform+auth; no Brain",
       "status": "implemented-unverified",
       "evidence": [
-        "docker-compose.control.yml"
+        "Reference deployment configuration"
       ],
       "tests": [],
-      "notes": "Compose exists; full DEMO_READY journey is P7-2/P9-1"
+      "notes": "Reference compose files exist; the full end-to-end demo journey is not part of this matrix"
     },
     {
       "id": "tools.model_call_only",
@@ -320,7 +315,7 @@
       "name": "model.call emission on patched providers",
       "status": "fixture-verified",
       "evidence": [
-        "artifacts/final-1-p3-2-verification-20260916T200620Z.json"
+        "Verification run, 2026-09-16"
       ],
       "tests": [
         "kazenai-core/tests/test_monitor_helpers.py"
@@ -333,7 +328,7 @@
       "status": "unsupported",
       "evidence": [],
       "tests": [],
-      "notes": "Not certified for Control FINAL_1 beyond model.call"
+      "notes": "Not certified for Control beyond model.call"
     },
     {
       "id": "framework.langgraph",
@@ -341,27 +336,20 @@
       "name": "LangGraph adapter / example",
       "status": "live-verified",
       "evidence": [
-        "artifacts/final1b-final-p8-adapters-*.json",
-        "artifacts/final1b-final-p8-real-frameworks-*.json",
-        "artifacts/final1b-final-p8-cells-*.json",
-        "kazenai-examples/framework-control/langgraph_resume_demo.py",
-        "artifacts/live-framework-smoke-20261012T132308Z.json",
-        "artifacts/live-framework-smoke-20261012T132429Z.json",
-        "artifacts/live-framework-smoke-20261012T141030Z.json",
-        "artifacts/live-framework-smoke-20261012T141227Z.json",
-        "artifacts/live-framework-smoke-20261012T145018Z.json",
-        "artifacts/live-framework-smoke-20261012T145221Z.json"
+        "Verification run",
+        "Reference example",
+        "Live framework run, 2026-10-12"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1b_final_p8_framework_adapters.py",
-        "kazenai-core/tests/test_final1b_final_p8_real_frameworks.py",
-        "kazenai-core/tests/test_final1b_final_p8_control_cells.py",
+        "kazenai-core/tests/test_framework_adapters.py",
+        "kazenai-core/tests/test_real_frameworks.py",
+        "kazenai-core/tests/test_framework_control_cells.py",
         "kazenai-core/tests/test_live_framework_smoke.py",
         "kazenai-core/tests/test_live_found_regressions.py",
         "kazenai-core/tests/test_langchain_anthropic_and_multi_client.py"
       ],
       "notes": "SqliteSaver/AsyncSqliteSaver local restart cells pass. Control requires prior explicit declare; the declaration is a caller assertion and does not intercept arbitrary raw clients in nodes. Default correlation side storage is local, temporary, and 24-hour bounded. Live-verified 2026-10-12 (langgraph 1.2.14) with gpt-6-luna/claude-sonnet-5-5/claude-haiku-4-5 and gpt-4o-mini/claude-sonnet-4-6/claude-haiku-4-5, including a 3-step workflow across 3 models and 2 providers. A graph declares every provider client its nodes use: declare_langgraph_control_boundary(graph, *clients) + wrap_graph(guarded_clients=[...]); each must be declared (decoys rejected). Live-verified with OpenAI + two Anthropic clients in one graph.",
-      "detail": "FINAL_1_b_final P8: wrap_graph invoke/ainvoke/stream/astream; checkpoint correlation envelope rebound to trusted tenancy; pin langgraph 1.2.14",
+      "detail": "wrap_graph invoke/ainvoke/stream/astream; checkpoint correlation envelope rebound to trusted tenancy; pin langgraph 1.2.14",
       "versions": {
         "langgraph": "1.2.14",
         "langgraph-checkpoint-sqlite": "3.1.1",
@@ -376,14 +364,13 @@
       "detail": "kazenai-examples/control-loop-and-failure; fake OpenAI client; zero paid I/O",
       "status": "fixture-verified",
       "evidence": [
-        "artifacts/final-1-p4-5-verification-20260917T021000Z.json",
-        "artifacts/final-1-p4-5-verify-out/verifier-report.json"
+        "Verification run, 2026-09-17",
+        "Verification run"
       ],
       "tests": [
-        "kazenai-examples/control-loop-and-failure/tests/test_scenarios.py",
-        "kazenai-examples/control-loop-and-failure/verify.py"
+        "Reference example tests"
       ],
-      "notes": "Lens browser assertion + live FinOps reserve/settle remain integration-gated (P7-2 / DEMO_READY)"
+      "notes": "Lens browser assertion and live FinOps reserve/settle are verified in integration runs, not in standalone CI"
     },
     {
       "id": "lens.incident_inbox",
@@ -392,14 +379,11 @@
       "detail": "Deterministic visibility-partitioned grouping, idempotent occurrences, keyset pagination and bounded evidence",
       "status": "integration-verified",
       "evidence": [
-        "artifacts/final-lens-p6-1-workflow-20260923T052143Z.json",
-        "artifacts/final-lens-p6-1-browser-20260923T053735433Z.json",
-        "artifacts/final-lens-p6-2-operations-20260923T050639Z.json"
+        "Agent Lens integration run, 2026-09-23"
       ],
       "tests": [
-        "kazenai-agent-lens/backend/tests/test_final_lens_incident_contracts.py",
-        "kazenai-agent-lens/backend/tests/test_participant_acl.py",
-        "tests/e2e/playwright/final-lens-workflow.spec.ts"
+        "Agent Lens test suite",
+        "Browser end-to-end tests"
       ],
       "notes": "Local synthetic Control only; source access is rechecked on every derived read"
     },
@@ -410,13 +394,11 @@
       "detail": "Verified actor, eligible owner, optimistic revision, idempotent mutation and append-only reason/history",
       "status": "integration-verified",
       "evidence": [
-        "artifacts/final-lens-p6-1-workflow-20260923T052143Z.json",
-        "artifacts/final-lens-p6-1-browser-20260923T053735433Z.json",
-        "artifacts/final-lens-p6-2-operations-20260923T050639Z.json"
+        "Agent Lens integration run, 2026-09-23"
       ],
       "tests": [
-        "kazenai-agent-lens/backend/tests/test_final_lens_incident_contracts.py",
-        "tests/e2e/playwright/final-lens-workflow.spec.ts"
+        "Agent Lens test suite",
+        "Browser end-to-end tests"
       ],
       "notes": "Reviews never rewrite source evidence or grant source access"
     },
@@ -427,12 +409,11 @@
       "detail": "Versioned sanitized readiness-labelled JSON; allowlisted zero-I/O adapter; expiry/source reauthorization",
       "status": "integration-verified",
       "evidence": [
-        "artifacts/final-lens-p6-1-workflow-20260923T052143Z.json",
-        "artifacts/final-lens-p6-2-regressions-20260923T052116Z.json"
+        "Agent Lens integration run, 2026-09-23"
       ],
       "tests": [
-        "kazenai-agent-lens/backend/tests/test_final_lens_incident_contracts.py",
-        "kazenai-examples/control-loop-and-failure/tests/test_regression_adapter.py"
+        "Agent Lens test suite",
+        "Reference example tests"
       ],
       "notes": "Only offline_fixture_ready is runnable; schema validation is not customer-agent reproduction"
     },
@@ -443,12 +424,11 @@
       "detail": "Same-task/cohort/insufficient labels, explicit conditions and honest deltas without replay",
       "status": "integration-verified",
       "evidence": [
-        "artifacts/final-lens-p6-1-workflow-20260923T052143Z.json",
-        "artifacts/final-lens-p6-1-browser-20260923T053735433Z.json"
+        "Agent Lens integration run, 2026-09-23"
       ],
       "tests": [
-        "kazenai-agent-lens/backend/tests/test_final_lens_incident_contracts.py",
-        "tests/e2e/playwright/final-lens-workflow.spec.ts"
+        "Agent Lens test suite",
+        "Browser end-to-end tests"
       ],
       "notes": "A corrected example does not establish causality, population effect, savings or ROI"
     },
@@ -459,15 +439,13 @@
       "detail": "Timezone/window preview, suppression/caps, deduped outbox, dispatch reauthorization, pause, retry/dead-letter/uncertainty and tenant retention",
       "status": "integration-verified",
       "evidence": [
-        "artifacts/final-lens-p6-1-workflow-20260923T052143Z.json",
-        "artifacts/final-lens-p6-1-browser-20260923T053735433Z.json",
-        "artifacts/final-lens-p6-2-operations-20260923T050639Z.json"
+        "Agent Lens integration run, 2026-09-23"
       ],
       "tests": [
-        "kazenai-agent-lens/backend/tests/test_final_lens_incident_contracts.py",
-        "tests/e2e/playwright/final-lens-workflow.spec.ts"
+        "Agent Lens test suite",
+        "Browser end-to-end tests"
       ],
-      "notes": "Provider-incapable local_capture only; sent means local acceptance, not delivered/read; external transport remains USER-GO"
+      "notes": "Provider-incapable local_capture only; sent means local acceptance, not delivered/read; external transport is not included"
     },
     {
       "id": "framework.langchain",
@@ -475,28 +453,20 @@
       "name": "LangChain adapter",
       "status": "live-verified",
       "evidence": [
-        "artifacts/final1b-final-p8-adapters-*.json",
-        "artifacts/final1b-final-p8-real-frameworks-*.json",
-        "artifacts/final1b-final-p8-cells-*.json",
-        "kazenai-examples/framework-control/README.md",
-        "kazenai-examples/framework-control/langchain_runnable_demo.py",
-        "artifacts/live-framework-smoke-20261012T132308Z.json",
-        "artifacts/live-framework-smoke-20261012T132429Z.json",
-        "artifacts/live-framework-smoke-20261012T141030Z.json",
-        "artifacts/live-framework-smoke-20261012T141227Z.json",
-        "artifacts/live-framework-smoke-20261012T145018Z.json",
-        "artifacts/live-framework-smoke-20261012T145221Z.json"
+        "Verification run",
+        "Reference example",
+        "Live framework run, 2026-10-12"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1b_final_p8_framework_adapters.py",
-        "kazenai-core/tests/test_final1b_final_p8_real_frameworks.py",
-        "kazenai-core/tests/test_final1b_final_p8_control_cells.py",
+        "kazenai-core/tests/test_framework_adapters.py",
+        "kazenai-core/tests/test_real_frameworks.py",
+        "kazenai-core/tests/test_framework_control_cells.py",
         "kazenai-core/tests/test_live_framework_smoke.py",
         "kazenai-core/tests/test_live_found_regressions.py",
         "kazenai-core/tests/test_langchain_anthropic_and_multi_client.py"
       ],
       "notes": "Observe+Control: cache/short-circuit; FinOps 402; Responses reject; Runnable ainvoke/astream through live LiteLLM proxy (Chat Completions stream; not ChatLiteLLM/Responses bind). Live-verified 2026-10-12 (langchain 1.4.4, langchain-openai 1.7.0) with gpt-6-luna/claude-sonnet-5-5/claude-haiku-4-5 and gpt-4o-mini/claude-sonnet-4-6/claude-haiku-4-5: ChatOpenAI bound via bind_monitored_chat_openai, invoke/stream/ainvoke/astream, exact split-priced cost, pre-dispatch deny. ChatAnthropic (langchain-anthropic 1.7.5) bound via bind_monitored_chat_anthropic, live-verified the same way (invoke/stream/ainvoke/astream); its betas option is rejected because client.beta.messages is not guarded. Multi-client chains: declare_langchain_control_boundary(runnable, *clients) + guarded_clients=[...].",
-      "detail": "FINAL_1_b_final P8: wrap_langchain_runnable + KazenCallbackHandler wire 1.2; Control via monitor()-guarded OpenAI Chat Completions; pins langchain 1.4.4 / langchain-openai 1.7.0; bind_monitored_chat_anthropic for ChatAnthropic; several guarded clients per Runnable",
+      "detail": "wrap_langchain_runnable + KazenCallbackHandler wire 1.2; Control via monitor()-guarded OpenAI Chat Completions; pins langchain 1.4.4 / langchain-openai 1.7.0; bind_monitored_chat_anthropic for ChatAnthropic; several guarded clients per Runnable",
       "versions": {
         "langchain": "1.4.4",
         "langchain-core": "1.6.9",
@@ -511,17 +481,16 @@
       "name": "CrewAI adapter",
       "status": "implemented-unverified",
       "evidence": [
-        "artifacts/final1b-final-p8-adapters-*.json",
-        "artifacts/final1b-final-p8-cells-*.json",
-        "kazenai-examples/framework-control/crewai_kickoff_demo.py"
+        "Verification run",
+        "Reference example"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1b_final_p8_framework_adapters.py",
-        "kazenai-core/tests/test_final1b_final_p8_control_cells.py",
-        "kazenai-core/tests/test_crewai_ownership_a2.py"
+        "kazenai-core/tests/test_framework_adapters.py",
+        "kazenai-core/tests/test_framework_control_cells.py",
+        "kazenai-core/tests/test_crewai_event_ownership.py"
       ],
       "notes": "HookAborted no-dispatch passes. 1.1.2 routes CrewAI 1.15.26 LLM/task/tool events via a crew ownership registry plus kickoff scope, tested on the real 1.15.26 event bus (two crews, source types, detach). Cancellation, nested runs, and native akickoff Observe cells are not yet verified, so the status stays implemented-unverified and CrewAI is not advertised. Thread-backed kickoff_async is not Control-certified.",
-      "detail": "FINAL_1_b_final P8: wrap_crew / kickoff + native akickoff; Control requires guarded client; pin crewai 1.15.26",
+      "detail": "wrap_crew / kickoff + native akickoff; Control requires guarded client; pin crewai 1.15.26",
       "versions": {
         "crewai": "1.15.26",
         "capability": "observe+control",
@@ -535,7 +504,7 @@
       "status": "unsupported",
       "evidence": [],
       "tests": [],
-      "notes": "FINAL_2 / optional unless independently verified"
+      "notes": "Not part of this release; optional unless independently verified"
     },
     {
       "id": "capability.generic_replay",
@@ -544,7 +513,7 @@
       "status": "unsupported",
       "evidence": [],
       "tests": [],
-      "notes": "FINAL_2 P5-3; Control must gate (P5-1)"
+      "notes": "Not part of this release; Control must gate it before any claim"
     },
     {
       "id": "capability.drift_calibration",
@@ -553,7 +522,7 @@
       "status": "unsupported",
       "evidence": [],
       "tests": [],
-      "notes": "FINAL_2"
+      "notes": "Not part of this release; optional unless independently verified"
     },
     {
       "id": "capability.mcp_only_spend_control",
@@ -562,7 +531,7 @@
       "status": "unsupported",
       "evidence": [],
       "tests": [],
-      "notes": "docs/integrations/* are Brain/MCP paths \u2014 not Control FINAL_1"
+      "notes": "docs/integrations/* in other repositories describe Brain/MCP paths, not Control"
     },
     {
       "id": "finops.business_attribution.v1",
@@ -571,14 +540,13 @@
       "detail": "Canonical business.attribution.v1 snapshot through admit + SDK ContextVar",
       "status": "fixture-verified",
       "evidence": [
-        "kazenai-contracts/fixtures/finops/attribution_attributed.json",
-        "kazenai-contracts/fixtures/finops/attribution_unattributed.json",
-        "artifacts/final-1b-p8-1-adversarial-20260928T194504Z.json"
+        "Shared contract fixtures",
+        "Verification run, 2026-09-28"
       ],
       "tests": [
-        "kazenai-contracts/tests/test_final1b_attribution_receipts.py",
-        "kazenai-core/tests/test_final1b_p1_3_attribution.py",
-        "kazenai-agent-finops/backend/tests/test_final1b_attribution_admit.py"
+        "Shared contract test suite",
+        "kazenai-core/tests/test_attribution.py",
+        "Agent FinOps test suite"
       ]
     },
     {
@@ -588,14 +556,12 @@
       "detail": "Immutable allow/deny receipts with reason_code and evaluated policies",
       "status": "fixture-verified",
       "evidence": [
-        "kazenai-contracts/fixtures/finops/receipt_allow.json",
-        "kazenai-contracts/fixtures/finops/receipt_deny_insufficient.json",
-        "kazenai-contracts/fixtures/finops/receipt_deny_policy.json",
-        "docs/adr/ADR-019-economic-decision-receipts.md"
+        "Shared contract fixtures",
+        "Design record"
       ],
       "tests": [
-        "kazenai-contracts/tests/test_final1b_attribution_receipts.py",
-        "kazenai-agent-finops/backend/tests/test_final1b_attribution_admit.py"
+        "Shared contract test suite",
+        "Agent FinOps test suite"
       ]
     },
     {
@@ -605,10 +571,10 @@
       "detail": "Deterministic economic categories with economic_detail projection in inbox",
       "status": "fixture-verified",
       "evidence": [
-        "artifacts/final-1b-p7-1-journey-20260928T194418Z.json"
+        "Verification run, 2026-09-28"
       ],
       "tests": [
-        "kazenai-agent-lens/backend/tests/test_final1b_p4_economic_incidents.py"
+        "Agent Lens test suite"
       ]
     },
     {
@@ -618,12 +584,12 @@
       "detail": "use_attribution / monitor business_subject_ref,feature_id,workflow_id; enforcement_owner",
       "status": "fixture-verified",
       "evidence": [
-        "kazenai-examples/control-loop-and-failure/README.md"
+        "Reference example"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1b_p1_3_attribution.py",
-        "kazenai-core/tests/test_final1b_p3_2_enforcement_owner.py",
-        "kazenai-examples/control-loop-and-failure/tests/test_scenarios.py"
+        "kazenai-core/tests/test_attribution.py",
+        "kazenai-core/tests/test_enforcement_owner.py",
+        "Reference example tests"
       ]
     },
     {
@@ -633,7 +599,7 @@
       "status": "unsupported",
       "evidence": [],
       "tests": [],
-      "notes": "Forbidden claim for FINAL_1 advertising"
+      "notes": "Forbidden claim in Control advertising"
     },
     {
       "id": "capability.checkpoint_resume",
@@ -641,14 +607,11 @@
       "name": "Checkpoint / resume after circuit-breaker",
       "status": "live-verified",
       "evidence": [
-        "kazenai-examples/framework-control/langgraph_resume_demo.py",
-        "artifacts/live-framework-smoke-20261012T132308Z.json",
-        "artifacts/live-framework-smoke-20261012T132429Z.json",
-        "artifacts/live-framework-smoke-20261012T141030Z.json",
-        "artifacts/live-framework-smoke-20261012T141227Z.json"
+        "Reference example",
+        "Live framework run, 2026-10-12"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1b_final_p8_framework_adapters.py",
+        "kazenai-core/tests/test_framework_adapters.py",
         "kazenai-core/tests/test_live_framework_smoke.py",
         "kazenai-core/tests/test_live_found_regressions.py"
       ],
@@ -679,7 +642,7 @@
       "name": "Live provider operation",
       "status": "live-verified",
       "evidence": [
-        "artifacts/live-provider-smoke-20261012T123544Z.json"
+        "Live provider run, 2026-10-12"
       ],
       "tests": [
         "kazenai-core/tests/test_live_provider_smoke.py"
@@ -693,15 +656,12 @@
       "detail": "kazenai.monitor(OpenAI(base_url=<LiteLLM proxy>)) reserves/settles against Agent FinOps; the proxy runs no Kazen callback and adds no accounting",
       "status": "live-verified",
       "evidence": [
-        "artifacts/final1b-final-p6-hermetic-20261009T222538Z.json",
-        "artifacts/live-framework-smoke-20261012T132308Z.json",
-        "artifacts/live-framework-smoke-20261012T132429Z.json",
-        "artifacts/live-framework-smoke-20261012T141030Z.json",
-        "artifacts/live-framework-smoke-20261012T141227Z.json"
+        "Verification run, 2026-10-09",
+        "Live framework run, 2026-10-12"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1b_final_p6_litellm_control.py",
-        "kazenai-core/tests/test_final1b_final_p6_litellm_live_proxy.py",
+        "kazenai-core/tests/test_litellm_control.py",
+        "kazenai-core/tests/test_litellm_proxy_integration.py",
         "kazenai-core/tests/test_live_framework_smoke.py"
       ],
       "notes": "Live-verified 2026-10-12: LiteLLM 1.104.2 proxy to real OpenAI and Anthropic (gpt-6-luna/claude-sonnet-5-5/claude-haiku-4-5 and gpt-4o-mini/claude-sonnet-4-6/claude-haiku-4-5), real Agent FinOps (Control, Postgres): exactly one reservation per call, settled to the price of the reported usage (streaming and non-streaming), pre-dispatch deny with a deny receipt. Retries/fallbacks off on the proxy."
@@ -713,15 +673,12 @@
       "detail": "kazenai_litellm_callback reserves before provider dispatch and settles from provider usage; a monitored app with KAZENAI_ENFORCEMENT_OWNER=gateway does not reserve again",
       "status": "live-verified",
       "evidence": [
-        "artifacts/final1b-final-p6-hermetic-20261009T222538Z.json",
-        "artifacts/live-framework-smoke-20261012T132308Z.json",
-        "artifacts/live-framework-smoke-20261012T132429Z.json",
-        "artifacts/live-framework-smoke-20261012T141030Z.json",
-        "artifacts/live-framework-smoke-20261012T141227Z.json"
+        "Verification run, 2026-10-09",
+        "Live framework run, 2026-10-12"
       ],
       "tests": [
-        "kazenai-core/tests/test_final1b_final_p6_litellm_control.py",
-        "kazenai-core/tests/test_final1b_final_p6_litellm_live_proxy.py",
+        "kazenai-core/tests/test_litellm_control.py",
+        "kazenai-core/tests/test_litellm_proxy_integration.py",
         "kazenai-core/tests/test_live_framework_smoke.py",
         "kazenai-core/tests/test_live_found_regressions.py"
       ],
@@ -734,12 +691,7 @@
       "detail": "Steps on different models and providers share one Agent FinOps workflow budget via workflow_id; each step settles to its own model's price and is attributed by feature_id",
       "status": "live-verified",
       "evidence": [
-        "artifacts/live-framework-smoke-20261012T132308Z.json",
-        "artifacts/live-framework-smoke-20261012T132429Z.json",
-        "artifacts/live-framework-smoke-20261012T141030Z.json",
-        "artifacts/live-framework-smoke-20261012T141227Z.json",
-        "artifacts/live-framework-smoke-20261012T145018Z.json",
-        "artifacts/live-framework-smoke-20261012T145221Z.json"
+        "Live framework run, 2026-10-12"
       ],
       "tests": [
         "kazenai-core/tests/test_live_framework_smoke.py",
@@ -755,10 +707,7 @@
       "detail": "monitor(..., budget=SharedBudget(max_usd=...)) makes several clients (sync, async, other providers, LangChain-bound) draw from one process-local cap; mutually exclusive with max_budget_usd",
       "status": "live-verified",
       "evidence": [
-        "artifacts/live-framework-smoke-20261012T141030Z.json",
-        "artifacts/live-framework-smoke-20261012T141227Z.json",
-        "artifacts/live-framework-smoke-20261012T145018Z.json",
-        "artifacts/live-framework-smoke-20261012T145221Z.json"
+        "Live framework run, 2026-10-12"
       ],
       "tests": [
         "kazenai-core/tests/test_shared_budget.py",
@@ -774,8 +723,7 @@
       "detail": "A provider HTTP 4xx (except 408/409/499) before any output settles the reservation at exactly $0 and releases the hold; timeouts, connection errors and 5xx stay pending_reconciliation. SDK (sync/async, stream/non-stream) and the LiteLLM gateway callback",
       "status": "live-verified",
       "evidence": [
-        "artifacts/live-framework-smoke-20261012T141030Z.json",
-        "artifacts/live-framework-smoke-20261012T141227Z.json"
+        "Live framework run, 2026-10-12"
       ],
       "tests": [
         "kazenai-core/tests/test_provider_rejection_settlement.py",
@@ -790,8 +738,7 @@
       "detail": "Keys created the normal way in Agent FinOps can be used with the SDK for their own organization",
       "status": "live-verified",
       "evidence": [
-        "artifacts/live-framework-smoke-20261012T141030Z.json",
-        "artifacts/live-framework-smoke-20261012T141227Z.json"
+        "Live framework run, 2026-10-12"
       ],
       "tests": [
         "kazenai-core/tests/test_principal_contract.py"
@@ -810,14 +757,11 @@
       ]
     }
   ],
-  "provenance_note": "Vendored into kazenai-core for standalone CI; workspace copy remains at docs/integrations/control-supported-matrix.json",
-  "refresh_note": "FINAL_LENS P6-3 adds five local integration-verified incident workflow cells; external delivery and customer validation remain USER-GO",
+  "provenance_note": "Maintained with kazenai-core. The readable view is docs/integrations/control-supported-matrix.md. Evidence entries name the dated verification run; test entries name the suite that guards the capability.",
   "licenses": {
     "kazenai": "Apache-2.0",
     "kazenai-finops": "Apache-2.0",
-    "kazen-event-schema": "Apache-2.0",
-    "status": "approved_and_applied_working_tree",
-    "publication": "USER-GO G06/G07 not authorized"
+    "kazen-event-schema": "Apache-2.0"
   },
   "install_names": {
     "primary": "kazenai",
@@ -840,6 +784,6 @@
       "3.12"
     ]
   },
-  "updated_at": "2026-10-12",
-  "update_note": "Phase 1 bug fixes (2026-10-12, release candidates kazenai 1.1.2 / kazenai-finops 1.1.2 / kazen-event-schema 0.6.4): atomic cross-process settlement claims, operable settlement recovery, CrewAI ownership routing, vendored JWT corpus, schema-export drift gate. No status was raised. Later 2026-10-12: streamed calls now settle at input/output split pricing (previously every streamed token was charged at the output rate); OpenAI Chat Completions and Anthropic Messages cells (sync/async, streaming/non-streaming) and capability.live_provider raised to live-verified from a paid live smoke. Later 2026-10-12: LangChain, LangGraph, checkpoint resume, LiteLLM app-owned and gateway-owned accounting, and a multi-model shared workflow budget live-verified with two model sets; LiteLLM gains machine-readable cells. Live runs found and fixed: zero cost recorded for SDK with_raw_response calls (every LangChain ChatOpenAI non-stream call), framework default tenant overriding the client's org, gateway hook leaking litellm_params to providers, and a one-micro ceiling error from float noise. Later 2026-10-12: ordinary API keys work with the SDK; definitive provider 4xx rejections settle at $0; SharedBudget adds a process-local cap across monitor() clients \u2014 all three live-verified. Later 2026-10-12: ChatAnthropic Control bind; several guarded clients per graph/Runnable; streamed with_raw_response metered; Anthropic beta Messages blocked on monitored clients; kazenai-contracts 0.1.1."
+  "updated_at": "2026-10-13",
+  "update_note": "kazenai 1.1.2 / kazenai-finops 1.1.2 / kazen-event-schema 0.6.4: OpenAI Chat Completions and Anthropic Messages (sync/async, streaming/non-streaming), LangChain, LangGraph, checkpoint resume, LiteLLM application- and gateway-owned accounting, multi-model workflow budgets, provider-rejection release and ordinary API keys are live-verified (2026-10-12). Streamed calls settle at input/output split pricing; unpriced models are blocked by default. kazenai 1.1.3: documentation and packaging only."
 }

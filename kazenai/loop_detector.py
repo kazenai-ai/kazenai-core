@@ -51,8 +51,8 @@ class LoopScores:
 class LoopDetector:
     """
     Mandatory heuristics:
-      H1: Jaccard similarity (>0.85) on normalized input tokens.
-      H2: SHA1 fingerprinting of ordered tool-name sequences.
+      Jaccard similarity (>0.85) on normalized input tokens.
+      SHA1 fingerprinting of ordered tool-name sequences.
     """
 
     def __init__(

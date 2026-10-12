@@ -1,0 +1,10 @@
+# The source distribution ships the package, licence and README.
+# Tests, scripts and docs live in the GitHub repository.
+include LICENSE NOTICE README.md
+prune tests
+prune scripts
+prune docs
+prune contracts
+prune vendor
+prune .github
+exclude RELEASE_NOTES_*.md RELEASING.md ARCHITECTURE.md CONTRIBUTING.md DEPLOY.md QUICKSTART.md SECURITY.md TRADEMARK.md

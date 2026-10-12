@@ -108,7 +108,7 @@ def test_prefix_match_versioned_model():
 
 
 def test_versioned_id_resolves_to_correct_base_not_pricier_family():
-    """Regression for P0-1: a real dated model id must resolve to its own base
+    """Regression: a real dated model id must resolve to its own base
     family (longest-prefix), not the insertion-first pricier row."""
     engine = TokenCostEngine()
     # gpt-4o-mini-2024-07-18 must price as gpt-4o-mini, NOT gpt-4o (17x).
@@ -122,7 +122,7 @@ def test_versioned_id_resolves_to_correct_base_not_pricier_family():
 
 
 def test_truncated_stems_fall_through_to_unknown(caplog, monkeypatch):
-    """Regression for P0-1: short/truncated stems must NOT resolve to an
+    """Regression: short/truncated stems must NOT resolve to an
     arbitrary specific model (the dropped k.startswith(key) branch)."""
     monkeypatch.setenv("KAZENAI_UNKNOWN_MODEL_POLICY", "warn")
     engine = TokenCostEngine()

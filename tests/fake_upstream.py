@@ -1,4 +1,4 @@
-"""Independent fake OpenAI-compatible upstream oracle for P6 gateway proofs.
+"""Independent fake OpenAI-compatible upstream oracle for LiteLLM gateway tests.
 
 Tracks each HTTP completion request so tests can assert how many provider
 dispatches occurred (hidden retries must be visible here).
@@ -82,7 +82,7 @@ def make_handler(oracle: UpstreamOracle):
             model = body.get("model") or "gpt-4o-mini"
             usage = dict(oracle.default_usage)
             if body.get("stream"):
-                # OpenAI-compatible SSE with final usage chunk (P8 async stream cells).
+                # OpenAI-compatible SSE with final usage chunk (async stream cells).
                 chunks = [
                     {
                         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",

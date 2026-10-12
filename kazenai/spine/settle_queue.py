@@ -1,4 +1,4 @@
-"""File-backed SDK settlement delivery queue (F01/F02).
+"""File-backed SDK settlement delivery queue.
 
 Journals exact lifecycle settle intent *before* delivery attempts. Removes an
 entry only when FinOps returns ``applied`` / ``duplicate`` for the same
@@ -15,7 +15,7 @@ Layout under the queue root::
 
 Claims are published with ``os.link`` from a fully written temp file, which
 fails atomically when the target exists. That makes "one fingerprint per
-idempotency key" hold across processes sharing a local directory (A1). It is
+idempotency key" hold across processes sharing a local directory. It is
 not cross-host coordination.
 """
 
@@ -304,7 +304,7 @@ class DurableSettleQueue:
         idem = str(body.get("idempotency_key") or "")
         if idem:
             # Same destination + same idempotency key with a different fingerprint
-            # is conflicting reuse (F02). Distinct destinations keep separate claims.
+            # is conflicting reuse. Distinct destinations keep separate claims.
             self._acquire_claim(
                 claim_identity(org_id=org, base_url=base, idempotency_key=idem),
                 fingerprint,

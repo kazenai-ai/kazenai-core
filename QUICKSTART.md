@@ -6,13 +6,13 @@ product integrations should install the customer-facing package, which
 re-exports the Core API:
 
 ```bash
-python -m pip install "kazenai-finops[openai]==1.1.2"
+python -m pip install "kazenai-finops[openai]==1.1.3"
 ```
 
 Install Core directly when you specifically want the runtime package:
 
 ```bash
-python -m pip install "kazenai[openai]==1.1.2"
+python -m pip install "kazenai[openai]==1.1.3"
 ```
 
 Python 3.10, 3.11 and 3.12 are supported.
@@ -158,20 +158,20 @@ response = guarded_llm_call(
 )
 ```
 
-This explicit guard can reserve around a custom callable, but it does not make
-arbitrary provider response parsing a certified integration. The caller remains
-responsible for passing valid price and usage information.
+This explicit guard reserves around a custom callable. KazenAI does not parse
+arbitrary provider responses, so the caller passes valid price and usage
+information.
 
-## Supported boundary in 1.1.2
+## What is supported
 
-Verified locally with synthetic provider transports and real local KazenAI
-services, and against the live OpenAI and Anthropic APIs (2026-10-12, including
-the LiteLLM, LangChain and LangGraph rows). Source of truth:
-[docs/integrations/control-supported-matrix.md](docs/integrations/control-supported-matrix.md).
+Every path below is covered by the test suite, and the OpenAI, Anthropic,
+LiteLLM, LangChain and LangGraph paths are also verified against the live
+provider APIs. Full details:
+[Supported integrations](docs/integrations/control-supported-matrix.md).
 
 | Path | Status |
 |---|---|
-| OpenAI `chat.completions.create`, sync and async | Supported, non-streaming and `stream=True` |
+| OpenAI `chat.completions.create` and `.parse`, sync and async | Supported, non-streaming and `stream=True` |
 | OpenAI `chat.completions.stream` | Supported |
 | Anthropic `messages.create`, sync and async | Supported, non-streaming and `stream=True` |
 | Anthropic `messages.stream` | Supported |
@@ -182,7 +182,8 @@ the LiteLLM, LangChain and LangGraph rows). Source of truth:
 | OpenAI Responses API, including streaming | Not supported |
 | OpenAI Realtime/WebSocket | Not supported |
 | Bedrock/Vertex Anthropic wrappers | Not supported |
-| CrewAI, AutoGen | Not supported |
+| CrewAI | Preview (`bind_crew_llm_client`); not yet a supported path |
+| AutoGen | Not supported |
 
 ## Next references
 

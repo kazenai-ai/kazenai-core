@@ -20,7 +20,7 @@ jobs:
       - run: pip install --upgrade pip
       # kazen-event-schema>=0.6.4 resolves from PyPI via pyproject.toml.
       - run: pip install -e ".[dev]"
-      - name: Lint certified streaming surface
+      - name: Lint streaming and budget modules
         run: >-
           ruff check kazenai/streaming kazenai/monitor.py kazenai/spine/guard.py kazenai/enforcement.py
           kazenai/model_pricing.py kazenai/cost_engine.py kazenai/pricing_policy.py
@@ -30,19 +30,18 @@ jobs:
           tests/test_train_b_streaming_hardening.py tests/test_train_b_official_sdks.py
       - name: Type-check provider-neutral streaming lifecycle
         run: mypy kazenai/streaming kazenai/budget.py kazenai/provider_errors.py --ignore-missing-imports --follow-imports=skip
-      # Coverage bar matches pyproject.toml [tool.coverage.report] fail_under=80
-      # (CI previously forced 90; FINAL_1 surface growth left unit coverage ~81%).
+      # Coverage bar matches pyproject.toml [tool.coverage.report] fail_under=80.
       - run: pytest tests/ -q --cov=kazenai --cov-report=term-missing --cov-fail-under=80
       - name: Enforce async provider behavioral coverage
         run: python scripts/coverage_async_provider_gate.py
-      - name: CrewAI ownership routing on the real 1.15.26 event bus (A2)
+      - name: CrewAI ownership routing on the real 1.15.26 event bus
         env:
           CREWAI_DISABLE_TELEMETRY: "true"
           OTEL_SDK_DISABLED: "true"
           KAZENAI_REQUIRE_CREWAI: "1"
         run: |
           pip install "crewai==1.15.26"
-          pytest tests/test_crewai_ownership_a2.py tests/test_structured_output_and_crewai_bind.py -q --no-cov
+          pytest tests/test_crewai_event_ownership.py tests/test_structured_output_and_crewai_bind.py -q --no-cov
       - name: Export KazenEvent schema and fail on drift
         run: |
           python scripts/export_kazenevent_schema.py
@@ -63,10 +62,10 @@ jobs:
         run: |
           set -o pipefail
           pytest -q -rs --no-cov \
-            tests/test_final1b_final_p8_framework_adapters.py \
-            tests/test_final1b_final_p8_real_frameworks.py \
-            tests/test_final1b_final_p8_control_cells.py \
-            tests/test_final1b_final_u06_async_sqlite_restart_id.py \
+            tests/test_framework_adapters.py \
+            tests/test_real_frameworks.py \
+            tests/test_framework_control_cells.py \
+            tests/test_langgraph_async_sqlite_restart.py \
             tests/test_langchain_anthropic_and_multi_client.py \
             tests/test_shared_budget.py \
             tests/test_live_found_regressions.py \

@@ -1,10 +1,10 @@
 # Security
 
 ## Reporting
-Report suspected vulnerabilities privately to the maintainer (Dhavan Shah / KazenAI contact channels on https://kazenai.com). Do not open public issues for unreleased security details.
+Report suspected vulnerabilities privately to **founder@kazenai.com**. Please do not open public issues for security problems; we will acknowledge your report and coordinate a fix and disclosure.
 
 ## Capture defaults (SDK)
-The `kazenai` SDK defaults to metadata-only capture (request/response bodies omitted). Secret redaction runs before sinks/logs. Enabling fuller capture requires explicit configuration and consent as documented in `docs/security/capture-and-retention.md` when present.
+The `kazenai` SDK defaults to metadata-only capture (request/response bodies omitted). Secret redaction runs before sinks/logs. Capturing request or response bodies requires explicit configuration.
 
 ## Scope
-This repository's license covers the SDK/schema code. Hosted FinOps/Lens and other private services are separate products with separate terms.
+This repository's license covers the SDK code. Agent FinOps, Agent Lens and other hosted KazenAI services are separate products with separate terms.

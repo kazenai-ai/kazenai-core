@@ -55,7 +55,7 @@ def resolve_model_key(
     Returns the resolved pricing key, or None if the model is unknown.
 
     Both ``is_known_model`` and ``TokenCostEngine.price`` delegate here so that
-    "known" and "priced" can never disagree (see P0-2): a model is known iff it
+    "known" and "priced" can never disagree: a model is known iff it
     resolves to a real pricing row. Substring matching is intentionally NOT used
     — it is the loosest and most dangerous form (a proxy/gateway-prefixed name
     like "my-gpt-4o-proxy" must be treated as unknown, not silently priced).

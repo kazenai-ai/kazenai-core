@@ -1,4 +1,4 @@
-"""Async OpenAI / Anthropic monitor patches (FINAL_1_b_final P5).
+"""Async OpenAI / Anthropic monitor patches.
 
 Shares admission/settlement helpers with ``monitor.py``; transport is native
 awaitable provider SDK calls plus httpx FinOps I/O.
@@ -174,7 +174,7 @@ def patch_openai_async(
                         "input_tokens": m._estimate_input_tokens(call_kwargs),
                     },
                 )
-                # R02: provider_started before every potential dispatch.
+                # Provider_started before every potential dispatch.
                 await m._mark_stream_started_or_release_async(
                     enforcement=enforcement,
                     held_projection=held_projection,
@@ -282,7 +282,7 @@ def patch_openai_async(
                         )
                     raise
                 except BaseException as cancel_exc:
-                    # U02: CancelledError after dispatch — finalize stream attempt or
+                    # CancelledError after dispatch — finalize stream attempt or
                     # mark pending; never leave a reservation without cleanup evidence.
                     if attempt is not None:
                         try:
@@ -809,7 +809,7 @@ def patch_anthropic_async(
                         )
                     raise
                 except BaseException as cancel_exc:
-                    # U02: CancelledError after dispatch — finalize or mark pending.
+                    # CancelledError after dispatch — finalize or mark pending.
                     if attempt is not None:
                         try:
                             from .streaming.lifecycle import StreamOutcome as _SO

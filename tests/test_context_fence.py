@@ -1,4 +1,4 @@
-"""Tests for access_list context fencing (Loop 24 P1-7)."""
+"""Tests for access_list context fencing."""
 
 from __future__ import annotations
 

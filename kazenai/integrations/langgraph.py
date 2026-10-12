@@ -30,7 +30,7 @@ from .adapter_contract import (
 CONFIG_KEY = "kazenai_correlation"
 
 # Process-local resume cache. Keyed by tenancy + workflow + thread so two graphs
-# sharing a common thread name cannot collide (U06). Values expire.
+# sharing a common thread name cannot collide. Values expire.
 _THREAD_ENVELOPES: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
 _THREAD_ENVELOPE_TTL_S = 24 * 3600.0
 
@@ -56,7 +56,7 @@ def _durable_envelope_path(key: tuple[str, ...]) -> str:
 
 
 def _persist_durable_envelope(key: tuple[str, ...], envelope: dict[str, Any]) -> None:
-    """Write correlation envelope so AsyncSqliteSaver restart keeps operation_id (U06)."""
+    """Write correlation envelope so AsyncSqliteSaver restart keeps operation_id."""
     import json
     import time
 
@@ -99,7 +99,7 @@ def _load_durable_envelope(key: tuple[str, ...]) -> dict[str, Any] | None:
 
 
 def _checkpointer_store_id(graph: Any) -> str:
-    """Bind side-store identity to the checkpoint store, not only thread_id (F06)."""
+    """Bind side-store identity to the checkpoint store, not only thread_id."""
     override = (os.getenv("KAZENAI_LANGGRAPH_STORE_ID") or "").strip()
     if override:
         return override
@@ -258,7 +258,7 @@ class LangGraphAdapter:
         self._capability = (
             capability if isinstance(capability, CapabilityLevel) else CapabilityLevel(str(capability))
         )
-        # Template only — each independent invocation gets a fresh operation (R14).
+        # Template only — each independent invocation gets a fresh operation.
         self._op_template = dict(
             framework="langgraph",
             org_id=org_id,
@@ -299,7 +299,7 @@ class LangGraphAdapter:
             if declared is not None:
                 reject_openai_responses_api(declared)
                 require_control_client(declared, label="LangGraph provider client")
-                # F03/U05: a decoy monitored client is not Control proof.
+                # A decoy monitored client is not Control proof.
                 # wrap_graph does NOT auto-declare — callers must bind explicitly.
                 # Gateway-owned Control may omit.
                 if not gateway:
@@ -396,7 +396,7 @@ class LangGraphAdapter:
         return None
 
     def _envelope_from_checkpoint(self, config: dict[str, Any] | None) -> Any | None:
-        """U06: recover correlation envelope from checkpointer when resume omits it."""
+        """Recover correlation envelope from checkpointer when resume omits it."""
         if config is None or not hasattr(self._graph, "get_state"):
             return None
         try:
@@ -406,7 +406,7 @@ class LangGraphAdapter:
         return self._parse_checkpoint_snap(snap)
 
     async def _envelope_from_checkpoint_async(self, config: dict[str, Any] | None) -> Any | None:
-        """U06: async twin — prefer ``aget_state`` for AsyncSqliteSaver restart."""
+        """Async twin — prefer ``aget_state`` for AsyncSqliteSaver restart."""
         if config is None:
             return None
         aget = getattr(self._graph, "aget_state", None)
@@ -466,7 +466,7 @@ class LangGraphAdapter:
         return self._thread_has_checkpoint(config)
 
     def _bind_restored_op(self, restored: Any):
-        """Apply restored correlation; detect explicit operation_id conflicts (F06)."""
+        """Apply restored correlation; detect explicit operation_id conflicts."""
         explicit = self._op_template.get("operation_id")
         if explicit and str(explicit) != str(restored.operation_id):
             raise UnsupportedFrameworkPath(
@@ -506,7 +506,7 @@ class LangGraphAdapter:
         restored = restore_operation_from_envelope(cfg.get(CONFIG_KEY))
         if restored is None:
             restored = self._envelope_from_checkpoint(config)
-        # Side-store only for threads that already have checkpoint state (F06).
+        # Side-store only for threads that already have checkpoint state.
         if restored is None and self._thread_has_checkpoint(config):
             key = self._cache_key_for_config(cfg)
             if key is not None:
@@ -515,7 +515,7 @@ class LangGraphAdapter:
                     restored = restore_operation_from_envelope(cached)
         if restored is None:
             kwargs = dict(self._op_template)
-            # Preserve explicit constructor operation_id when provided (U06).
+            # Preserve explicit constructor operation_id when provided.
             # Independent invocations without an envelope and without a seed mint anew.
             if not kwargs.get("operation_id"):
                 kwargs["operation_id"] = None
@@ -523,7 +523,7 @@ class LangGraphAdapter:
         return self._bind_restored_op(restored)
 
     async def _fresh_op_async(self, config: dict[str, Any] | None):
-        """Async resume path — uses aget_state for durable restart (U06)."""
+        """Async resume path — uses aget_state for durable restart."""
         cfg = (config or {}).get("configurable") or {}
         restored = restore_operation_from_envelope(cfg.get(CONFIG_KEY))
         if restored is None:
@@ -819,7 +819,7 @@ def wrap_graph(graph: Any, **kwargs: Any) -> LangGraphAdapter:
     Control does **not** auto-declare a boundary. Callers must first
     ``declare_langgraph_control_boundary(graph, guarded_client)`` with the
     client graph nodes actually use. Passing an unused monitored client to
-    ``wrap_graph`` alone is rejected (F03).
+    ``wrap_graph`` alone is rejected.
     """
     return LangGraphAdapter(graph, **kwargs)
 

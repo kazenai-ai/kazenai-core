@@ -244,7 +244,7 @@ def extract_role(payload: Mapping[str, Any], *, default: str = "member") -> str:
 
 
 def _as_numeric_date(value: Any, claim: str) -> int:
-    """Shared NumericDate coercion with TypeScript ``asNumericDate`` (U08)."""
+    """Shared NumericDate coercion with TypeScript ``asNumericDate``."""
     if isinstance(value, bool) or isinstance(value, (list, tuple, dict)):
         raise JwtVerifyError("malformed", f"invalid {claim} claim")
     if isinstance(value, str) and not value.strip():
@@ -361,7 +361,7 @@ def verify_hs256_token(
     if alg not in allowed_algs:
         raise JwtVerifyError("algorithm", "unsupported jwt alg")
 
-    # Unknown critical headers → malformed (parity with TypeScript; F05).
+    # Unknown critical headers → malformed (parity with the TypeScript verifier).
     crit = header.get("crit")
     if crit is not None:
         if not isinstance(crit, (list, tuple)) or any(not isinstance(c, str) for c in crit):
@@ -494,7 +494,7 @@ def _decode_with_clock(
         if iat > (clock + int(leeway)):
             raise JwtVerifyError("not_yet_valid", "token not yet valid")
 
-    # U08/F05: optional jti must be a string when the claim is present (incl. null).
+    # Optional jti must be a string when the claim is present (incl. null).
     if "jti" in payload and not isinstance(payload.get("jti"), str):
         raise JwtVerifyError("malformed", "invalid jti claim")
 

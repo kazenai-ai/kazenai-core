@@ -1,4 +1,4 @@
-"""Optional OpenTelemetry integration for KazenAI Control (FINAL_1_b_final P7).
+"""Optional OpenTelemetry integration for KazenAI Control.
 
 Ordinary ``import kazenai`` works without the OTel SDK. Install the optional
 extra: ``pip install 'kazenai[otel]'``.
@@ -253,7 +253,7 @@ def start_control_span(
 
     Returns ``(span, token)`` where ``token`` is the context detach token when
     ``attach=True``, or ``(span, None)`` when the span is kept alive without
-    becoming the caller's active context (U10 — stream return must not leave
+    becoming the caller's active context (stream return must not leave
     ``kazenai.model_attempt`` attached across the consumer boundary).
 
     Caller must ``end_control_span``.
@@ -318,7 +318,7 @@ def workflow_span(
     attributes: Mapping[str, Any] | None = None,
     kind: str = "internal",
 ) -> Any:
-    """Duration span for a framework/workflow execution (U10).
+    """Duration span for a framework/workflow execution.
 
     Unlike short event-delivery spans, this context manager covers the full
     kickoff/invoke lifetime so workflow.start→end share one parent span.

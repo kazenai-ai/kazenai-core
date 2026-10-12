@@ -1,4 +1,4 @@
-"""Train B — hermetic Control-certified streaming contract tests."""
+"""Hermetic Control-certified streaming contract tests."""
 
 from __future__ import annotations
 

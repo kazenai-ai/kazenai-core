@@ -1,4 +1,4 @@
-"""LiteLLM gateway Control helpers (FINAL_1_b_final P6).
+"""LiteLLM gateway Control helpers.
 
 Runs in the *gateway* process (or hermetic tests). Does not import LiteLLM.
 Application packages must not depend on LiteLLM internals; load the CustomLogger
@@ -127,7 +127,7 @@ def estimate_cost_usd(
 ) -> float | None:
     """Authoritative local price when known; ``None`` when pricing is unavailable.
 
-    R10: missing authoritative price must not become an invented final charge.
+    Missing authoritative price must not become an invented final charge.
     Callers should settle ``outcome_unknown`` / pending when this returns None.
     LiteLLM provider prefixes are stripped before lookup. A ``$0.00`` result for
     an unrecognized model is treated as unavailable pricing (not a free call).
@@ -224,7 +224,7 @@ def _gateway_pending_dir() -> str:
 
 
 class DurableGatewayStore:
-    """File-backed open-attempt + pending-settlement evidence (R10).
+    """File-backed open-attempt + pending-settlement evidence.
 
     Survives process restart. Not a substitute for FinOps/PostgreSQL authority —
     it only preserves delivery evidence until FinOps acknowledges.
@@ -362,7 +362,7 @@ class GatewayFinOpsClient:
         self.org_id = org_id or os.getenv("KAZENAI_ORG_ID") or ""
         self.workspace_id = workspace_id or os.getenv("KAZENAI_WORKSPACE_ID") or "default"
         self.timeout_s = float(timeout_s)
-        # Process cache + durable file store (R10).
+        # Process cache + durable file store.
         self._open: dict[str, AttemptReservation] = {}
         self.store = durable_store or DurableGatewayStore()
 
@@ -492,7 +492,7 @@ class GatewayFinOpsClient:
         actual_usd: float | None,
         usage_evidence: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        # R10: unknown price → durable pending, never invent a final charge.
+        # Unknown price → durable pending, never invent a final charge.
         if actual_usd is None:
             return self.settle_cancel_or_pending(
                 reservation,
@@ -511,7 +511,7 @@ class GatewayFinOpsClient:
             "actual_usd_micros": micros,
             "usage_evidence": dict(usage_evidence or {}),
         }
-        # U01: persist exact settlement intent *before* the network call so a
+        # Persist exact settlement intent *before* the network call so a
         # transport raise or HTTP 5xx cannot erase the known amount.
         reservation.status = "pending"
         reservation.settled_usd_micros = micros
@@ -567,7 +567,7 @@ class GatewayFinOpsClient:
             "usage_evidence": {"error": error, "dispatched": dispatched},
         }
         reservation.status = "pending" if dispatched else "cancelled"
-        # Persist intent before send (U01).
+        # Persist intent before send.
         try:
             self.store.put_open(reservation)
             self.store.enqueue_pending(body=body, error=error or "pre_send")
@@ -581,7 +581,7 @@ class GatewayFinOpsClient:
             return {"result": "pending", "status": "pending", "error": str(exc)}
         code = self._result_code(payload)
         # Only applied/duplicate acknowledge cancel or unknown; HTTP 200 + pending
-        # keeps the durable queue entry for retry (U01).
+        # keeps the durable queue entry for retry.
         if status >= 400 or code not in {"applied", "duplicate"}:
             self._persist_delivery(reservation, body=body, error=error or str(code or status))
             return {"result": "pending", "status": "pending", "http_status": status, **payload}
@@ -605,7 +605,7 @@ class GatewayFinOpsClient:
         body: Mapping[str, Any],
         error: str,
     ) -> None:
-        """Ensure durable queue retains the exact settlement body (U01)."""
+        """Ensure durable queue retains the exact settlement body."""
         try:
             self.store.put_open(reservation)
             self.store.enqueue_pending(body=body, error=error)
@@ -638,7 +638,7 @@ class GatewayFinOpsClient:
 
         Only ``applied`` / ``duplicate`` acknowledge a queued delivery. HTTP 200 with
         ``result=pending`` must keep the queue entry and open reservation so the
-        exact known amount can be retried (U01).
+        exact known amount can be retried.
         """
         applied = 0
         failed = 0

@@ -1,6 +1,6 @@
 """SQLite-backed offline event queue with lease/ack, dedupe, and disk bounds.
 
-FINAL_1 P3-4: durable client spool for HttpSink — never delete-on-read.
+Durable client spool for HttpSink — never delete-on-read.
 """
 
 from __future__ import annotations

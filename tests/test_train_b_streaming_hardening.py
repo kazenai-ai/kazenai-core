@@ -1,4 +1,4 @@
-"""Release-blocking Train B lifecycle, accounting, and privacy regressions."""
+"""Release-blocking lifecycle, accounting, and privacy regressions."""
 
 from __future__ import annotations
 

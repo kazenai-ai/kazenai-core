@@ -100,7 +100,7 @@ def _apply_guarded_openai_to_chat_model(chat_model: Any, guarded: Any) -> None:
 
 
 def _apply_guarded_async_openai_to_chat_model(chat_model: Any, guarded_async: Any) -> None:
-    """U05: bind monitored AsyncOpenAI so ainvoke cannot use an unguarded transport."""
+    """Bind monitored AsyncOpenAI so ainvoke cannot use an unguarded transport."""
     async_completions = getattr(getattr(guarded_async, "chat", None), "completions", None)
     if hasattr(chat_model, "root_async_client"):
         try:
@@ -446,7 +446,7 @@ def bind_monitored_chat_openai(chat_model: Any, openai_client: Any, **monitor_kw
     if guarded_async is not None:
         _apply_guarded_async_openai_to_chat_model(chat_model, guarded_async)
     else:
-        # U05: do not certify Control while an unguarded async transport remains.
+        # Do not certify Control while an unguarded async transport remains.
         remaining = getattr(chat_model, "root_async_client", None)
         if remaining is not None and not is_monitored_client(remaining):
             raise UnsupportedFrameworkPath(

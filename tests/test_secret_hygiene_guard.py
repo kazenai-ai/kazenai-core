@@ -1,4 +1,4 @@
-"""Loop 25 P0-1 — secret hygiene startup guard."""
+"""Secret hygiene startup guard."""
 
 from __future__ import annotations
 

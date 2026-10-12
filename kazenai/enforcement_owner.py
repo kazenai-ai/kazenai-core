@@ -1,4 +1,4 @@
-"""Single enforcement-owner context (FINAL_1_b P3-2).
+"""Single enforcement-owner context.
 
 Prevents double authorize/settle when both a gateway and the SDK could intercept.
 Ownership is declared via ``KAZENAI_ENFORCEMENT_OWNER`` and/or a ContextVar claim.
@@ -163,7 +163,7 @@ def should_skip_sdk_reserve() -> bool:
     """True when an outer owner already authorized this attempt (avoid double-charge).
 
     Gateway-owned deployments skip SDK reserve entirely — admission belongs to the
-    gateway process. R11's matched-reservation rule applies to FinOps callback
+    gateway process. The matched-reservation rule applies to FinOps callback
     debit suppression, not to this SDK noop path.
     """
     if gateway_owns_enforcement():

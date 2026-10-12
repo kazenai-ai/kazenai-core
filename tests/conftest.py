@@ -11,7 +11,7 @@ _CLEAR_ENV = (
     "KAZENAI_DEPLOYMENT_MODE",
     "KAZENAI_ENV",
     "KAZENAI_PRICING_JSON",
-    # F08: optional-framework imports must not inherit host fallback ingest aliases.
+    # Optional-framework imports must not inherit host fallback ingest aliases.
     "KAZENAI_FINOPS_INGEST_URL",
     "KAZENAI_INGEST_URL",
     "KAZENAI_AGENTLENS_INGEST_URL",

@@ -150,7 +150,7 @@ class Enforcement:
         """Headroom (USD) left under the cost cap, or None when uncapped.
 
         Lets a long-running caller cap a single run to the remaining budget and halt
-        mid-run instead of overshooting once on an expensive call (SEC-R2-9).
+        mid-run instead of overshooting once on an expensive call.
         """
         if self._max_cost_usd is None:
             return None

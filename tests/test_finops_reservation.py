@@ -327,7 +327,7 @@ class TestWorkspaceIdScoping(unittest.TestCase):
 class TestActAsOrgHeader(unittest.TestCase):
     """Service-credential callers must assert the tenant org via X-Kazen-Act-As-Org.
 
-    FinOps org binding (Loop 25 H4) rejects cross-org budget calls from a service key
+    FinOps org binding rejects cross-org budget calls from a service key
     without this header (403), which makes enforcement fail closed. The spine guard
     must send it on both reserve and reconcile.
     """

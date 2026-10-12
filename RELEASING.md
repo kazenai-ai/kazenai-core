@@ -1,131 +1,65 @@
 # Releasing `kazenai`
 
-This procedure is for maintainers publishing the Core package to public PyPI.
-Release order for 1.1.2: `kazen-event-schema` 0.6.4 first (Core 1.1.2 requires
-`kazen-event-schema>=0.6.4,<0.7`), then Core, then `kazenai-finops` 1.1.2 (which
-requires `kazenai>=1.1.2,<2.0`). Core needs no private package; never
-add private wheels to this public repository.
+How maintainers publish `kazenai` to PyPI. Replace `X.Y.Z` with the release
+version.
 
-## Architecture / modularization debt
+## Order
 
-`kazenai/monitor.py` is the certified Control entrypoint implementation and is
-currently oversized. The next engineering track is a **behavior-preserving**
-split (documented in [`ARCHITECTURE.md`](./ARCHITECTURE.md)):
+`kazenai` depends on `kazen-event-schema`, and `kazenai-finops` depends on
+`kazenai`. Publish in that order: the schema (when it changed), then
+`kazenai`, then `kazenai-finops` at the same version as `kazenai`.
 
-- `monitor_openai.py` / `monitor_anthropic.py`
-- `monitor_emit.py` (`model.call` payload builders)
-- keep `monitor()` as a thin facade; `from kazenai import monitor` stays stable
-- new surfaces must not grow the god file
+## 1. Prepare the release commit
 
-Do **not** block a security/install hotfix on that refactor. Prefer shipping
-modularization as its own PR(s) with the full test suite green, and only bump
-PyPI when you intentionally publish those commits.
+- Set the version in `pyproject.toml` and `kazenai/__init__.py`, and update the
+  install commands in the README and guides.
+- Add `RELEASE_NOTES_X.Y.Z.md`.
+- Make sure the commit contains no secrets, credentials, customer data, local
+  environments or generated files.
+- Push the commit to `main`.
 
-## 1. Prepare one releasable commit
-
-- Confirm `pyproject.toml`, `kazenai/__init__.py`, tests and user-facing docs all
-  describe the intended version and supported surface.
-- Confirm the working tree contains no secrets, credentials, customer data,
-  generated environments or unrelated artifacts.
-- Commit the reviewed source and push that commit to the release branch.
-- Record the exact commit SHA. Build and tag only that SHA.
-
-Never publish from an uncommitted working tree and never reuse a version that
+Never publish from an uncommitted working tree, and never reuse a version that
 already exists on PyPI.
 
-## 2. Require CI on all supported Python versions
+## 2. Wait for CI
 
-Wait for the GitHub Actions matrix to pass on Python 3.10, 3.11 and 3.12. The
-release gate includes linting, type checks, the full test suite, coverage and
-schema/contract verification, plus the `frameworks` job (LangChain/LangGraph on
-the pinned versions; it fails if any framework test is skipped).
+CI must pass on Python 3.10, 3.11 and 3.12, including linting, type checks,
+the test suite with coverage, the schema-export check and the `frameworks` job.
+Do not continue if any job is skipped, cancelled or failing.
 
-Before tagging, run the opt-in live smokes against the paid providers and attach
-their evidence (they never run in CI):
+Optionally run the paid live smokes before tagging (they never run in CI):
 
 ```bash
 KAZENAI_LIVE_PROVIDER_SMOKE=1 pytest -m live tests/test_live_provider_smoke.py -q
 KAZENAI_LIVE_FRAMEWORK_SMOKE=1 pytest -m live tests/test_live_framework_smoke.py -q
 ```
 
-The framework smoke also needs a running Agent FinOps (Control profile) and a
-LiteLLM proxy binary; see the module docstring for its environment variables.
+The framework smoke also needs a running Agent FinOps and a LiteLLM proxy; see
+the test module's docstring.
 
-Do not continue if any required job is skipped, cancelled or failing.
+## 3. Tag and publish
 
-## 3. Build from a clean checkout
-
-Create a new checkout of the exact reviewed commit outside the development
-working tree:
-
-```bash
-git clone https://github.com/kazenai-ai/kazenai-core.git kazenai-core-release
-cd kazenai-core-release
-git checkout <RELEASE_COMMIT_SHA>
-python3 -m venv .venv-release
-source .venv-release/bin/activate
-python -m pip install --upgrade pip build twine
-python -m build
-python -m twine check dist/*
-```
-
-Confirm that `dist/` was empty before the build and contains only the wheel and
-source distribution produced from this commit.
-
-## 4. Test the built artifacts, not the source tree
-
-Install the wheel in another empty virtual environment. Run the package smoke
-tests and the supported OpenAI/Anthropic manager smoke tests without adding the
-repository to `PYTHONPATH`:
+Pushing a `vX.Y.Z` tag runs `.github/workflows/publish.yml`, which builds the
+wheel and source distribution from the tagged commit and publishes them with
+PyPI Trusted Publishing.
 
 ```bash
-python3 -m venv .venv-wheel
-source .venv-wheel/bin/activate
-python -m pip install --upgrade pip
-python -m pip install "dist/kazenai-1.1.2-py3-none-any.whl[openai,anthropic]"
-python -c "import kazenai; print(kazenai.__version__)"
+git tag -a vX.Y.Z -m "kazenai X.Y.Z"
+git push origin vX.Y.Z
+gh release create vX.Y.Z --title "kazenai X.Y.Z" --notes-file RELEASE_NOTES_X.Y.Z.md --verify-tag
 ```
 
-The printed version must be `1.1.2`. Use mocked provider transports or a
-non-production tenant for behavioral smoke tests; never place live secrets in
-logs.
+## 4. Verify from PyPI
 
-## 5. Publish Core
-
-Prefer PyPI Trusted Publishing from the protected GitHub release workflow. If a
-manual upload is unavoidable, use a narrowly scoped PyPI token from the clean
-release environment:
+Install the published package into a fresh environment, without local indexes
+or editable installs:
 
 ```bash
-python -m twine upload dist/*
+python3 -m venv /tmp/kazenai-release-check
+/tmp/kazenai-release-check/bin/pip install --no-cache-dir "kazenai[openai,anthropic]==X.Y.Z"
+/tmp/kazenai-release-check/bin/python -c "import kazenai; print(kazenai.__version__)"
 ```
 
-Publishing is irreversible. Check the project name, version, commit SHA and
-artifact hashes immediately before approval.
-
-## 6. Verify public PyPI independently
-
-After PyPI serves the release, install it into a fresh environment without
-local indexes, editable installs or sibling repositories:
-
-```bash
-python3 -m venv .venv-public
-source .venv-public/bin/activate
-python -m pip install --upgrade pip
-python -m pip install --no-cache-dir "kazenai[openai,anthropic]==1.1.2"
-python -c "import importlib.metadata as m; print(m.version('kazenai'))"
-```
-
-Confirm resolved provider SDK majors stay within the install ranges
-(`openai>=1.40,<3`, `anthropic>=0.39,<1`). Rerun the supported package smoke
-test. Only after this succeeds should `kazenai-finops==1.1.2` be built and
-published.
-
-## 7. Tag and document the release
-
-- Tag the exact published commit as `v1.1.2`.
-- Create a GitHub Release that links the tested commit and summarizes supported
-  paths, compatibility and known limitations.
-- Record artifact hashes and the CI run used as release evidence.
-- After both public packages pass the clean-install smoke test, update demo pins
-  and deploy the matching documentation revision.
+The printed version must be `X.Y.Z`, and the resolved provider SDKs must stay
+within `openai>=1.40,<3` and `anthropic>=0.39,<1`. Then release
+`kazenai-finops` at the same version.

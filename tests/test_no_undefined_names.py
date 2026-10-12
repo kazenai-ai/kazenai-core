@@ -1,4 +1,4 @@
-"""F821 gate (P3-2): no undefined names anywhere in this repo.
+"""F821 gate: no undefined names anywhere in this repo.
 
 This bug class produced real failures: the Brain MCP server crashed at launch
 (missing asyncio import), the orchestrator MCP server silently skipped its
