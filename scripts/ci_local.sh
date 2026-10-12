@@ -14,8 +14,6 @@ rm -rf "$VENV"
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 pip install --upgrade pip
-pip install ./vendor/kazen_event_schema-0.6.2-py3-none-any.whl
-pip install ./vendor/kazenai_contracts-0.1.0-py3-none-any.whl
 pip install -e ".[dev]"
 pytest tests/ -q --cov=kazenai --cov-report=term-missing --cov-fail-under=80
 python scripts/export_kazenevent_schema.py

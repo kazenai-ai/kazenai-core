@@ -79,14 +79,15 @@ def test_gateway_without_reservation_blocks_sdk_reserve(monkeypatch):
     monkeypatch.setenv("KAZENAI_FINOPS_RESERVATION_MODE", "fail_closed")
 
     def boom(*args: Any, **kwargs: Any):  # noqa: ARG001
-        raise AssertionError("must not call FinOps when ownership is ambiguous")
+        raise AssertionError("must not call FinOps when gateway owns enforcement")
 
     monkeypatch.setattr("urllib.request.urlopen", boom)
 
-    with pytest.raises(EnforcementOwnershipError):
-        # claim gateway first to set context, then SDK should not independently reserve
-        with claim_enforcement_owner("gateway"):
-            reserve_budget(org_id="o", workspace_id="w", run_id="r")
+    # Gateway-owned: SDK returns a noop handle and must not debit FinOps.
+    with claim_enforcement_owner("gateway"):
+        handle = reserve_budget(org_id="o", workspace_id="w", run_id="r")
+    assert isinstance(handle, ReservationHandle)
+    assert handle.reservation_id == ""
 
 
 def test_propagated_reservation_skips_second_charge(monkeypatch):

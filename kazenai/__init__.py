@@ -1,4 +1,4 @@
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 # Prefer the installed distribution version. Fallback is only for editable /
 # source checkouts where package metadata is unavailable.
@@ -7,7 +7,7 @@ try:
 
     __version__ = _pkg_version("kazenai")
 except PackageNotFoundError:  # pragma: no cover - source-tree only
-    __version__ = "1.1.1"
+    __version__ = "1.1.2"
 
 from .context import BackgroundTaskContext, RunContext, get_current_context, use_context
 from .attribution import (
@@ -22,6 +22,7 @@ from .enforcement_owner import (
     claim_enforcement_owner,
     get_enforcement_owner,
 )
+from .budget import SharedBudget
 from .enforcement import (
     BudgetExceeded,
     BudgetUnavailable,
@@ -42,7 +43,12 @@ from .loop_detector import LoopDetector
 #   - `from kazenai.monitor import X` → still works (resolved via sys.modules).
 #   - `import kazenai.monitor as m` → binds the FUNCTION on Python 3.12+;
 #     use `importlib.import_module("kazenai.monitor")` to get the module.
-from .monitor import monitor, patch_anthropic, patch_openai
+from .monitor import (
+    configure_direct_provider_client,
+    monitor,
+    patch_anthropic,
+    patch_openai,
+)
 from .capture_policy import CaptureMode, inputs_absent, redact_secrets, resolve_capture_mode
 from .cost_engine import TokenCostEngine, UnknownModelError
 from .trajectory import CostTrajectoryPredictor
@@ -76,8 +82,19 @@ from .reliability_policy import (
     should_block,
     should_escalate,
 )
+from .lifecycle_config import (
+    ClientServerLifecycleMismatch,
+    EffectiveLifecycleConfig,
+    LifecycleConfigError,
+    assert_compatible_with_server,
+    control_profile_active,
+    lifecycle_budget_enabled,
+    resolve_effective_lifecycle,
+    sdk_lifecycle_diagnostics,
+)
 
 __all__ = [
+    "SharedBudget",
     "KazenMemory",
     "clear_degraded",
     "degraded_header_value",
@@ -137,6 +154,7 @@ __all__ = [
     "inputs_absent",
     "redact_secrets",
     "resolve_capture_mode",
+    "configure_direct_provider_client",
     "monitor",
     "patch_anthropic",
     "patch_openai",
@@ -151,4 +169,12 @@ __all__ = [
     "scan_and_raise_or_http",
     "canonical_default_org",
     "require_canonical_default_org",
+    "EffectiveLifecycleConfig",
+    "LifecycleConfigError",
+    "ClientServerLifecycleMismatch",
+    "assert_compatible_with_server",
+    "control_profile_active",
+    "lifecycle_budget_enabled",
+    "resolve_effective_lifecycle",
+    "sdk_lifecycle_diagnostics",
 ]

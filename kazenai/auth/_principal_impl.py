@@ -195,9 +195,17 @@ def resolve_effective_org(
     if header_org and header_org != body_org:
         raise PrincipalError("org_id must match X-Kazen-Org-Id")
 
-    if act_as:
-        if principal.role not in SERVICE_ACT_AS_ROLES:
+    if act_as and principal.role not in SERVICE_ACT_AS_ROLES:
+        # A non-service credential may assert only its own org (the SDK sends
+        # the header on every budget call). That is not delegation: drop it and
+        # apply the normal org and workspace membership checks below.
+        if act_as != (principal.org_id or ""):
             raise PrincipalError("X-Kazen-Act-As-Org not authorized for this credential")
+        if body_org != act_as:
+            raise PrincipalError("org_id must match X-Kazen-Act-As-Org")
+        act_as = ""
+
+    if act_as:
         if body_org != act_as:
             raise PrincipalError("org_id must match X-Kazen-Act-As-Org")
         updated = CanonicalPrincipal(
@@ -235,6 +243,17 @@ def resolve_effective_org(
         raise PrincipalError("cross-org request requires X-Kazen-Act-As-Org")
 
     return body_org, principal
+
+
+def act_as_delegation_active(principal: CanonicalPrincipal, headers: Mapping[str, str]) -> bool:
+    """True only for a service credential delegating via X-Kazen-Act-As-Org.
+
+    A non-service credential asserting its own org is not delegation, so it
+    must not relax workspace binding.
+    """
+    return bool(_norm_header_map(headers).get("x-kazen-act-as-org")) and (
+        principal.role in SERVICE_ACT_AS_ROLES
+    )
 
 
 def resolve_effective_workspace(
@@ -339,7 +358,7 @@ def evaluate_fixture(fixture: Mapping[str, Any]) -> dict[str, Any]:
             body_org_id=str(req.get("body_org_id") or ""),
             ingress=ingress,
         )
-        act_as_active = bool(_norm_header_map(headers).get("x-kazen-act-as-org"))
+        act_as_active = act_as_delegation_active(principal, headers)
         ws = resolve_effective_workspace(
             audited,
             headers,

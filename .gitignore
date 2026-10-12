@@ -10,7 +10,6 @@ __pycache__/
 .venv-build/
 .venv-test/
 .venv-bootstrap/
-
 venv/
 ENV/
 env/
@@ -31,10 +30,9 @@ htmlcov/
 # Local config
 .env
 .env.*
-
-.env
-.env.*
 !.env.example
-.venv/
-dist/
-*.egg-info/
+# Local evidence from live/paid runs (kept privately, not published)
+artifacts/
+# Private package; core uses its in-tree mirror (kazenai/auth/_principal_impl.py)
+vendor/kazenai_contracts-*.whl
+vendor/kazen_event_schema-0.6.4-py3-none-any.whl

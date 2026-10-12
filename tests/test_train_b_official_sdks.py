@@ -79,6 +79,7 @@ def _openai_client(request_bodies: list[dict[str, Any]]):
     return openai.OpenAI(
         api_key="test",
         base_url="https://openai.test/v1",
+        max_retries=0,
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -95,6 +96,7 @@ def _anthropic_client():
     return anthropic.Anthropic(
         api_key="test",
         base_url="https://anthropic.test",
+        max_retries=0,
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
 

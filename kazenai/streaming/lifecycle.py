@@ -14,6 +14,9 @@ class StreamOutcome(str, Enum):
     CUTOFF = "CUTOFF"
     CLIENT_CANCELLED = "CLIENT_CANCELLED"
     PROVIDER_ERROR = "PROVIDER_ERROR"
+    # The provider refused the request outright (HTTP 4xx such as 400/401/403/
+    # 404/422/429) before doing billable work: settle exactly $0, not pending.
+    REJECTED = "REJECTED"
     TRANSPORT_ERROR = "TRANSPORT_ERROR"
     UNKNOWN = "UNKNOWN"
 
@@ -118,6 +121,8 @@ class StreamAttempt:
     reserved_cost_usd: Any
     model: str
     method: str
+    # Observable-output rate: estimates in-flight spend for the stream cutoff.
+    # Never a settlement price; usage at stream end is priced input/output split.
     usd_per_1k_tokens: float
     capture_mode: Any
     agent_role: str
@@ -126,11 +131,17 @@ class StreamAttempt:
     endpoint_url: Optional[str] = None
     endpoint_headers: Optional[Mapping[str, str]] = None
     stream_cutoff_usd: Optional[float] = None
+    # The caller's explicit flat rate (monitor(..., usd_per_1k_tokens=)), if any.
+    # The only flat rate settlement may apply; otherwise the pricing table prices
+    # input and output tokens separately.
+    settle_usd_per_1k_tokens: Optional[float] = None
     pricing_version: str = "kazenai.cost_engine.v1"
     # Captured at stream start so finalize can emit attribution after ContextVar exit.
     attribution: Optional[Mapping[str, Any]] = None
     reconcile_fn: Optional[Callable[..., Any]] = None
     pending_fn: Optional[Callable[..., Any]] = None
+    reconcile_async_fn: Optional[Callable[..., Any]] = None
+    pending_async_fn: Optional[Callable[..., Any]] = None
     postcall_cost_fn: Optional[Callable[..., Optional[float]]] = None
     reservation_payload_fn: Optional[Callable[[Any], dict]] = None
     emit_event_fn: Optional[Callable[..., None]] = None
@@ -146,6 +157,62 @@ class StreamAttempt:
     terminal_outcome: Optional[StreamOutcome] = None
     financial_pending: bool = False
     cost_confidence: str = "unknown"
+    # U10: model-attempt span that outlives stream object return.
+    _otel_span: Any = field(default=None, repr=False)
+    _otel_token: Any = field(default=None, repr=False)
+
+    def begin_otel_span(
+        self,
+        *,
+        provider: str | None = None,
+        operation_id: str | None = None,
+        attempt_id: str | None = None,
+        workflow_id: str | None = None,
+        feature_id: str | None = None,
+        business_subject_ref: str | None = None,
+        reservation_id: str | None = None,
+        decision_id: str | None = None,
+    ) -> None:
+        """Start ``kazenai.model_attempt`` for the full stream lifetime (U10)."""
+        if self._otel_span is not None:
+            return
+        try:
+            from ..otel import build_control_attributes, start_control_span
+
+            attrs = build_control_attributes(
+                model=self.model or None,
+                provider=provider,
+                operation_id=operation_id
+                or (self.attribution or {}).get("operation_id"),
+                attempt_id=attempt_id or (self.attribution or {}).get("attempt_id"),
+                workflow_id=workflow_id or (self.attribution or {}).get("workflow_id"),
+                feature_id=feature_id or (self.attribution or {}).get("feature_id"),
+                business_subject_ref=business_subject_ref
+                or (self.attribution or {}).get("business_subject_ref"),
+                reservation_id=reservation_id,
+                decision_id=decision_id,
+                economic_state="streaming",
+            )
+            span, token = start_control_span(
+                "kazenai.model_attempt", kind="client", attributes=attrs
+            )
+            self._otel_span = span
+            self._otel_token = token
+        except Exception:
+            self._otel_span = None
+            self._otel_token = None
+
+    def end_otel_span(self, *, error: Optional[BaseException] = None) -> None:
+        if self._otel_span is None and self._otel_token is None:
+            return
+        try:
+            from ..otel import end_control_span
+
+            end_control_span(self._otel_span, self._otel_token, error=error)
+        except Exception:
+            pass
+        self._otel_span = None
+        self._otel_token = None
 
     def note_first_byte(self) -> None:
         if self.first_byte_perf is None:
@@ -208,14 +275,20 @@ class StreamAttempt:
                     model=self.model,
                     usage=self.observed_usage.raw if self.observed_usage.raw is not None else usage_dict,
                     tokens_used=tokens_used,
-                    usd_per_1k_tokens=self.usd_per_1k_tokens or None,
+                    usd_per_1k_tokens=self.settle_usd_per_1k_tokens or None,
                 )
 
             pending = False
             confidence = "exact"
             settle_cost = 0.0
+            authoritative_usage = False
             if outcome in (StreamOutcome.COMPLETE,) and auth and cost_usd is not None:
                 settle_cost = float(cost_usd)
+                confidence = "exact"
+                pending = False
+                authoritative_usage = True
+            elif outcome == StreamOutcome.REJECTED:
+                settle_cost = 0.0
                 confidence = "exact"
                 pending = False
             elif outcome == StreamOutcome.COMPLETE and not auth:
@@ -231,9 +304,14 @@ class StreamAttempt:
                 confidence = "pending"
                 pending = True
 
-            if self.reserved_cost_usd is not None and self.reconcile_fn is not None and not pending:
+            reconcile_fn = self.reconcile_fn
+            has_settlement_obligation = (
+                self.reserved_cost_usd is not None and reconcile_fn is not None
+            )
+            financial_ack = False
+            if self.reserved_cost_usd is not None and reconcile_fn is not None and not pending:
                 try:
-                    settled = self.reconcile_fn(
+                    settled = reconcile_fn(
                         org_id=self.step_ctx.org_id,
                         workspace_id=self.step_ctx.workspace_id,
                         run_id=self.step_ctx.run_id,
@@ -242,9 +320,16 @@ class StreamAttempt:
                     )
                 except Exception:
                     settled = False
-                if settled is False:
+                # True is durable ack. None/False means settlement is still pending —
+                # local finalize must not pretend FinOps accepted the debit.
+                if settled is True:
+                    financial_ack = True
+                else:
                     pending = True
                     confidence = "exact_usage_pending_settlement"
+            elif not has_settlement_obligation and not pending:
+                # No shared ledger obligation: local exact usage is complete.
+                financial_ack = True
 
             if self.reserved_cost_usd is not None and self.pending_fn is not None and pending:
                 try:
@@ -256,6 +341,22 @@ class StreamAttempt:
                     )
                 except Exception:
                     pass
+
+            # Local stream finalization (_finalized) is once-only and independent
+            # of durable financial acknowledgment.
+            from ..lifecycle_transitions import classify_settlement_delivery
+
+            delivery = classify_settlement_delivery(
+                local_finalized=True,
+                financial_ack=financial_ack,
+                authoritative_usage=authoritative_usage,
+            )
+            if delivery == "exact_usage_pending_settlement":
+                pending = True
+                confidence = "exact_usage_pending_settlement"
+            elif delivery == "settled":
+                pending = False
+                confidence = "exact"
 
             self.financial_pending = pending
             self.cost_confidence = confidence
@@ -278,6 +379,185 @@ class StreamAttempt:
                 # exceptions such as KazenCircuitBreaker.  Do not erase those
                 # decisions here.
                 self.emit_event_fn(self, settle_cost=settle_cost, tokens_used=tokens_used, error=error)
+            self.end_otel_span(error=error)
+
+    async def finalize_async(
+        self,
+        outcome: StreamOutcome,
+        *,
+        usage: Optional[StreamUsage] = None,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        """Async twin of finalize — awaits native FinOps settle/pending callbacks.
+
+        R04: do not set ``_finalized`` until settlement/pending delivery finishes
+        (or a cancellation-safe pending mark is attempted). Cancellation mid-await
+        must not strand an obligation behind a once-only flag.
+        """
+        import inspect
+
+        with self._lock:
+            if self._finalized:
+                return
+            if getattr(self, "_finalize_in_progress", False):
+                return
+            self._finalize_in_progress = True
+            self.terminal_outcome = outcome
+            if usage is not None:
+                self.observe_usage(usage)
+
+            auth = self.observed_usage.authoritative
+            usage_dict = self.observed_usage.as_openai_style()
+            tokens_used = None
+            if usage_dict and "total_tokens" in usage_dict:
+                tokens_used = int(usage_dict["total_tokens"])
+
+            cost_usd: Optional[float] = None
+            if auth and self.postcall_cost_fn is not None:
+                cost_usd = self.postcall_cost_fn(
+                    model=self.model,
+                    usage=self.observed_usage.raw
+                    if self.observed_usage.raw is not None
+                    else usage_dict,
+                    tokens_used=tokens_used,
+                    usd_per_1k_tokens=self.settle_usd_per_1k_tokens or None,
+                )
+
+            pending = False
+            confidence = "exact"
+            settle_cost = 0.0
+            authoritative_usage = False
+            if outcome in (StreamOutcome.COMPLETE,) and auth and cost_usd is not None:
+                settle_cost = float(cost_usd)
+                confidence = "exact"
+                pending = False
+                authoritative_usage = True
+            elif outcome == StreamOutcome.REJECTED:
+                settle_cost = 0.0
+                confidence = "exact"
+                pending = False
+            elif outcome == StreamOutcome.COMPLETE and not auth:
+                settle_cost = 0.0
+                confidence = "pending"
+                pending = True
+            else:
+                settle_cost = 0.0
+                confidence = "pending"
+                pending = True
+
+            reconcile = self.reconcile_async_fn or self.reconcile_fn
+            pending_cb = self.pending_async_fn or self.pending_fn
+            has_settlement_obligation = (
+                self.reserved_cost_usd is not None and reconcile is not None
+            )
+            financial_ack = False
+
+        async def _mark_pending_safe() -> None:
+            if self.reserved_cost_usd is None or pending_cb is None:
+                return
+            try:
+                marked = pending_cb(
+                    org_id=self.step_ctx.org_id,
+                    workspace_id=self.step_ctx.workspace_id,
+                    run_id=self.step_ctx.run_id,
+                    reserved_cost_usd=self.reserved_cost_usd,
+                )
+                if inspect.isawaitable(marked):
+                    await marked
+            except Exception:
+                pass
+
+        def _complete_local(*, pending_flag: bool, confidence_flag: str, ack: bool) -> None:
+            from ..lifecycle_transitions import classify_settlement_delivery
+
+            delivery = classify_settlement_delivery(
+                local_finalized=True,
+                financial_ack=ack,
+                authoritative_usage=authoritative_usage,
+            )
+            conf = confidence_flag
+            pend = pending_flag
+            if delivery == "exact_usage_pending_settlement":
+                pend = True
+                conf = "exact_usage_pending_settlement"
+            elif delivery == "settled":
+                pend = False
+                conf = "exact"
+            self.financial_pending = pend
+            self.cost_confidence = conf
+            # Match sync finalize: exact provider usage stays on the local counter
+            # even when remote settlement acknowledgment is still pending (U02).
+            recorded = settle_cost if conf.startswith("exact") else 0.0
+            try:
+                self.enforcement.record_call(
+                    cost_usd=recorded,
+                    released_projection=self.held_projection,
+                )
+            except Exception:
+                pass
+            if self.emit_event_fn is not None:
+                try:
+                    self.emit_event_fn(
+                        self, settle_cost=settle_cost, tokens_used=tokens_used, error=error
+                    )
+                except Exception:
+                    pass
+            self.end_otel_span(error=error)
+            with self._lock:
+                self._finalized = True
+                self._finalize_in_progress = False
+
+        # Await network outside the lock.
+        # R04: cancellation mid-settlement must still finish local bookkeeping and
+        # leave financial_pending=True after a durable pending mark.
+        try:
+            if has_settlement_obligation and not pending and reconcile is not None:
+                try:
+                    settled = reconcile(
+                        org_id=self.step_ctx.org_id,
+                        workspace_id=self.step_ctx.workspace_id,
+                        run_id=self.step_ctx.run_id,
+                        reserved_cost_usd=self.reserved_cost_usd,
+                        actual_cost_usd=settle_cost,
+                    )
+                    if inspect.isawaitable(settled):
+                        settled = await settled
+                except Exception:
+                    settled = False
+                except BaseException:
+                    pending = True
+                    confidence = "exact_usage_pending_settlement"
+                    financial_ack = False
+                    try:
+                        await _mark_pending_safe()
+                    except Exception:
+                        pass
+                    _complete_local(
+                        pending_flag=True,
+                        confidence_flag="exact_usage_pending_settlement",
+                        ack=False,
+                    )
+                    raise
+                if settled is True:
+                    financial_ack = True
+                else:
+                    pending = True
+                    confidence = "exact_usage_pending_settlement"
+            elif not has_settlement_obligation and not pending:
+                financial_ack = True
+
+            if self.reserved_cost_usd is not None and pending_cb is not None and pending:
+                await _mark_pending_safe()
+            _complete_local(pending_flag=pending, confidence_flag=confidence, ack=financial_ack)
+        except BaseException as exc:
+            with self._lock:
+                self._finalize_in_progress = False
+                if not self._finalized:
+                    # Pending mark / local completion failed before _complete_local.
+                    self.financial_pending = True
+                    self.cost_confidence = "exact_usage_pending_settlement"
+            self.end_otel_span(error=exc if isinstance(exc, BaseException) else None)
+            raise
 
     @property
     def finalized(self) -> bool:

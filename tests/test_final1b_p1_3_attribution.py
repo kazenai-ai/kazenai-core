@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +16,6 @@ from kazenai.attribution import (
     get_attribution,
     use_attribution,
 )
-from kazenai.enforcement import UnsupportedModeError
 from kazenai.monitor import monitor
 
 
@@ -47,17 +48,32 @@ def test_nested_same_ok_conflict_raises():
                 pass
 
 
-def test_async_envelope_rejection():
+def test_async_envelope_accepted(monkeypatch):
+    """P5: async create surfaces are monitored rather than rejected."""
+    monkeypatch.delenv("KAZENAI_FINOPS_URL", raising=False)
+    monkeypatch.setenv("KAZENAI_ENV", "dev")
+    monkeypatch.setenv("KAZENAI_ENFORCEMENT_MODE", "fail_open")
+    monkeypatch.setenv("KAZENAI_FINOPS_RESERVATION_MODE", "fail_open")
+
     class Asyncish:
-        async def create(self):  # pragma: no cover - never called
-            return None
+        async def create(self, *args, **kwargs):
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+            )
 
     class FakeAsyncOpenAI:
         def __init__(self) -> None:
             self.chat = type("C", (), {"completions": Asyncish()})()
+            self.max_retries = 0
 
-    with pytest.raises(UnsupportedModeError):
-        monitor(FakeAsyncOpenAI())
+    client = monitor(FakeAsyncOpenAI())
+    resp = asyncio.run(
+        client.chat.completions.create(
+            model="gpt-4o-mini", messages=[{"role": "user", "content": "x"}]
+        )
+    )
+    assert resp.usage.total_tokens == 2
 
 
 def test_no_credential_leakage_in_repr_and_dict():

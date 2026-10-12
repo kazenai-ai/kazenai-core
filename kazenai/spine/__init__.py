@@ -5,10 +5,12 @@ from .guard import (
     guarded_embedding_call,
     guarded_llm_call,
     reconcile_budget,
+    reconcile_budget_async,
     ReservationHandle,
     reserve_budget,
     reserve_budget_async,
     signal_reservation_event,
+    signal_reservation_event_async,
 )
 
 __all__ = [
@@ -16,8 +18,10 @@ __all__ = [
     "guarded_embedding_call",
     "guarded_llm_call",
     "reconcile_budget",
+    "reconcile_budget_async",
     "ReservationHandle",
     "reserve_budget",
     "reserve_budget_async",
     "signal_reservation_event",
+    "signal_reservation_event_async",
 ]

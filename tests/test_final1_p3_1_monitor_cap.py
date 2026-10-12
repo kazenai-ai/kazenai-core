@@ -9,6 +9,8 @@ from typing import Any, List, Optional
 
 import pytest
 
+from kazenai.pricing_policy import UnknownModelError
+
 from kazenai import BudgetExceeded, monitor
 from kazenai.enforcement import Enforcement
 from kazenai.monitor import _precall_projection_usd
@@ -152,17 +154,33 @@ def test_p31_concurrent_calls_respect_shared_local_enforcement(monkeypatch):
     assert client.chat.completions.calls == 1
 
 
-def test_p31_unknown_model_projection_is_zero_without_usd_hint(monkeypatch):
-    """Unknown model → projection 0 → local cap alone does not block (documented)."""
+def test_p31_unknown_model_is_blocked_before_dispatch_by_default(monkeypatch):
+    """Unknown model has no price → blocked pre-dispatch (fail closed), never projected as $0."""
     _standalone_env(monkeypatch)
-    assert _precall_projection_usd({"model": "totally-unknown-model-xyz"}, None) == 0.0
+    with pytest.raises(UnknownModelError):
+        _precall_projection_usd({"model": "totally-unknown-model-xyz"}, None)
     client = FakeOpenAI()
-    monitor(client, max_budget_usd=0.000001)
-    client.chat.completions.create(
-        model="totally-unknown-model-xyz",
-        messages=[{"role": "user", "content": "hi"}],
-    )
-    assert client.chat.completions.calls == 1
+    monitor(client, max_budget_usd=1.0)
+    with pytest.raises(UnknownModelError):
+        client.chat.completions.create(
+            model="totally-unknown-model-xyz",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    assert client.chat.completions.calls == 0
+
+
+def test_p31_unknown_model_with_explicit_rate_is_projected(monkeypatch):
+    """An explicit usd_per_1k_tokens is a caller-supplied price and bounds the call."""
+    _standalone_env(monkeypatch)
+    projected = _precall_projection_usd({"model": "totally-unknown-model-xyz"}, 0.01)
+    assert projected > 0
+
+
+def test_p31_unknown_model_warn_opt_in_projects_zero_in_dev(monkeypatch):
+    """The dev-only warn opt-in keeps the historical $0 projection."""
+    _standalone_env(monkeypatch)
+    monkeypatch.setenv("KAZENAI_UNKNOWN_MODEL_POLICY", "warn")
+    assert _precall_projection_usd({"model": "totally-unknown-model-xyz"}, None) == 0.0
 
 
 def test_p31_finops_unavailable_still_honors_local_cap(monkeypatch):

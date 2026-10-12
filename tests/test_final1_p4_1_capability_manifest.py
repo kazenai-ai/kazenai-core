@@ -135,19 +135,15 @@ def test_p41_advertised_cells_have_evidence_and_tests():
 def test_p41_required_unsupported_exclusions_present():
     data = _load()
     by_id = {c["id"]: c for c in data["cells"]}
+    # FINAL_1_b_final P8 certifies langchain/langgraph/crewai + narrow checkpoint resume.
     required_unsupported = [
-        "mode.async_clients",
         "provider.openai.responses",
         "capability.generic_replay",
         "capability.drift_calibration",
         "capability.mcp_only_spend_control",
         "capability.subscription_cost_attribution",
-        "capability.checkpoint_resume",
         "capability.universal_provider",
         "capability.guaranteed_savings",
-        "capability.live_provider",
-        "framework.langchain",
-        "framework.crewai",
         "framework.autogen",
     ]
     for cid in required_unsupported:
@@ -160,11 +156,42 @@ def test_p41_required_unsupported_exclusions_present():
     assert by_id["provider.anthropic.messages.sync.stream"]["status"] in ADVERTISED
 
 
-def test_p41_langgraph_not_advertised_as_verified():
+def test_p41_live_provider_is_scoped_to_the_verified_paths():
+    by_id = {c["id"]: c for c in _load()["cells"]}
+    live = by_id["capability.live_provider"]
+    assert live["status"] == "live-verified"
+    assert "kazenai-core/tests/test_live_provider_smoke.py" in live["tests"]
+    for excluded in ("Responses", "Bedrock", "framework"):
+        assert excluded in live["notes"], excluded
+    # Unverified surfaces must not ride along.
+    assert by_id["provider.openai.responses"]["status"] == "unsupported"
+
+
+def test_p41_litellm_has_machine_readable_cells():
+    by_id = {c["id"]: c for c in _load()["cells"]}
+    for cid in ("gateway.litellm.app_owned", "gateway.litellm.gateway_owned"):
+        assert by_id[cid]["status"] in ADVERTISED, cid
+    # Gateway-owned streaming settlement was not exercised live; the cell must say so.
+    assert "streaming settlement is not live-verified" in by_id["gateway.litellm.gateway_owned"]["notes"]
+    assert "own independent budget" in by_id["capability.multi_model_workflow_budget"]["notes"]
+
+
+def test_p41_p8_frameworks_fixture_verified():
     data = _load()
-    cell = next(c for c in data["cells"] if c["id"] == "framework.langgraph")
-    assert cell["status"] in {"unsupported", "implemented-unverified", "planned"}
-    assert cell["status"] not in ADVERTISED
+    by_id = {c["id"]: c for c in data["cells"]}
+    for cid in (
+        "framework.langchain",
+        "framework.langgraph",
+        "capability.checkpoint_resume",
+    ):
+        assert by_id[cid]["status"] in ADVERTISED, cid
+    # Ownership routing for real CrewAI 1.15.26 sources is tested (A2), but
+    # cancellation / nested / native akickoff Observe cells are not; the cell
+    # must stay unadvertised until they are.
+    crew = by_id["framework.crewai"]
+    assert crew["status"] == "implemented-unverified"
+    assert "not advertised" in crew.get("notes", "")
+    assert "kazenai-core/tests/test_crewai_ownership_a2.py" in crew["tests"]
 
 
 def test_p41_envelope_matches_locked_providers():

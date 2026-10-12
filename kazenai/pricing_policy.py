@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import Mapping, Optional
 
+from .model_pricing import _is_version_bump
+
 
 class UnknownModelError(ValueError):
     """Raised when an unrecognized model is used under block policy."""
@@ -20,14 +22,25 @@ def _deployment_mode() -> str:
     ).strip().lower()
 
 
+_PRODUCTION_LIKE = {"saas", "production", "prod", "staging"}
+_POLICIES = {"warn", "block", "estimate"}
+
+
 def unknown_model_policy() -> str:
-    """Return warn | block | estimate."""
+    """Return warn | block | estimate. Fails closed (``block``) by default.
+
+    An unpriced model must never silently cost $0 against a budget, so the
+    default is ``block`` in every environment. ``estimate`` (conservative
+    flat rate) and ``warn`` (report $0, log) are explicit opt-ins via
+    ``KAZENAI_UNKNOWN_MODEL_POLICY``; ``warn`` is ignored in production-like
+    deployments, where it would let spend past the cap unseen.
+    """
     explicit = os.getenv("KAZENAI_UNKNOWN_MODEL_POLICY", "").strip().lower()
-    if explicit:
-        return explicit
-    if _deployment_mode() in {"saas", "production", "prod", "staging"}:
+    if explicit not in _POLICIES:
         return "block"
-    return "warn"
+    if explicit == "warn" and _deployment_mode() in _PRODUCTION_LIKE:
+        return "block"
+    return explicit
 
 
 def resolve_model_key(
@@ -62,7 +75,7 @@ def resolve_model_key(
     for k in known_keys:
         if not k or len(k) <= len(best) or not key.startswith(k):
             continue
-        if not key[len(k)].isalnum():
+        if not key[len(k)].isalnum() and not _is_version_bump(key[len(k):]):
             best = k
     return best or None
 
@@ -86,8 +99,10 @@ def enforce_unknown_model(
     policy = unknown_model_policy()
     if policy == "block":
         raise UnknownModelError(
-            f"Unknown model {model!r} blocked by KAZENAI_UNKNOWN_MODEL_POLICY=block. "
-            "Add pricing via KAZENAI_PRICING_JSON or pin to a known model."
+            f"Unknown model {model!r} has no price, so KazenAI cannot bound its spend "
+            "and blocks it (unknown-model policy: block, the default). Add pricing via "
+            "KAZENAI_PRICING_JSON, pin a priced model, or opt in to "
+            "KAZENAI_UNKNOWN_MODEL_POLICY=estimate."
         )
 
 

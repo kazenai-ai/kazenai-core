@@ -12,7 +12,7 @@ def test_monitor_emits_model_call_event_type():
         # schema_version 1.2 is current; older "1.0" predated step_id requirement.
         schema_version="1.2",
         ts_ms=1,
-        event_id="e1",
+        event_id="event-e1",
         org_id="o",
         project_id="p",
         surface="test",

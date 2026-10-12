@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 
@@ -22,6 +24,7 @@ except Exception:  # pragma: no cover
     structlog = None
 
 from .context import RunContext, get_current_context, use_context
+from .provider_errors import is_definitive_provider_rejection as _definitive_provider_rejection
 from .debug import DebugPrinter
 from .enforcement import BudgetExceeded, BudgetUnavailable, Enforcement, LoopDetected, RateLimitExceeded, StreamCutoffError, UnsupportedModeError
 from .capture_policy import CaptureMode, build_content_ref, capture_disclosure, event_log_fields, resolve_capture_mode
@@ -65,15 +68,9 @@ def _streaming_explicitly_denied() -> bool:
 
 
 def _control_profile_active() -> bool:
-    for key in (
-        "KAZENAI_CONTROL_PROFILE",
-        "KAZENAI_FINOPS_CONTROL_PROFILE",
-        "KAZENAI_PROFILE",
-    ):
-        val = os.getenv(key, "").strip().lower()
-        if val in ("1", "true", "yes", "control"):
-            return True
-    return False
+    from kazenai.lifecycle_config import control_profile_active
+
+    return control_profile_active()
 
 
 def _control_profile_denies_streaming() -> bool:
@@ -121,14 +118,20 @@ def _helper_inner_create_bypass():
         _HELPER_INNER_CREATE_BYPASS.reset(token)
 
 
-def _reject_async_client(client: Any) -> None:
-    """Async OpenAI/Anthropic clients are FINAL_2 — fail closed on the public monitor path."""
+def _is_async_callable(fn: Any) -> bool:
+    if inspect.iscoroutinefunction(fn):
+        return True
+    underlying = getattr(fn, "__func__", None)
+    if underlying is not None and inspect.iscoroutinefunction(underlying):
+        return True
+    return False
+
+
+def _client_is_async(client: Any) -> bool:
+    """True for AsyncOpenAI / AsyncAnthropic (and duck-typed async create)."""
     name = type(client).__name__
     if "Async" in name:
-        raise UnsupportedModeError(
-            f"Async client {name!r} is unsupported on the certified monitor path; use sync OpenAI/Anthropic",
-            error_code="unsupported_mode",
-        )
+        return True
     for attr_path in (
         ("chat", "completions", "create"),
         ("messages", "create"),
@@ -139,19 +142,90 @@ def _reject_async_client(client: Any) -> None:
                 obj = getattr(obj, attr)
         except Exception:
             continue
-        fn = obj
-        if inspect.iscoroutinefunction(fn):
-            raise UnsupportedModeError(
-                "Async create() is unsupported on the certified monitor path",
-                error_code="unsupported_mode",
-            )
-        # Unwrap bound method
-        underlying = getattr(fn, "__func__", None)
-        if underlying is not None and inspect.iscoroutinefunction(underlying):
-            raise UnsupportedModeError(
-                "Async create() is unsupported on the certified monitor path",
-                error_code="unsupported_mode",
-            )
+        if _is_async_callable(obj):
+            return True
+    return False
+
+
+def _provider_retries_value(client: Any) -> Optional[int]:
+    retries = getattr(client, "max_retries", None)
+    if retries is None:
+        return None
+    try:
+        return int(retries)
+    except Exception:
+        return None
+
+
+def _require_zero_provider_retries() -> bool:
+    return os.getenv("KAZENAI_REQUIRE_ZERO_PROVIDER_RETRIES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _allow_provider_retries_escape() -> bool:
+    return os.getenv("KAZENAI_ALLOW_PROVIDER_RETRIES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _check_hidden_provider_retries(client: Any) -> None:
+    """Direct-provider Control contract: prefer ``max_retries=0``.
+
+    Does not mutate the caller's client. Nonzero retries are rejected when the
+    Control profile is active or ``KAZENAI_REQUIRE_ZERO_PROVIDER_RETRIES=1``
+    (unless ``KAZENAI_ALLOW_PROVIDER_RETRIES=1``). Observe/dev paths warn only.
+    """
+    retries = _provider_retries_value(client)
+    if retries is None or retries == 0:
+        return
+    strict = _require_zero_provider_retries() or _control_profile_active()
+    if strict and not _allow_provider_retries_escape():
+        raise UnsupportedModeError(
+            f"provider max_retries={retries} is unsupported under Control; "
+            "construct the client with max_retries=0 (or clone) so each Kazen "
+            "retry is a new billable attempt "
+            "(set KAZENAI_ALLOW_PROVIDER_RETRIES=1 only for explicit escape)",
+            error_code="unsupported_provider_retries",
+        )
+    _monitor_log().warning(
+        "kazenai.provider_retries: client max_retries=%s; prefer max_retries=0 "
+        "for strict direct-provider Control (each Kazen retry is a new attempt)",
+        retries,
+    )
+
+
+def configure_direct_provider_client(client: Any, *, max_retries: int = 0) -> Any:
+    """Return a monitored-safe client copy with explicit retry ownership.
+
+    Prefer this (or constructing with ``max_retries=0``) over mutating a shared
+    client in place. Uses SDK ``copy`` / ``with_options`` when available.
+    """
+    with_options = getattr(client, "with_options", None)
+    if callable(with_options):
+        try:
+            return with_options(max_retries=int(max_retries))
+        except Exception:
+            pass
+    copy_fn = getattr(client, "copy", None)
+    if callable(copy_fn):
+        try:
+            return copy_fn(max_retries=int(max_retries))
+        except TypeError:
+            try:
+                return copy_fn()
+            except Exception:
+                pass
+        except Exception:
+            pass
+    # Return original; caller remains responsible for max_retries=0 construction.
+    return client
 
 
 def _unsupported_mode_stub(message: str) -> Callable[..., Any]:
@@ -162,9 +236,13 @@ def _unsupported_mode_stub(message: str) -> Callable[..., Any]:
 
 
 def _apply_output_token_bound(kwargs: Dict[str, Any]) -> None:
-    """Inject/clamp max_tokens using model_pricing.default_max_output_tokens."""
+    """Inject/clamp the output limit using model_pricing.default_max_output_tokens.
+
+    Injects ``max_completion_tokens`` for OpenAI reasoning families (which
+    reject ``max_tokens``) and ``max_tokens`` otherwise.
+    """
     try:
-        from .model_pricing import default_max_output_tokens
+        from .model_pricing import default_max_output_tokens, output_limit_param
     except Exception:
         return
     model = str(kwargs.get("model") or "").strip()
@@ -182,7 +260,7 @@ def _apply_output_token_bound(kwargs: Dict[str, Any]) -> None:
             if requested > int(bound):
                 kwargs[key] = int(bound)
             return
-    kwargs["max_tokens"] = int(bound)
+    kwargs[output_limit_param(model)] = int(bound)
 
 
 def _log_fail_open(context: str, exc: BaseException) -> None:
@@ -329,9 +407,9 @@ def _precall_projection_usd(kwargs: Mapping[str, Any], usd_per_1k_tokens: Option
     """Bounded pre-call exposure from estimated input plus enforced output cap.
 
     Passed as ``projected_cost_usd`` to ``Enforcement.check_local`` so a single expensive run
-    at the budget edge is denied before execution. Falls back to ``usd_per_1k_tokens`` and
-    finally to 0.0 (the prior behavior) when the model/price is unknown, so uncapped or
-    price-less callers are unaffected.
+    at the budget edge is denied before execution. An unpriced model raises
+    ``UnknownModelError`` under the default ``block`` policy; only an explicit
+    ``usd_per_1k_tokens`` or the dev-only ``warn`` opt-in reaches the fallbacks below.
     """
     model = str((kwargs or {}).get("model") or "").strip()
     input_tokens = _estimate_input_tokens(kwargs)
@@ -351,9 +429,11 @@ def _precall_projection_usd(kwargs: Mapping[str, Any], usd_per_1k_tokens: Option
             if cost and cost > 0:
                 return float(cost)
     except UnknownModelError:
-        # A configured block policy is part of the public financial-control
-        # contract, not an internal pricing failure that may fail open.
-        raise
+        # The block policy is part of the public financial-control contract,
+        # not an internal pricing failure that may fail open. A caller-supplied
+        # rate is an explicit price, so it is the one way past it.
+        if not usd_per_1k_tokens:
+            raise
     except Exception as exc:  # pragma: no cover - unexpected pricing internals fail open
         _log_fail_open("precall_projection", exc)
     if usd_per_1k_tokens:
@@ -488,6 +568,168 @@ def _reserve_with_local_hold(
     return held_projection, reserved
 
 
+async def _try_reserve_budget_async(
+    *,
+    org_id: str,
+    workspace_id: str,
+    run_id: str,
+    call_id: Optional[str] = None,
+    estimated_cost_usd: Optional[float] = None,
+    business_subject_ref: Optional[str] = None,
+    feature_id: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+    operation_id: Optional[str] = None,
+    attempt_id: Optional[str] = None,
+    feature: Optional[str] = None,
+    model: str = "",
+    input_tokens: int = 0,
+):
+    from .spine.guard import reserve_budget_async
+
+    return await reserve_budget_async(
+        org_id=org_id,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        increment_step=False,
+        call_id=call_id,
+        model=model,
+        input_tokens=input_tokens,
+        estimated_cost_usd=estimated_cost_usd,
+        business_subject_ref=business_subject_ref,
+        feature_id=feature_id,
+        workflow_id=workflow_id,
+        operation_id=operation_id,
+        attempt_id=attempt_id,
+        feature=feature,
+    )
+
+
+async def _reserve_with_local_hold_async(
+    *,
+    enforcement: Enforcement,
+    projected_cost_usd: float,
+    reserve_kwargs: Mapping[str, Any],
+) -> Tuple[float, Any]:
+    held_projection = enforcement.check_local(projected_cost_usd=projected_cost_usd)
+    try:
+        reserved = await _try_reserve_budget_async(**dict(reserve_kwargs))
+    except Exception:
+        enforcement.release_projection(held_projection)
+        raise
+    return held_projection, reserved
+
+
+async def _try_reconcile_budget_async(
+    *,
+    org_id: str,
+    workspace_id: str,
+    run_id: str,
+    reserved_cost_usd,
+    actual_cost_usd: float,
+) -> bool:
+    from .spine.guard import reconcile_budget_async
+
+    return bool(
+        await reconcile_budget_async(
+            org_id=org_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved_cost_usd,
+            actual_cost_usd=actual_cost_usd,
+        )
+    )
+
+
+async def _try_start_stream_reservation_async(
+    *,
+    org_id: str,
+    workspace_id: str,
+    run_id: str,
+    reserved_cost_usd: Any,
+) -> bool:
+    del workspace_id
+    from .deployment import finops_reservation_fail_closed
+    from .spine.guard import signal_reservation_event_async
+
+    return await signal_reservation_event_async(
+        org_id=org_id,
+        run_id=run_id,
+        reserved_cost_usd=reserved_cost_usd,
+        event="provider_started",
+        required=finops_reservation_fail_closed(),
+    )
+
+
+async def _try_settle_stream_budget_async(
+    *,
+    org_id: str,
+    workspace_id: str,
+    run_id: str,
+    reserved_cost_usd: Any,
+    actual_cost_usd: float,
+) -> bool:
+    del workspace_id
+    from .spine.guard import signal_reservation_event_async
+
+    return await signal_reservation_event_async(
+        org_id=org_id,
+        run_id=run_id,
+        reserved_cost_usd=reserved_cost_usd,
+        event="usage_known",
+        actual_cost_usd=actual_cost_usd,
+    )
+
+
+async def _try_mark_stream_pending_async(
+    *,
+    org_id: str,
+    workspace_id: str,
+    run_id: str,
+    reserved_cost_usd: Any,
+    actual_cost_usd: float | None = None,
+) -> bool:
+    """Async twin of ``_try_mark_stream_pending`` (U02 exact-amount pending)."""
+    del workspace_id
+    from .spine.guard import signal_reservation_event_async
+
+    if actual_cost_usd is not None:
+        return await signal_reservation_event_async(
+            org_id=org_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved_cost_usd,
+            event="usage_known",
+            actual_cost_usd=float(actual_cost_usd),
+        )
+    return await signal_reservation_event_async(
+        org_id=org_id,
+        run_id=run_id,
+        reserved_cost_usd=reserved_cost_usd,
+        event="outcome_unknown",
+    )
+
+
+async def _mark_stream_started_or_release_async(
+    *,
+    enforcement: Enforcement,
+    held_projection: float,
+    org_id: str,
+    workspace_id: str,
+    run_id: str,
+    reserved_cost_usd: Any,
+) -> None:
+    """Fail before provider dispatch if strict lifecycle state cannot be recorded."""
+    try:
+        await _try_start_stream_reservation_async(
+            org_id=org_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved_cost_usd,
+        )
+    except Exception:
+        enforcement.release_projection(held_projection)
+        raise
+
+
 def _try_reconcile_budget(
     *,
     org_id: str,
@@ -495,16 +737,18 @@ def _try_reconcile_budget(
     run_id: str,
     reserved_cost_usd,
     actual_cost_usd: float,
-) -> None:
-    """Fire-and-forget reconcile/settle via canonical spine."""
+) -> bool:
+    """Reconcile/settle via canonical spine; False when FinOps does not ack."""
     from .spine.guard import reconcile_budget
 
-    reconcile_budget(
-        org_id=org_id,
-        workspace_id=workspace_id,
-        run_id=run_id,
-        reserved_cost_usd=reserved_cost_usd,
-        actual_cost_usd=actual_cost_usd,
+    return bool(
+        reconcile_budget(
+            org_id=org_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved_cost_usd,
+            actual_cost_usd=actual_cost_usd,
+        )
     )
 
 
@@ -556,11 +800,25 @@ def _try_mark_stream_pending(
     workspace_id: str,
     run_id: str,
     reserved_cost_usd: Any,
+    actual_cost_usd: float | None = None,
 ) -> bool:
-    """Keep shared exposure pending when terminal provider usage is unknown."""
+    """Keep shared exposure pending when settlement is not financially acknowledged.
+
+    When ``actual_cost_usd`` is known, re-signal ``usage_known`` so the exact amount
+    remains the lifecycle intent (U02). Only fall back to ``outcome_unknown`` when
+    usage/pricing is unavailable.
+    """
     del workspace_id
     from .spine.guard import signal_reservation_event
 
+    if actual_cost_usd is not None:
+        return signal_reservation_event(
+            org_id=org_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved_cost_usd,
+            event="usage_known",
+            actual_cost_usd=float(actual_cost_usd),
+        )
     return signal_reservation_event(
         org_id=org_id,
         run_id=run_id,
@@ -641,8 +899,83 @@ def _extract_input_text(payload: Any) -> str:
         return ""
 
 
+def _unwrap_raw_response(resp: Any) -> Any:
+    """Return the parsed body of an SDK raw-response wrapper, else ``resp``.
+
+    ``client.chat.completions.with_raw_response.create(...)`` (used by
+    langchain-openai for every non-streaming call) goes through the monitored
+    ``create`` but returns ``LegacyAPIResponse``, which has no ``.usage``.
+    ``parse()`` is cached by the SDK, so the caller's own ``parse()`` gets the
+    same object and no second network read happens.
+    """
+    if resp is None or getattr(resp, "usage", None) is not None:
+        return resp
+    parse = getattr(resp, "parse", None)
+    if callable(parse) and hasattr(resp, "http_response"):
+        try:
+            return parse()
+        except Exception as exc:
+            _log_fail_open("unwrap_raw_response", exc)
+    return resp
+
+
+_DEFAULT_ORG_ID = "local"
+_DEFAULT_WORKSPACE_ID = "default"
+
+
+def _call_context(client_ctx: Any) -> Any:
+    """Run/step lineage from the ambient context; tenant from the client when the ambient one is a default.
+
+    Framework adapters (``wrap_graph`` / ``wrap_langchain_runnable``) install a
+    RunContext whose org/workspace default to ``local`` / ``default``. Before
+    this, that default replaced the tenant the monitored client was configured
+    with, so a service credential reserved under org ``local``: wrong tenant,
+    no limits, fail-closed denial. An explicitly set ambient tenant still wins.
+    """
+    ambient = get_current_context()
+    if ambient is None:
+        return client_ctx
+    if ambient.org_id == _DEFAULT_ORG_ID and client_ctx.org_id not in ("", _DEFAULT_ORG_ID):
+        workspace = ambient.workspace_id
+        if workspace == _DEFAULT_WORKSPACE_ID:
+            workspace = client_ctx.workspace_id
+        return dataclasses.replace(ambient, org_id=client_ctx.org_id, workspace_id=workspace)
+    return ambient
+
+
+class _RawStreamResponse:
+    """Raw-response wrapper whose ``parse()`` yields the metered stream.
+
+    ``with_raw_response.create(stream=True)`` (langchain-anthropic uses it for
+    every stream) returns a raw wrapper; the caller gets the event stream from
+    ``parse()``. Wrapping the raw object itself would hand back the unmetered
+    stream there, so its cost would never be recorded or settled.
+    """
+
+    def __init__(self, raw: Any, wrap: Callable[[Any], Any]) -> None:
+        self._kazenai_raw = raw
+        self._kazenai_wrap = wrap
+        self._kazenai_parsed: Any = None
+
+    def parse(self, *args: Any, **kwargs: Any) -> Any:
+        if self._kazenai_parsed is None:
+            self._kazenai_parsed = self._kazenai_wrap(self._kazenai_raw.parse(*args, **kwargs))
+        return self._kazenai_parsed
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._kazenai_raw, name)
+
+
+def _wrap_stream_result(resp: Any, attempt: Any, wrap: Callable[[Any, Any], Any]) -> Any:
+    """Meter a streamed result, including one returned inside a raw-response wrapper."""
+    if callable(getattr(resp, "parse", None)) and hasattr(resp, "http_response"):
+        return _RawStreamResponse(resp, lambda stream: wrap(stream, attempt))
+    return wrap(resp, attempt)
+
+
 def _extract_usage(resp: Any) -> Tuple[Optional[int], Any]:
     try:
+        resp = _unwrap_raw_response(resp)
         usage = getattr(resp, "usage", None) or (resp.get("usage") if isinstance(resp, dict) else None)
         if not usage:
             return None, None
@@ -923,7 +1256,7 @@ def patch_openai(
     dbg = DebugPrinter(enabled=debug)
 
     from .attribution import use_attribution
-    from .enforcement_owner import claim_enforcement_owner
+    from .enforcement_owner import claim_configured_enforcement_owner as claim_enforcement_owner
 
     attr_defaults = dict(
         business_subject_ref=business_subject_ref,
@@ -948,11 +1281,11 @@ def patch_openai(
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             if _HELPER_INNER_CREATE_BYPASS.get():
                 return fn(*args, **kwargs)
-            ctx = get_current_context() or ctx0
+            ctx = _call_context(ctx0)
             step_ctx = ctx.child_step()
             with ExitStack() as stack:
                 stack.enter_context(use_context(step_ctx))
-                stack.enter_context(claim_enforcement_owner("sdk"))
+                stack.enter_context(claim_enforcement_owner())
                 stack.enter_context(use_attribution(**attr_defaults))
                 payload = _extract_openai_input(args, kwargs)
                 tool_names = _extract_tool_names(kwargs)
@@ -1042,15 +1375,15 @@ def patch_openai(
                         "input_tokens": _estimate_input_tokens(call_kwargs),
                     },
                 )
-                if is_stream:
-                    _mark_stream_started_or_release(
-                        enforcement=enforcement,
-                        held_projection=held_projection,
-                        org_id=step_ctx.org_id,
-                        workspace_id=step_ctx.workspace_id,
-                        run_id=step_ctx.run_id,
-                        reserved_cost_usd=reserved_cost_usd,
-                    )
+                # R02: durable provider_started before every potential dispatch (stream + non-stream).
+                _mark_stream_started_or_release(
+                    enforcement=enforcement,
+                    held_projection=held_projection,
+                    org_id=step_ctx.org_id,
+                    workspace_id=step_ctx.workspace_id,
+                    run_id=step_ctx.run_id,
+                    reserved_cost_usd=reserved_cost_usd,
+                )
 
                 started = time.perf_counter()
                 attempt = None
@@ -1083,6 +1416,7 @@ def patch_openai(
                         model=model_name,
                         method=SUPPORTED_OPENAI_STREAM_METHOD,
                         usd_per_1k_tokens=output_rate,
+                        settle_usd_per_1k_tokens=usd_per_1k_tokens,
                         capture_mode=capture_mode,
                         agent_role=agent_role,
                         event_sink=event_sink,
@@ -1097,11 +1431,56 @@ def patch_openai(
                         started_perf=started,
                     )
                 try:
-                    resp = fn(*args, **call_kwargs)
-                except Exception as exc:
+                    # R16: duration span around the real provider attempt (no-op when OTel off).
+                    from .otel import build_control_attributes, control_span
+
                     if attempt is not None:
-                        attempt.finalize(StreamOutcome.PROVIDER_ERROR, error=exc)
+                        rid = getattr(reserved_cost_usd, "reservation_id", None)
+                        did = getattr(reserved_cost_usd, "decision_id", None)
+                        attempt.begin_otel_span(
+                            provider="openai",
+                            operation_id=attr_defaults.get("operation_id"),
+                            attempt_id=attr_defaults.get("attempt_id"),
+                            workflow_id=attr_defaults.get("workflow_id"),
+                            feature_id=attr_defaults.get("feature_id"),
+                            business_subject_ref=attr_defaults.get("business_subject_ref"),
+                            reservation_id=rid,
+                            decision_id=did,
+                        )
+                    with control_span(
+                        "kazenai.provider.dispatch",
+                        kind="client",
+                        attributes=build_control_attributes(
+                            model=model_name,
+                            provider="openai",
+                            operation_id=attr_defaults.get("operation_id"),
+                            attempt_id=attr_defaults.get("attempt_id"),
+                            workflow_id=attr_defaults.get("workflow_id"),
+                            feature_id=attr_defaults.get("feature_id"),
+                            business_subject_ref=attr_defaults.get("business_subject_ref"),
+                            reservation_id=getattr(reserved_cost_usd, "reservation_id", None),
+                            decision_id=getattr(reserved_cost_usd, "decision_id", None),
+                        ),
+                    ):
+                        resp = fn(*args, **call_kwargs)
+                except Exception as exc:
+                    rejected = _definitive_provider_rejection(exc)
+                    if attempt is not None:
+                        attempt.finalize(
+                            StreamOutcome.REJECTED if rejected else StreamOutcome.PROVIDER_ERROR,
+                            error=exc,
+                        )
                     else:
+                        # Dispatched (or dispatch attempted): keep unresolved exposure, never invent zero.
+                        # A definitive 4xx refusal settles at exactly $0 and releases the hold.
+                        if reserved_cost_usd is not None:
+                            _try_mark_stream_pending(
+                                org_id=step_ctx.org_id,
+                                workspace_id=step_ctx.workspace_id,
+                                run_id=step_ctx.run_id,
+                                reserved_cost_usd=reserved_cost_usd,
+                                actual_cost_usd=0.0 if rejected else None,
+                            )
                         enforcement.record_call(
                             cost_usd=0.0,
                             released_projection=held_projection,
@@ -1110,7 +1489,7 @@ def patch_openai(
 
                 if is_stream:
                     assert attempt is not None
-                    return wrap_openai_stream(resp, attempt)
+                    return _wrap_stream_result(resp, attempt, wrap_openai_stream)
 
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
 
@@ -1122,15 +1501,32 @@ def patch_openai(
                     usd_per_1k_tokens=usd_per_1k_tokens,
                 )
 
-                # Post-call reconcile (fire-and-forget daemon thread)
+                # R03/U02: missing usage/pricing → pending; false settle ack → pending
+                # with exact known amount (never discard financial delivery failure).
                 if reserved_cost_usd is not None:
-                    _try_reconcile_budget(
-                        org_id=step_ctx.org_id,
-                        workspace_id=step_ctx.workspace_id,
-                        run_id=step_ctx.run_id,
-                        reserved_cost_usd=reserved_cost_usd,
-                        actual_cost_usd=cost_usd or 0.0,
-                    )
+                    if cost_usd is None:
+                        _try_mark_stream_pending(
+                            org_id=step_ctx.org_id,
+                            workspace_id=step_ctx.workspace_id,
+                            run_id=step_ctx.run_id,
+                            reserved_cost_usd=reserved_cost_usd,
+                        )
+                    else:
+                        settled = _try_reconcile_budget(
+                            org_id=step_ctx.org_id,
+                            workspace_id=step_ctx.workspace_id,
+                            run_id=step_ctx.run_id,
+                            reserved_cost_usd=reserved_cost_usd,
+                            actual_cost_usd=float(cost_usd),
+                        )
+                        if settled is not True:
+                            _try_mark_stream_pending(
+                                org_id=step_ctx.org_id,
+                                workspace_id=step_ctx.workspace_id,
+                                run_id=step_ctx.run_id,
+                                reserved_cost_usd=reserved_cost_usd,
+                                actual_cost_usd=float(cost_usd),
+                            )
 
                 enforcement.record_call(cost_usd=cost_usd, released_projection=held_projection)
                 snap2 = enforcement.snapshot()
@@ -1235,6 +1631,7 @@ def patch_openai(
             targets.append((client.chat.completions, "create", SUPPORTED_OPENAI_METHOD))
     except Exception:
         pass
+    targets.extend(_openai_parse_targets(client))
     if not certified_surface:
         try:
             if hasattr(client, "responses") and hasattr(client.responses, "create"):
@@ -1253,7 +1650,12 @@ def patch_openai(
         if not callable(orig):
             continue
         patches.append((obj, name, orig))
-        setattr(obj, name, _wrap(orig, method=event_type))
+        wrapped_fn = _wrap(orig, method=event_type)
+        try:
+            setattr(wrapped_fn, "__kazenai_wrapped__", True)
+        except Exception:
+            pass
+        setattr(obj, name, wrapped_fn)
 
     # Train B: the official SDK exposes a lazy ChatCompletionStreamManager on
     # ``chat.completions.stream``. It bypasses ``create``, so guard it directly.
@@ -1268,7 +1670,7 @@ def patch_openai(
                     from .streaming.openai import merge_stream_options, wrap_openai_manager
 
                     _reject_streaming_if_unsupported({"stream": True})
-                    ctx = get_current_context() or ctx0
+                    ctx = _call_context(ctx0)
                     step_ctx = ctx.child_step()
                     call_kwargs = dict(s_kwargs)
                     _apply_output_token_bound(call_kwargs)
@@ -1297,7 +1699,7 @@ def patch_openai(
                     def _attempt_factory() -> StreamAttempt:
                         with ExitStack() as stack:
                             stack.enter_context(use_context(step_ctx))
-                            stack.enter_context(claim_enforcement_owner("sdk"))
+                            stack.enter_context(claim_enforcement_owner())
                             stack.enter_context(use_attribution(**attr_defaults))
                             held_projection, reserved_cost_usd = _reserve_with_local_hold(
                                 enforcement=enforcement,
@@ -1355,6 +1757,7 @@ def patch_openai(
                             model=model_name,
                             method=SUPPORTED_OPENAI_STREAM_MANAGER,
                             usd_per_1k_tokens=output_rate,
+                            settle_usd_per_1k_tokens=usd_per_1k_tokens,
                             capture_mode=capture_mode,
                             agent_role=agent_role,
                             event_sink=event_sink,
@@ -1410,6 +1813,7 @@ def patch_openai(
 def _extract_anthropic_usage(resp: Any) -> Tuple[Optional[int], Any]:
     """Extract token counts from an Anthropic `messages.create` response."""
     try:
+        resp = _unwrap_raw_response(resp)
         usage = getattr(resp, "usage", None)
         if not usage:
             return None, None
@@ -1466,7 +1870,7 @@ def patch_anthropic(
     loop_detector = loop_detector or LoopDetector()
 
     from .attribution import use_attribution
-    from .enforcement_owner import claim_enforcement_owner
+    from .enforcement_owner import claim_configured_enforcement_owner as claim_enforcement_owner
 
     attr_defaults = dict(
         business_subject_ref=business_subject_ref,
@@ -1491,11 +1895,11 @@ def patch_anthropic(
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             if _HELPER_INNER_CREATE_BYPASS.get():
                 return fn(*args, **kwargs)
-            ctx = get_current_context() or ctx0
+            ctx = _call_context(ctx0)
             step_ctx = ctx.child_step()
             with ExitStack() as stack:
                 stack.enter_context(use_context(step_ctx))
-                stack.enter_context(claim_enforcement_owner("sdk"))
+                stack.enter_context(claim_enforcement_owner())
                 stack.enter_context(use_attribution(**attr_defaults))
                 payload = _extract_openai_input(args, kwargs)  # same shape works for Anthropic
                 tool_names = _extract_tool_names(kwargs)
@@ -1556,15 +1960,14 @@ def patch_anthropic(
                         "input_tokens": _estimate_input_tokens(call_kwargs),
                     },
                 )
-                if is_stream:
-                    _mark_stream_started_or_release(
-                        enforcement=enforcement,
-                        held_projection=held_projection,
-                        org_id=step_ctx.org_id,
-                        workspace_id=step_ctx.workspace_id,
-                        run_id=step_ctx.run_id,
-                        reserved_cost_usd=reserved_cost_usd,
-                    )
+                _mark_stream_started_or_release(
+                    enforcement=enforcement,
+                    held_projection=held_projection,
+                    org_id=step_ctx.org_id,
+                    workspace_id=step_ctx.workspace_id,
+                    run_id=step_ctx.run_id,
+                    reserved_cost_usd=reserved_cost_usd,
+                )
                 started = time.perf_counter()
                 attempt = None
                 if is_stream:
@@ -1599,6 +2002,7 @@ def patch_anthropic(
                         model=model_name,
                         method=SUPPORTED_ANTHROPIC_STREAM_METHOD,
                         usd_per_1k_tokens=output_rate,
+                        settle_usd_per_1k_tokens=usd_per_1k_tokens,
                         capture_mode=capture_mode,
                         agent_role=agent_role,
                         event_sink=event_sink,
@@ -1613,11 +2017,52 @@ def patch_anthropic(
                         started_perf=started,
                     )
                 try:
-                    resp = fn(*args, **call_kwargs)
-                except Exception as exc:
+                    from .otel import build_control_attributes, control_span
+
                     if attempt is not None:
-                        attempt.finalize(StreamOutcome.PROVIDER_ERROR, error=exc)
+                        attempt.begin_otel_span(
+                            provider="anthropic",
+                            operation_id=attr_defaults.get("operation_id"),
+                            attempt_id=attr_defaults.get("attempt_id"),
+                            workflow_id=attr_defaults.get("workflow_id"),
+                            feature_id=attr_defaults.get("feature_id"),
+                            business_subject_ref=attr_defaults.get("business_subject_ref"),
+                            reservation_id=getattr(reserved_cost_usd, "reservation_id", None),
+                            decision_id=getattr(reserved_cost_usd, "decision_id", None),
+                        )
+                    with control_span(
+                        "kazenai.provider.dispatch",
+                        kind="client",
+                        attributes=build_control_attributes(
+                            model=str(kwargs.get("model") or ""),
+                            provider="anthropic",
+                            operation_id=attr_defaults.get("operation_id"),
+                            attempt_id=attr_defaults.get("attempt_id"),
+                            workflow_id=attr_defaults.get("workflow_id"),
+                            feature_id=attr_defaults.get("feature_id"),
+                            business_subject_ref=attr_defaults.get("business_subject_ref"),
+                            reservation_id=getattr(reserved_cost_usd, "reservation_id", None),
+                            decision_id=getattr(reserved_cost_usd, "decision_id", None),
+                        ),
+                    ):
+                        resp = fn(*args, **call_kwargs)
+                except Exception as exc:
+                    rejected = _definitive_provider_rejection(exc)
+                    if attempt is not None:
+                        attempt.finalize(
+                            StreamOutcome.REJECTED if rejected else StreamOutcome.PROVIDER_ERROR,
+                            error=exc,
+                        )
                     else:
+                        # A definitive 4xx refusal settles at exactly $0 and releases the hold.
+                        if reserved_cost_usd is not None:
+                            _try_mark_stream_pending(
+                                org_id=step_ctx.org_id,
+                                workspace_id=step_ctx.workspace_id,
+                                run_id=step_ctx.run_id,
+                                reserved_cost_usd=reserved_cost_usd,
+                                actual_cost_usd=0.0 if rejected else None,
+                            )
                         enforcement.record_call(
                             cost_usd=0.0,
                             released_projection=held_projection,
@@ -1626,7 +2071,7 @@ def patch_anthropic(
 
                 if is_stream:
                     assert attempt is not None
-                    return wrap_anthropic_event_stream(resp, attempt)
+                    return _wrap_stream_result(resp, attempt, wrap_anthropic_event_stream)
 
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
 
@@ -1638,15 +2083,30 @@ def patch_anthropic(
                     usd_per_1k_tokens=usd_per_1k_tokens,
                 )
 
-                # Post-call reconcile (fire-and-forget daemon thread)
                 if reserved_cost_usd is not None:
-                    _try_reconcile_budget(
-                        org_id=step_ctx.org_id,
-                        workspace_id=step_ctx.workspace_id,
-                        run_id=step_ctx.run_id,
-                        reserved_cost_usd=reserved_cost_usd,
-                        actual_cost_usd=cost_usd or 0.0,
-                    )
+                    if cost_usd is None:
+                        _try_mark_stream_pending(
+                            org_id=step_ctx.org_id,
+                            workspace_id=step_ctx.workspace_id,
+                            run_id=step_ctx.run_id,
+                            reserved_cost_usd=reserved_cost_usd,
+                        )
+                    else:
+                        settled = _try_reconcile_budget(
+                            org_id=step_ctx.org_id,
+                            workspace_id=step_ctx.workspace_id,
+                            run_id=step_ctx.run_id,
+                            reserved_cost_usd=reserved_cost_usd,
+                            actual_cost_usd=float(cost_usd),
+                        )
+                        if settled is not True:
+                            _try_mark_stream_pending(
+                                org_id=step_ctx.org_id,
+                                workspace_id=step_ctx.workspace_id,
+                                run_id=step_ctx.run_id,
+                                reserved_cost_usd=reserved_cost_usd,
+                                actual_cost_usd=float(cost_usd),
+                            )
 
                 enforcement.record_call(cost_usd=cost_usd, released_projection=held_projection)
 
@@ -1750,7 +2210,12 @@ def patch_anthropic(
         if not callable(orig):
             continue
         patches.append((obj, name, orig))
-        setattr(obj, name, _wrap(orig, method=event_type))
+        wrapped_fn = _wrap(orig, method=event_type)
+        try:
+            setattr(wrapped_fn, "__kazenai_wrapped__", True)
+        except Exception:
+            pass
+        setattr(obj, name, wrapped_fn)
 
     # Train B: wrap messages.stream manager with finalize-once lifecycle.
     try:
@@ -1762,7 +2227,7 @@ def patch_anthropic(
                     from .streaming.lifecycle import StreamAttempt
                     from .streaming.anthropic import wrap_anthropic_manager
 
-                    ctx = get_current_context() or ctx0
+                    ctx = _call_context(ctx0)
                     step_ctx = ctx.child_step()
                     call_kwargs = dict(s_kwargs)
                     _apply_output_token_bound(call_kwargs)
@@ -1785,7 +2250,7 @@ def patch_anthropic(
                     def _attempt_factory() -> StreamAttempt:
                         with ExitStack() as stack:
                             stack.enter_context(use_context(step_ctx))
-                            stack.enter_context(claim_enforcement_owner("sdk"))
+                            stack.enter_context(claim_enforcement_owner())
                             stack.enter_context(use_attribution(**attr_defaults))
                             held_projection, reserved_cost_usd = _reserve_with_local_hold(
                                 enforcement=enforcement,
@@ -1843,6 +2308,7 @@ def patch_anthropic(
                             model=model_name,
                             method=SUPPORTED_ANTHROPIC_STREAM_MANAGER,
                             usd_per_1k_tokens=output_rate,
+                            settle_usd_per_1k_tokens=usd_per_1k_tokens,
                             capture_mode=capture_mode,
                             agent_role=agent_role,
                             event_sink=event_sink,
@@ -1876,6 +2342,70 @@ def patch_anthropic(
                 pass
 
     return undo
+
+
+SUPPORTED_OPENAI_PARSE_METHOD = "openai.chat.completions.parse"
+_OPENAI_BETA_STREAM_UNSUPPORTED = (
+    "OpenAI beta.chat.completions.stream (structured-output streaming) is not guarded by "
+    "KazenAI Control. Use chat.completions.create(stream=True) or a non-streaming parse()."
+)
+
+
+def _openai_parse_targets(client: Any) -> List[Tuple[Any, str, str]]:
+    """Structured-output ``parse`` endpoints, guarded exactly like ``create``.
+
+    ``chat.completions.parse`` (and the ``beta.chat.completions`` alias) post to
+    the provider directly rather than through ``create``; unpatched they skip
+    the budget check and record no cost. LangChain ``with_structured_output`` and
+    CrewAI structured output use them.
+    """
+    found: List[Tuple[Any, str, str]] = []
+    owners = [getattr(getattr(client, "chat", None), "completions", None)]
+    beta_chat = getattr(getattr(client, "beta", None), "chat", None)
+    owners.append(getattr(beta_chat, "completions", None))
+    seen: set[int] = set()
+    for owner in owners:
+        if owner is None or id(owner) in seen:
+            continue
+        seen.add(id(owner))
+        if callable(getattr(owner, "parse", None)):
+            found.append((owner, "parse", SUPPORTED_OPENAI_PARSE_METHOD))
+    return found
+
+
+def _block_openai_beta_chat_stream(client: Any) -> None:
+    completions = getattr(getattr(getattr(client, "beta", None), "chat", None), "completions", None)
+    if completions is not None and hasattr(completions, "stream"):
+        try:
+            setattr(completions, "stream", _unsupported_mode_stub(_OPENAI_BETA_STREAM_UNSUPPORTED))
+        except Exception:
+            pass
+
+
+_ANTHROPIC_BETA_UNSUPPORTED = (
+    "Anthropic beta Messages (client.beta.messages) is not guarded by KazenAI Control: "
+    "calls there would skip the pre-call budget check. Use client.messages, or drop "
+    "beta-only options (for LangChain ChatAnthropic, do not pass betas=)."
+)
+
+
+def _block_anthropic_beta_messages(client: Any) -> None:
+    """Close the unguarded ``client.beta.messages`` path on a monitored Anthropic client.
+
+    ``monitor()`` guards ``client.messages``; the beta resource dispatches the same
+    paid calls through a separate object. Like the OpenAI Responses API, it fails
+    loudly instead of spending outside the budget.
+    """
+    beta = getattr(client, "beta", None)
+    messages = getattr(beta, "messages", None) if beta is not None else None
+    if messages is None:
+        return
+    for name in ("create", "stream", "parse"):
+        if hasattr(messages, name):
+            try:
+                setattr(messages, name, _unsupported_mode_stub(_ANTHROPIC_BETA_UNSUPPORTED))
+            except Exception:
+                pass
 
 
 def _detect_client_kind(client: Any) -> str:
@@ -1929,21 +2459,29 @@ def monitor(
     feature: Optional[str] = None,
     operation_id: Optional[str] = None,
     attempt_id: Optional[str] = None,
+    budget: Optional[Any] = None,
 ) -> Any:
     """
     High-level entrypoint for Agent FinOps on raw OpenAI-style or Anthropic clients.
 
-    Certified Control contract (FINAL_1 + Train B):
-    - Sync OpenAI ``chat.completions.create`` (stream=False|True) and
+    ``budget=SharedBudget(max_usd=...)`` makes several clients (for example one
+    per provider in a multi-model workflow) draw from one local cap instead of
+    one ``max_budget_usd`` each. Pass either ``budget`` or ``max_budget_usd``.
+
+    Certified Control contract (FINAL_1_b_final P5):
+    - Sync and async OpenAI ``chat.completions.create`` (stream=False|True) and
       ``chat.completions.stream``
-    - Sync Anthropic ``messages.create`` (stream=False|True) and ``messages.stream``
+    - Sync and async Anthropic ``messages.create`` (stream=False|True) and
+      ``messages.stream``
     - Hard local cap raises ``BudgetExceeded`` before provider dispatch
     - Shared authority deny raises ``BudgetExceeded`` / unreachable raises ``BudgetUnavailable``
     - Loop guard raises ``LoopDetected`` before provider dispatch
     - Soft trajectory pause raises ``KazenCircuitBreaker`` after a completed call
-    - Async clients and OpenAI Responses API raise ``UnsupportedModeError``
+    - OpenAI Responses API raises ``UnsupportedModeError``
     - Streaming records provider start before dispatch, then settles at stream end
       or remains pending on cancel/error/missing usage; never at create-return
+    - Prefer ``max_retries=0`` on direct-provider clients so SDK auto-retries cannot
+      hide billable attempts (monitor does not mutate the caller's client)
 
     API keys are env-only (``KAZENAI_FINOPS_API_KEY`` / ``KAZENAI_API_KEY``), not kwargs.
 
@@ -1972,8 +2510,7 @@ def monitor(
             error_code="unsupported_mode",
         )
 
-    # FINAL_1 P3-2: public monitor certifies sync OpenAI Chat Completions + Anthropic Messages only.
-    _reject_async_client(client)
+    _check_hidden_provider_retries(client)
 
     resolved_capture = resolve_capture_mode(explicit=capture_mode, consent=capture_consent)
     _monitor_log().info("kazenai.capture_disclosure: %s", capture_disclosure(resolved_capture))
@@ -1993,10 +2530,21 @@ def monitor(
         sinks.append(HttpSink(HttpSinkConfig(ingest_url=ingest, api_key=api_key)))
     sink: EventSink = MultiSink(sinks)
 
-    finops = FinOpsController(cfg=FinOpsConfig(budget_usd=max_budget_usd, soft_pause_pct=soft_pause_pct, loop_anomaly_threshold=loop_anomaly_threshold))
+    if budget is not None:
+        from .budget import SharedBudget
+
+        if not isinstance(budget, SharedBudget):
+            raise TypeError("budget must be a kazenai.SharedBudget")
+        if max_budget_usd is not None:
+            raise ValueError("pass either budget=SharedBudget(...) or max_budget_usd, not both")
+    soft_budget = budget.max_usd if budget is not None else max_budget_usd
+    finops = FinOpsController(cfg=FinOpsConfig(budget_usd=soft_budget, soft_pause_pct=soft_pause_pct, loop_anomaly_threshold=loop_anomaly_threshold))
     # FINAL_1 P3-1 / G06: local max_budget_usd must feed the same pre-call Enforcement
     # used on the patched provider path (not only FinOpsController post-call CB).
-    enforcement = Enforcement(max_cost_usd=max_budget_usd) if max_budget_usd is not None else Enforcement()
+    if budget is not None:
+        enforcement = budget.enforcement
+    else:
+        enforcement = Enforcement(max_cost_usd=max_budget_usd) if max_budget_usd is not None else Enforcement()
     patch_kwargs = dict(
         org_id=org_id,
         project_id=project_id,
@@ -2015,19 +2563,159 @@ def monitor(
         operation_id=operation_id,
         attempt_id=attempt_id,
     )
+    is_async = _client_is_async(client)
     if _detect_client_kind(client) == "anthropic":
-        patch_anthropic(
-            client,
-            **patch_kwargs,
-            stream_cutoff_usd=stream_cutoff_usd,
-            certified_surface=True,
-        )
+        if is_async:
+            from ._async_provider import patch_anthropic_async
+
+            patch_anthropic_async(
+                client,
+                **patch_kwargs,
+                stream_cutoff_usd=stream_cutoff_usd,
+                certified_surface=True,
+            )
+        else:
+            patch_anthropic(
+                client,
+                **patch_kwargs,
+                stream_cutoff_usd=stream_cutoff_usd,
+                certified_surface=True,
+            )
+        _block_anthropic_beta_messages(client)
     else:
-        patch_openai(
-            client,
-            **patch_kwargs,
-            stream_enforcement=stream_enforcement,
-            stream_cutoff_usd=stream_cutoff_usd,
-            certified_surface=True,
+        if is_async:
+            from ._async_provider import patch_openai_async
+
+            patch_openai_async(
+                client,
+                **patch_kwargs,
+                stream_enforcement=stream_enforcement,
+                stream_cutoff_usd=stream_cutoff_usd,
+                certified_surface=True,
+            )
+        else:
+            patch_openai(
+                client,
+                **patch_kwargs,
+                stream_enforcement=stream_enforcement,
+                stream_cutoff_usd=stream_cutoff_usd,
+                certified_surface=True,
+            )
+        _block_openai_beta_chat_stream(client)
+    try:
+        setattr(client, "_kazenai_monitored", True)
+    except Exception:
+        pass
+
+    # U03/R06: clones must share the same Enforcement counter (not a fresh budget).
+    try:
+        setattr(client, "_kazenai_enforcement", enforcement)
+        setattr(client, "_kazenai_finops_controller", finops)
+    except Exception:
+        pass
+
+    def _rewrap_clone(clone: Any) -> Any:
+        if clone is None or clone is client:
+            return clone
+        if getattr(clone, "_kazenai_monitored", False):
+            return clone
+        shared_enforcement = getattr(client, "_kazenai_enforcement", enforcement)
+        shared_finops = getattr(client, "_kazenai_finops_controller", finops)
+        clone_kwargs = dict(
+            org_id=org_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            agent_role=agent_role,
+            debug=debug,
+            event_sink=sink,
+            finops=shared_finops,
+            enforcement=shared_enforcement,
+            capture_mode=resolved_capture,
+            business_subject_ref=business_subject_ref,
+            feature_id=feature_id,
+            workflow_id=workflow_id,
+            feature=feature,
+            operation_id=operation_id,
+            attempt_id=attempt_id,
         )
+        clone_async = _client_is_async(clone)
+        if _detect_client_kind(clone) == "anthropic":
+            if clone_async:
+                from ._async_provider import patch_anthropic_async
+
+                patch_anthropic_async(
+                    clone,
+                    **clone_kwargs,
+                    stream_cutoff_usd=stream_cutoff_usd,
+                    certified_surface=True,
+                )
+            else:
+                patch_anthropic(
+                    clone,
+                    **clone_kwargs,
+                    stream_cutoff_usd=stream_cutoff_usd,
+                    certified_surface=True,
+                )
+            _block_anthropic_beta_messages(clone)
+        else:
+            if clone_async:
+                from ._async_provider import patch_openai_async
+
+                patch_openai_async(
+                    clone,
+                    **clone_kwargs,
+                    stream_enforcement=stream_enforcement,
+                    stream_cutoff_usd=stream_cutoff_usd,
+                    certified_surface=True,
+                )
+            else:
+                patch_openai(
+                    clone,
+                    **clone_kwargs,
+                    stream_enforcement=stream_enforcement,
+                    stream_cutoff_usd=stream_cutoff_usd,
+                    certified_surface=True,
+                )
+            _block_openai_beta_chat_stream(clone)
+        try:
+            setattr(clone, "_kazenai_monitored", True)
+            setattr(clone, "_kazenai_enforcement", shared_enforcement)
+            setattr(clone, "_kazenai_finops_controller", shared_finops)
+        except Exception:
+            pass
+        for _clone_name2 in ("with_options", "copy"):
+            _orig2 = getattr(clone, _clone_name2, None)
+            if not callable(_orig2):
+                continue
+            try:
+                setattr(clone, _clone_name2, _make_clone_wrapper(_orig2))
+            except Exception:
+                pass
+        return clone
+
+    def _make_clone_wrapper(orig_fn: Any):
+        def _wrapped_clone(*a: Any, **k: Any) -> Any:
+            clone = orig_fn(*a, **k)
+            try:
+                return _rewrap_clone(clone)
+            except UnsupportedModeError:
+                raise
+            except Exception as exc:
+                raise UnsupportedModeError(
+                    "monitored client clone could not retain Control instrumentation: "
+                    f"{exc}",
+                    error_code="unguarded_client_clone",
+                ) from exc
+
+        return _wrapped_clone
+
+    for _clone_name in ("with_options", "copy"):
+        _orig_clone = getattr(client, _clone_name, None)
+        if not callable(_orig_clone):
+            continue
+        try:
+            setattr(client, _clone_name, _make_clone_wrapper(_orig_clone))
+        except Exception:
+            pass
     return client

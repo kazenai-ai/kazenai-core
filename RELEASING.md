@@ -1,8 +1,10 @@
 # Releasing `kazenai`
 
 This procedure is for maintainers publishing the Core package to public PyPI.
-Release Core before `kazenai-finops`, because the FinOps 1.1.1 package requires
-`kazenai>=1.1.1,<2.0`.
+Release order for 1.1.2: `kazen-event-schema` 0.6.4 first (Core 1.1.2 requires
+`kazen-event-schema>=0.6.4,<0.7`), then Core, then `kazenai-finops` 1.1.2 (which
+requires `kazenai>=1.1.2,<2.0`). Core needs no private package; never
+add private wheels to this public repository.
 
 ## Architecture / modularization debt
 
@@ -35,7 +37,19 @@ already exists on PyPI.
 
 Wait for the GitHub Actions matrix to pass on Python 3.10, 3.11 and 3.12. The
 release gate includes linting, type checks, the full test suite, coverage and
-schema/contract verification.
+schema/contract verification, plus the `frameworks` job (LangChain/LangGraph on
+the pinned versions; it fails if any framework test is skipped).
+
+Before tagging, run the opt-in live smokes against the paid providers and attach
+their evidence (they never run in CI):
+
+```bash
+KAZENAI_LIVE_PROVIDER_SMOKE=1 pytest -m live tests/test_live_provider_smoke.py -q
+KAZENAI_LIVE_FRAMEWORK_SMOKE=1 pytest -m live tests/test_live_framework_smoke.py -q
+```
+
+The framework smoke also needs a running Agent FinOps (Control profile) and a
+LiteLLM proxy binary; see the module docstring for its environment variables.
 
 Do not continue if any required job is skipped, cancelled or failing.
 
@@ -68,11 +82,11 @@ repository to `PYTHONPATH`:
 python3 -m venv .venv-wheel
 source .venv-wheel/bin/activate
 python -m pip install --upgrade pip
-python -m pip install "dist/kazenai-1.1.1-py3-none-any.whl[openai,anthropic]"
+python -m pip install "dist/kazenai-1.1.2-py3-none-any.whl[openai,anthropic]"
 python -c "import kazenai; print(kazenai.__version__)"
 ```
 
-The printed version must be `1.1.1`. Use mocked provider transports or a
+The printed version must be `1.1.2`. Use mocked provider transports or a
 non-production tenant for behavioral smoke tests; never place live secrets in
 logs.
 
@@ -98,17 +112,18 @@ local indexes, editable installs or sibling repositories:
 python3 -m venv .venv-public
 source .venv-public/bin/activate
 python -m pip install --upgrade pip
-python -m pip install --no-cache-dir "kazenai[openai,anthropic]==1.1.1"
+python -m pip install --no-cache-dir "kazenai[openai,anthropic]==1.1.2"
 python -c "import importlib.metadata as m; print(m.version('kazenai'))"
 ```
 
-Confirm resolved provider SDK majors remain OpenAI `<2` and Anthropic `<1`.
-Rerun the supported package smoke test. Only after this succeeds should
-`kazenai-finops==1.1.1` be built and published.
+Confirm resolved provider SDK majors stay within the install ranges
+(`openai>=1.40,<3`, `anthropic>=0.39,<1`). Rerun the supported package smoke
+test. Only after this succeeds should `kazenai-finops==1.1.2` be built and
+published.
 
 ## 7. Tag and document the release
 
-- Tag the exact published commit as `v1.1.1`.
+- Tag the exact published commit as `v1.1.2`.
 - Create a GitHub Release that links the tested commit and summarizes supported
   paths, compatibility and known limitations.
 - Record artifact hashes and the CI run used as release evidence.

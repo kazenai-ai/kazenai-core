@@ -51,22 +51,44 @@ def _enforcement_mode_value(name: str) -> str:
 
 
 def enforcement_fail_closed() -> bool:
-    """Consumer-side FinOps unavailability policy (``KAZENAI_ENFORCEMENT_MODE``)."""
-    mode = _enforcement_mode_value("KAZENAI_ENFORCEMENT_MODE")
-    if mode == "fail_closed":
+    """Consumer-side FinOps unavailability policy.
+
+    U09: always execute the lifecycle resolver's effective ``failure_policy``
+    so diagnostics and runtime cannot disagree.
+    """
+    try:
+        from kazenai.lifecycle_config import resolve_effective_lifecycle
+
+        cfg = resolve_effective_lifecycle()
+        if cfg.failure_policy == "fail_open":
+            return not is_dev_env()
         return True
-    if mode == "fail_open" and is_dev_env():
-        return False
+    except Exception:
+        pass
+    raw = os.getenv("KAZENAI_ENFORCEMENT_MODE", "").strip().lower()
+    if raw in {"fail_closed", "fail_open"}:
+        if raw == "fail_closed":
+            return True
+        return not is_dev_env()
     return True
 
 
 def finops_reservation_fail_closed() -> bool:
     """Pre-call reservation HTTP error policy (``KAZENAI_FINOPS_RESERVATION_MODE``)."""
-    mode = _enforcement_mode_value("KAZENAI_FINOPS_RESERVATION_MODE")
-    if mode == "fail_closed":
+    try:
+        from kazenai.lifecycle_config import resolve_effective_lifecycle
+
+        cfg = resolve_effective_lifecycle()
+        if cfg.failure_policy == "fail_open":
+            return not is_dev_env()
         return True
-    if mode == "fail_open" and is_dev_env():
-        return False
+    except Exception:
+        pass
+    raw = os.getenv("KAZENAI_FINOPS_RESERVATION_MODE", "").strip().lower()
+    if raw in {"fail_closed", "fail_open"}:
+        if raw == "fail_closed":
+            return True
+        return not is_dev_env()
     return True
 
 

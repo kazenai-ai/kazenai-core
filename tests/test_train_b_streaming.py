@@ -274,7 +274,7 @@ def test_anthropic_create_stream_complete(monkeypatch):
     ]
     monitor(client, max_budget_usd=5.0)
     stream = client.messages.create(
-        model="claude-3-5-haiku-latest",
+        model="claude-haiku-4-5",
         stream=True,
         max_tokens=64,
         messages=[{"role": "user", "content": "hi"}],
@@ -297,7 +297,7 @@ def test_anthropic_messages_stream_manager(monkeypatch):
     ]
     monitor(client, max_budget_usd=5.0)
     with client.messages.stream(
-        model="claude-3-5-haiku-latest",
+        model="claude-haiku-4-5",
         max_tokens=32,
         messages=[{"role": "user", "content": "hi"}],
     ) as stream:

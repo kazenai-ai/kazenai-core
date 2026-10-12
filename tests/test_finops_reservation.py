@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 import unittest
 import urllib.error
 import urllib.request
@@ -18,6 +17,19 @@ from kazenai.spine.guard import ReservationHandle, signal_reservation_event
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Legacy check/reconcile path — isolate from Control-profile tests that leave
+# KAZENAI_FINOPS_CONTROL_PROFILE / KAZENAI_CONTROL_PROFILE in the process env.
+_LEGACY_FINOPS_ENV = {
+    "KAZENAI_FINOPS_URL": "http://localhost:8090",
+    "KAZENAI_FINOPS_CONTROL_PROFILE": "legacy",
+    "KAZENAI_CONTROL_PROFILE": "legacy",
+    "KAZENAI_PROFILE": "legacy",
+    "KAZENAI_ENV": "dev",
+    "KAZENAI_ENFORCEMENT_MODE": "fail_open",
+    "KAZENAI_FINOPS_RESERVATION_MODE": "fail_open",
+}
+
 
 def _make_http_response(status: int, body: dict) -> MagicMock:
     """Build a mock urllib response context manager."""
@@ -62,7 +74,7 @@ class TestReserveCalledBeforeLLMCall(unittest.TestCase):
             mock_resp_obj.usage = None
             return mock_resp_obj
 
-        with patch.dict("os.environ", {"KAZENAI_FINOPS_URL": "http://localhost:8090"}):
+        with patch.dict("os.environ", _LEGACY_FINOPS_ENV, clear=True):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 # Simulate the sequence monitor.py follows:
                 reserved = _try_reserve_budget(
@@ -81,13 +93,8 @@ class TestReserveCalledBeforeLLMCall(unittest.TestCase):
             captured_timeouts.append(timeout)
             return mock_resp
 
-        with patch.dict(
-            "os.environ",
-            {
-                "KAZENAI_FINOPS_URL": "http://localhost:8090",
-                "KAZENAI_FINOPS_RESERVE_TIMEOUT_S": "2.5",
-            },
-        ):
+        env = {**_LEGACY_FINOPS_ENV, "KAZENAI_FINOPS_RESERVE_TIMEOUT_S": "2.5"}
+        with patch.dict("os.environ", env, clear=True):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 _try_reserve_budget(
                     org_id="test-org", workspace_id="default", run_id="run-timeout"
@@ -112,7 +119,13 @@ class TestBudgetExceededRaisesBeforeApiCall(unittest.TestCase):
         def fake_llm():
             llm_called.append(True)
 
-        with patch.dict("os.environ", {"KAZENAI_FINOPS_URL": "http://localhost:8090"}):
+        # BudgetExceeded requires fail_closed reservation mode.
+        env = {
+            **_LEGACY_FINOPS_ENV,
+            "KAZENAI_ENFORCEMENT_MODE": "fail_closed",
+            "KAZENAI_FINOPS_RESERVATION_MODE": "fail_closed",
+        }
+        with patch.dict("os.environ", env, clear=True):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 with self.assertRaises(BudgetExceeded) as ctx:
                     _try_reserve_budget(
@@ -138,7 +151,7 @@ class TestFinopsTimeoutFailsOpen(unittest.TestCase):
         # Fail-open on a FinOps timeout is now a dev-only resilience path: it reserves $0
         # (not None) instead of raising. Production defaults fail closed.
         dev_env = {
-            "KAZENAI_FINOPS_URL": "http://localhost:8090",
+            **_LEGACY_FINOPS_ENV,
             "KAZENAI_ENV": "dev",
             "KAZENAI_ENFORCEMENT_MODE": "fail_open",
             "KAZENAI_FINOPS_RESERVATION_MODE": "fail_open",
@@ -151,7 +164,12 @@ class TestFinopsTimeoutFailsOpen(unittest.TestCase):
         self.assertEqual(result, 0.0, "dev/fail-open timeout reserves $0 rather than raising")
 
         # Production default: the same timeout must fail closed (raise BudgetUnavailable).
-        prod_env = {"KAZENAI_FINOPS_URL": "http://localhost:8090", "KAZENAI_ENV": "production"}
+        prod_env = {
+            **_LEGACY_FINOPS_ENV,
+            "KAZENAI_ENV": "production",
+            "KAZENAI_ENFORCEMENT_MODE": "fail_closed",
+            "KAZENAI_FINOPS_RESERVATION_MODE": "fail_closed",
+        }
         with patch.dict("os.environ", prod_env, clear=True):
             with patch("urllib.request.urlopen", side_effect=slow_urlopen):
                 with self.assertRaises(BudgetUnavailable):
@@ -177,18 +195,17 @@ class TestReconcileFiresAfterCall(unittest.TestCase):
                 reconcile_calls.append(json.loads(req.data.decode()))
             return mock_resp
 
-        with patch.dict("os.environ", {"KAZENAI_FINOPS_URL": "http://localhost:8090"}):
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-                _try_reconcile_budget(
+        with patch.dict("os.environ", _LEGACY_FINOPS_ENV, clear=True):
+            with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
+                ok = _try_reconcile_budget(
                     org_id="test-org",
                     workspace_id="default",
                     run_id="run-004",
                     reserved_cost_usd=0.0,
                     actual_cost_usd=0.004,
                 )
-                # Give the daemon thread time to fire
-                time.sleep(0.1)
 
+        self.assertTrue(ok)
         self.assertEqual(len(reconcile_calls), 1)
         payload = reconcile_calls[0]
         self.assertEqual(payload["org_id"], "test-org")
@@ -196,7 +213,7 @@ class TestReconcileFiresAfterCall(unittest.TestCase):
 
     def test_stream_lifecycle_events_use_idempotent_settle_contract(self):
         requests: list[dict] = []
-        mock_resp = _make_http_response(200, {"status": "ok"})
+        mock_resp = _make_http_response(200, {"result": "applied"})
 
         def fake_urlopen(req, timeout=None):
             requests.append(json.loads(req.data.decode("utf-8")))
@@ -208,11 +225,12 @@ class TestReconcileFiresAfterCall(unittest.TestCase):
             call_id="call_stream_contract",
             attempt=2,
             lifecycle=True,
+            finops_base_url="http://localhost:8090",
         )
-        with patch.dict(
-            "os.environ", {"KAZENAI_FINOPS_URL": "http://localhost:8090"}, clear=True
-        ):
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch.dict("os.environ", _LEGACY_FINOPS_ENV, clear=True):
+            with patch(
+                "kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen
+            ):
                 self.assertTrue(
                     signal_reservation_event(
                         org_id="test-org",
@@ -252,6 +270,9 @@ class TestReconcileFiresAfterCall(unittest.TestCase):
             "KAZENAI_ENV": "dev",
             "KAZENAI_ENFORCEMENT_MODE": "fail_open",
             "KAZENAI_FINOPS_RESERVATION_MODE": "fail_open",
+            "KAZENAI_FINOPS_CONTROL_PROFILE": "legacy",
+            "KAZENAI_CONTROL_PROFILE": "legacy",
+            "KAZENAI_PROFILE": "legacy",
         }
         with patch.dict("os.environ", dev_env, clear=True):
             with patch("urllib.request.urlopen", side_effect=lambda *a, **kw: urlopen_called.append(1)):
@@ -263,7 +284,15 @@ class TestReconcileFiresAfterCall(unittest.TestCase):
         self.assertEqual(urlopen_called, [])
 
         # Production default: a missing FinOps URL must fail closed.
-        with patch.dict("os.environ", {"KAZENAI_ENV": "production"}, clear=True):
+        with patch.dict(
+            "os.environ",
+            {
+                "KAZENAI_ENV": "production",
+                "KAZENAI_FINOPS_CONTROL_PROFILE": "legacy",
+                "KAZENAI_CONTROL_PROFILE": "legacy",
+            },
+            clear=True,
+        ):
             with self.assertRaises(BudgetUnavailable):
                 _try_reserve_budget(
                     org_id="test-org", workspace_id="default", run_id="run-005"
@@ -282,7 +311,7 @@ class TestWorkspaceIdScoping(unittest.TestCase):
             captured.append(json.loads(req.data.decode("utf-8")))
             return mock_resp
 
-        with patch.dict("os.environ", {"KAZENAI_FINOPS_URL": "http://localhost:8090"}):
+        with patch.dict("os.environ", _LEGACY_FINOPS_ENV, clear=True):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 _try_reserve_budget(
                     org_id="test-org",
@@ -311,10 +340,8 @@ class TestActAsOrgHeader(unittest.TestCase):
             captured.append(req)
             return mock_resp
 
-        with patch.dict(
-            "os.environ",
-            {"KAZENAI_FINOPS_URL": "http://localhost:8090", "KAZENAI_FINOPS_API_KEY": "svc-key"},
-        ):
+        env = {**_LEGACY_FINOPS_ENV, "KAZENAI_FINOPS_API_KEY": "svc-key"}
+        with patch.dict("os.environ", env, clear=True):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 _try_reserve_budget(org_id="tenant-org", workspace_id="default", run_id="run-actas")
 
@@ -330,22 +357,17 @@ class TestActAsOrgHeader(unittest.TestCase):
             captured.append(req)
             return mock_resp
 
-        with patch.dict(
-            "os.environ",
-            {"KAZENAI_FINOPS_URL": "http://localhost:8090", "KAZENAI_FINOPS_API_KEY": "svc-key"},
-        ):
+        env = {**_LEGACY_FINOPS_ENV, "KAZENAI_FINOPS_API_KEY": "svc-key"}
+        with patch.dict("os.environ", env, clear=True):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 _try_reconcile_budget(
                     org_id="tenant-org",
                     workspace_id="default",
-                    run_id="run-actas",
-                    reserved_cost_usd=0.01,
-                    actual_cost_usd=0.004,
+                    run_id="run-actas-rec",
+                    reserved_cost_usd=0.0,
+                    actual_cost_usd=0.001,
                 )
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0].headers.get("X-kazen-act-as-org"), "tenant-org")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertEqual(captured[0].headers.get("X-api-key"), "svc-key")

@@ -117,10 +117,10 @@ def test_p34_http_sink_queue_backpressure_spools(tmp_path):
     )
     sink = HttpSink(cfg)
     # Fill queue without waiting for worker drain of failed posts.
-    sink.emit(_event(event_id="a"))
-    sink.emit(_event(event_id="b"))
+    sink.emit(_event(event_id="event-a0"))
+    sink.emit(_event(event_id="event-b0"))
     # Third should hit Full → spool
-    sink.emit(_event(event_id="c"))
+    sink.emit(_event(event_id="event-c0"))
     time.sleep(0.05)
     st = sink.stats()
     assert st["dropped_queue"] + st["spooled"] >= 1
@@ -235,9 +235,9 @@ def test_p34_duplicate_delivery_deduped_on_spool(tmp_path):
     )
     sink = HttpSink(cfg)
     with patch("urllib.request.urlopen", side_effect=OSError("down")):
-        sink.emit(_event(event_id="dup-1"))
+        sink.emit(_event(event_id="event-dup-1"))
         time.sleep(0.15)
-        sink.emit(_event(event_id="dup-1"))
+        sink.emit(_event(event_id="event-dup-1"))
         time.sleep(0.1)
     assert sink._retry.pending_count() == 1
     assert sink.stats()["duplicates"] >= 1 or sink._retry.stats["deduped"] >= 1
@@ -257,9 +257,9 @@ def test_p34_mandatory_event_fail_closed_when_spool_impossible(tmp_path, monkeyp
         org_id="org-a",
     )
     sink = HttpSink(cfg)
-    sink.emit(_event(event_id="fill"))
+    sink.emit(_event(event_id="event-fill"))
     with pytest.raises(RuntimeError, match="mandatory"):
-        sink.emit(_event(event_id="fin", event_type="finops.budget.settled"))
+        sink.emit(_event(event_id="event-fin", event_type="finops.budget.settled"))
     sink.close(deadline_s=0.5)
 
 

@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any, Optional, Tuple
 
 from .lifecycle import StreamOutcome, StreamUsage
-from .proxy import StreamIteratorProxy, StreamManagerProxy
+from .proxy import (
+    AsyncStreamIteratorProxy,
+    AsyncStreamManagerProxy,
+    StreamIteratorProxy,
+    StreamManagerProxy,
+)
 
 
 SURFACE_CREATE_STREAM = "anthropic.messages.create.stream"
@@ -233,5 +238,77 @@ def wrap_anthropic_manager(
         attempt,
         attempt_factory=attempt_factory,
         wrap_entered_stream=wrap_anthropic_entered,
+        enter_scope=enter_scope,
+    )
+
+
+async def _final_usage_from_stream_async(stream: Any) -> Optional[StreamUsage]:
+    get_final = getattr(stream, "get_final_message", None)
+    if callable(get_final):
+        try:
+            msg = get_final()
+            if hasattr(msg, "__await__"):
+                msg = await msg
+            return _usage_from_obj(getattr(msg, "usage", None))
+        except Exception:
+            return None
+    return None
+
+
+def wrap_anthropic_async_event_stream(upstream: Any, attempt: Any) -> AsyncStreamIteratorProxy:
+    return AsyncStreamIteratorProxy(
+        upstream,
+        attempt,
+        observe_chunk=observe_anthropic_event,
+        extract_final_usage=_final_usage_from_stream_async,
+    )
+
+
+class AnthropicAsyncEnteredStreamProxy(AsyncStreamIteratorProxy):
+    async def get_final_message(self) -> Any:
+        fn = getattr(self._upstream, "get_final_message", None)
+        if not callable(fn):
+            raise AttributeError("get_final_message")
+        try:
+            msg = fn()
+            if hasattr(msg, "__await__"):
+                msg = await msg
+        except Exception as exc:
+            if not self._attempt.finalized:
+                from .proxy import _finalize_attempt
+
+                await _finalize_attempt(
+                    self._attempt, StreamOutcome.PROVIDER_ERROR, error=exc
+                )
+            raise
+        usage = _usage_from_obj(getattr(msg, "usage", None))
+        if not self._attempt.finalized:
+            from .proxy import _finalize_attempt
+
+            await _finalize_attempt(self._attempt, StreamOutcome.COMPLETE, usage=usage)
+        return msg
+
+
+def wrap_anthropic_async_entered(entered: Any, attempt: Any) -> AnthropicAsyncEnteredStreamProxy:
+    return AnthropicAsyncEnteredStreamProxy(
+        entered,
+        attempt,
+        observe_chunk=observe_anthropic_event,
+        extract_final_usage=_final_usage_from_stream_async,
+    )
+
+
+def wrap_anthropic_async_manager(
+    manager: Any,
+    attempt: Any = None,
+    *,
+    attempt_factory: Any = None,
+    enter_scope: Any = None,
+) -> AsyncStreamManagerProxy:
+    return AsyncStreamManagerProxy(
+        manager,
+        attempt,
+        attempt_factory=attempt_factory,
+        wrap_entered_stream=wrap_anthropic_async_entered,
         enter_scope=enter_scope,
     )

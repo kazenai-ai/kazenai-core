@@ -7,11 +7,12 @@ budget authority and event ingest endpoint are supplied by Agent FinOps.
 ## Supported runtime
 
 - Python 3.10, 3.11 or 3.12
-- Synchronous OpenAI Chat Completions clients
-- Synchronous Anthropic Messages clients
+- OpenAI Chat Completions clients, sync and async, streaming and non-streaming
+- Anthropic Messages clients, sync and async, streaming and non-streaming
 
-See [QUICKSTART.md](QUICKSTART.md) for the exact supported call paths and known
-streaming limits.
+See [QUICKSTART.md](QUICKSTART.md) for the exact supported call paths and
+[docs/integrations/control-supported-matrix.md](docs/integrations/control-supported-matrix.md)
+for the evidence behind each one.
 
 ## Verify a source checkout
 
@@ -48,12 +49,12 @@ CMD ["python", "-m", "your_application"]
 
 ```text
 # requirements.txt
-kazenai[openai]==1.1.1
+kazenai[openai]==1.1.2
 ```
 
-Most customer integrations should pin `kazenai-finops[openai]==1.1.1` instead; that
-package installs a compatible Core version transitively and constrains the
-certified provider SDK range.
+Most customer integrations should pin `kazenai-finops[openai]==1.1.2` instead; that
+package installs a compatible Core version transitively and bounds the
+provider SDK range.
 
 ## Runtime configuration
 
@@ -67,9 +68,11 @@ repository.
 | `KAZENAI_DEPLOYMENT_MODE` | Use `production` or `staging` to require fail-closed shared reservations |
 | `KAZENAI_FINOPS_RESERVE_TIMEOUT_S` | Timeout for a shared pre-call reservation |
 | `KAZENAI_TIMELINE_PATH` | Optional local JSONL evidence path |
+| `KAZENAI_SDK_SETTLE_QUEUE_DIR` | Persistent directory for the settlement journal; run `python -m kazenai.spine.settle_queue flush` on a schedule (see [docs/settlement-recovery.md](docs/settlement-recovery.md)) |
 
-The local `max_budget_usd` passed to `monitor()` remains an in-process guard. A
-shared cross-process guarantee requires the FinOps authority to be configured
+The local `max_budget_usd` passed to `monitor()` remains an in-process guard for
+that client (`SharedBudget` shares one in-process cap across several clients).
+A shared cross-process guarantee requires the FinOps authority to be configured
 and successfully reserving calls. Pass tenant and attribution values directly
 to `monitor()` rather than relying on application-specific environment names.
 

@@ -1,9 +1,12 @@
 """Shared authentication helpers."""
 
 from kazenai.auth.jwt import (
+    ERROR_CATEGORIES,
+    IssuerProfile,
     JwtVerifyConfig,
     JwtVerifyError,
     extract_org_id,
+    extract_role,
     jwt_secret_from_env,
     verify_hs256_token,
 )
@@ -25,9 +28,12 @@ from kazenai.auth.principal import (
 )
 
 __all__ = [
+    "ERROR_CATEGORIES",
+    "IssuerProfile",
     "JwtVerifyConfig",
     "JwtVerifyError",
     "extract_org_id",
+    "extract_role",
     "jwt_secret_from_env",
     "verify_hs256_token",
     "PRIVILEGED_HEADERS",

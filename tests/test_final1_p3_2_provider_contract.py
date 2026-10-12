@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from types import SimpleNamespace
 from typing import Any, Optional
 
 import pytest
+
+from kazenai.pricing_policy import UnknownModelError
 
 from kazenai import (
     BudgetExceeded,
@@ -200,15 +203,26 @@ def test_p32_control_streaming_allowed_with_finalize_lifecycle(monkeypatch):
     assert client.chat.completions.calls == 1
 
 
-def test_p32_async_client_rejected(monkeypatch):
+def test_p32_async_client_accepted_on_monitor_path(monkeypatch):
+    """P5: AsyncOpenAI-shaped clients are patched, not rejected."""
     _standalone(monkeypatch)
+
+    class _AsyncCompletions(FakeCompletions):
+        async def create(self, *args, **kwargs):
+            return super().create(*args, **kwargs)
 
     class AsyncOpenAI:
         def __init__(self) -> None:
-            self.chat = SimpleNamespace(completions=FakeCompletions())
+            self.chat = SimpleNamespace(completions=_AsyncCompletions())
+            self.max_retries = 0
 
-    with pytest.raises(UnsupportedModeError):
-        monitor(AsyncOpenAI(), max_budget_usd=1.0)
+    client = monitor(AsyncOpenAI(), max_budget_usd=1.0)
+    resp = asyncio.run(
+        client.chat.completions.create(
+            model="gpt-4o-mini", messages=[{"role": "user", "content": "x"}]
+        )
+    )
+    assert resp is not None
 
 
 def test_p32_provider_exception_releases_and_does_not_count_success(monkeypatch):
@@ -250,12 +264,13 @@ def test_p32_unknown_model_usage_fields_documented(monkeypatch):
     _standalone(monkeypatch)
     client = FakeOpenAI()
     monitor(client, max_budget_usd=0.000001)
-    # Unknown model → projection 0 → local tiny cap does not block (explicit).
-    client.chat.completions.create(
-        model="totally-unknown-model-xyz",
-        messages=[{"role": "user", "content": "hi"}],
-    )
-    assert client.chat.completions.calls == 1
+    # Unknown model → no price → blocked before dispatch (fail closed).
+    with pytest.raises(UnknownModelError):
+        client.chat.completions.create(
+            model="totally-unknown-model-xyz",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    assert client.chat.completions.calls == 0
     assert (
         _postcall_cost_usd(
             model="totally-unknown-model-xyz",

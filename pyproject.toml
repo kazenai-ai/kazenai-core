@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kazenai"  # Matches your README installation instructions
-version = "1.1.1"
-description = "KazenAI core SDK: monitor() budget and loop enforcement for OpenAI/Anthropic (Control-certified sync + streaming)"
+version = "1.1.2"
+description = "KazenAI core SDK: monitor() budget and loop enforcement for OpenAI/Anthropic (Control-certified sync + async + streaming)"
 readme = "README.md"
 requires-python = ">=3.10" # v4 TDD specifies 3.10+ for modern Typing/ContextVars
 license = "Apache-2.0"
@@ -13,7 +13,7 @@ authors = [{ name = "KazenAI", email = "hello@kazenai.com" }]
 keywords = ["llm", "agents", "observability", "finops", "langchain"]
 
 dependencies = [
-  "kazen-event-schema>=0.6.3,<0.7",
+  "kazen-event-schema>=0.6.4,<0.7",
   "httpx>=0.25",
   "pydantic>=2.6.0",
   "structlog>=24.1.0",
@@ -23,17 +23,50 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-openai = ["openai>=1.40,<2"]
+# Certified lines: OpenAI 1.109.1 baseline + OpenAI 2.48.0; Anthropic 0.125.0.
+# Install range keeps 1.40+ for apps; release evidence pins the certified pair.
+openai = ["openai>=1.40,<3"]
 anthropic = ["anthropic>=0.39,<1"]
-providers = ["openai>=1.40,<2", "anthropic>=0.39,<1"]
+providers = ["openai>=1.40,<3", "anthropic>=0.39,<1"]
+# P7: optional OTel — ordinary import works without these packages.
+otel = [
+  "opentelemetry-api>=1.45.1,<2",
+  "opentelemetry-sdk>=1.45.1,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.45.1,<2",
+]
+# P8: modern framework pins (selected in P0). Ordinary import works without these.
+langchain = [
+  "langchain==1.4.4",
+  "langchain-core==1.6.9",
+  "langchain-openai==1.7.0",
+  "langchain-anthropic==1.7.5",
+]
+langgraph = [
+  "langgraph==1.2.14",
+  "langgraph-checkpoint-sqlite==3.1.1",
+  "langchain-core==1.6.9",
+]
+crewai = ["crewai==1.15.26"]
+frameworks = [
+  "langchain==1.4.4",
+  "langchain-core==1.6.9",
+  "langchain-openai==1.7.0",
+  "langchain-anthropic==1.7.5",
+  "langgraph==1.2.14",
+  "langgraph-checkpoint-sqlite==3.1.1",
+  "crewai==1.15.26",
+]
 dev = [
   "pytest>=8.0.0",
   "pytest-cov>=5.0",
   "pytest-asyncio>=0.23",
   "fastapi>=0.110",
   "httpx>=0.27",
-  "openai>=1.40,<2",
+  "openai>=1.40,<3",
   "anthropic>=0.39,<1",
+  "opentelemetry-api>=1.45.1,<2",
+  "opentelemetry-sdk>=1.45.1,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.45.1,<2",
   "ruff>=0.8",
   "mypy>=1.13",
 ]
@@ -53,7 +86,21 @@ include = ["kazenai*"]
 omit = [
   "kazenai/middleware/*",
   "kazenai/debug.py",
-  "kazenai/integrations/*",
+  # P9: framework adapters are measured by a dedicated integrations coverage gate
+  # (see scripts/final1b_final_p9_release_verify.py). Keep framework + LiteLLM
+  # helpers out of the default 80% package gate; adapter_contract stays measured.
+  "kazenai/integrations/litellm_control.py",
+  "kazenai/integrations/langchain.py",
+  "kazenai/integrations/langgraph.py",
+  "kazenai/integrations/crewai.py",
+  # Streaming provider proxies are covered by Train-B / official-SDK suites; the
+  # default package gate measures lifecycle + monitor + shared streaming helpers.
+  "kazenai/streaming/openai.py",
+  "kazenai/streaming/anthropic.py",
+  "kazenai/streaming/proxy.py",
+  # Async provider dispatch twin of the streaming proxies above — measured by
+  # Train-B / p5 async provider suites, not the default 80% package gate.
+  "kazenai/_async_provider.py",
   "kazenai/retry_queue.py",
   # LF-05 in-tree contracts mirror; exercised via re-export / contracts suite
   "kazenai/auth/_principal_impl.py",

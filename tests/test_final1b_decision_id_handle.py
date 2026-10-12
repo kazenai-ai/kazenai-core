@@ -12,6 +12,9 @@ def test_lifecycle_reserve_preserves_decision_id(monkeypatch):
     monkeypatch.setenv("KAZENAI_FINOPS_URL", "http://finops.test")
     monkeypatch.setenv("KAZENAI_FINOPS_CONTROL_PROFILE", "control")
     monkeypatch.setenv("KAZENAI_FINOPS_API_KEY", "k")
+    monkeypatch.setenv("KAZENAI_ENFORCEMENT_MODE", "fail_open")
+    monkeypatch.setenv("KAZENAI_FINOPS_RESERVATION_MODE", "fail_open")
+    monkeypatch.delenv("KAZENAI_FINOPS_ENFORCEMENT_MODE", raising=False)
 
     payload = {
         "reservation_id": "rsv_1",
@@ -29,10 +32,21 @@ def test_lifecycle_reserve_preserves_decision_id(monkeypatch):
             "execution": {"run_id": "r", "call_id": "call_1", "attempt": 1},
         },
     }
+    caps = {
+        "ok": True,
+        "effective_lifecycle": {
+            "profile": "control",
+            "lifecycle_version": "reservation.lifecycle.v1",
+        },
+        "capabilities": {"reservation_settlement": True},
+    }
 
     class _Resp:
+        def __init__(self, body: dict):
+            self._body = body
+
         def read(self):
-            return json.dumps(payload).encode()
+            return json.dumps(self._body).encode()
 
         def __enter__(self):
             return self
@@ -40,7 +54,13 @@ def test_lifecycle_reserve_preserves_decision_id(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", return_value=_Resp()):
+    def _urlopen(req, timeout=0):  # noqa: ARG001
+        url = getattr(req, "full_url", None) or req.get_full_url()
+        if "/lifecycle" in str(url):
+            return _Resp(caps)
+        return _Resp(payload)
+
+    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=_urlopen):
         handle = reserve_budget(org_id="o", workspace_id="w", run_id="r")
     assert isinstance(handle, ReservationHandle)
     assert handle.decision_id == "dec_xyz"
@@ -55,16 +75,30 @@ def test_lifecycle_reserve_falls_back_to_request_attribution(monkeypatch):
     monkeypatch.setenv("KAZENAI_FINOPS_URL", "http://finops.test")
     monkeypatch.setenv("KAZENAI_FINOPS_CONTROL_PROFILE", "control")
     monkeypatch.setenv("KAZENAI_FINOPS_API_KEY", "k")
+    monkeypatch.setenv("KAZENAI_ENFORCEMENT_MODE", "fail_open")
+    monkeypatch.setenv("KAZENAI_FINOPS_RESERVATION_MODE", "fail_open")
+    monkeypatch.delenv("KAZENAI_FINOPS_ENFORCEMENT_MODE", raising=False)
 
     payload = {
         "reservation_id": "rsv_2",
         "reserved_usd_micros": 10_000,
         "decision_receipt": {"decision_id": "dec_fallback"},
     }
+    caps = {
+        "ok": True,
+        "effective_lifecycle": {
+            "profile": "control",
+            "lifecycle_version": "reservation.lifecycle.v1",
+        },
+        "capabilities": {"reservation_settlement": True},
+    }
 
     class _Resp:
+        def __init__(self, body: dict):
+            self._body = body
+
         def read(self):
-            return json.dumps(payload).encode()
+            return json.dumps(self._body).encode()
 
         def __enter__(self):
             return self
@@ -72,7 +106,13 @@ def test_lifecycle_reserve_falls_back_to_request_attribution(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", return_value=_Resp()):
+    def _urlopen(req, timeout=0):  # noqa: ARG001
+        url = getattr(req, "full_url", None) or req.get_full_url()
+        if "/lifecycle" in str(url):
+            return _Resp(caps)
+        return _Resp(payload)
+
+    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=_urlopen):
         handle = reserve_budget(
             org_id="o",
             workspace_id="w",

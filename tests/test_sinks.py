@@ -45,10 +45,10 @@ def test_memory_sink_trims_to_max():
 def test_jsonl_sink_appends_line(tmp_path):
     path = str(tmp_path / "events.jsonl")
     sink = JsonlSink(path)
-    sink.emit(_event(event_id="e1"))
+    sink.emit(_event(event_id="event-e1"))
     lines = Path(path).read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
-    assert json.loads(lines[0])["event_id"] == "e1"
+    assert json.loads(lines[0])["event_id"] == "event-e1"
 
 
 def test_jsonl_sink_closes_file_handle(tmp_path):

@@ -10,9 +10,10 @@ release notes a breaking change.
 from kazenai import monitor, BudgetExceeded, Enforcement
 ```
 
-`monitor()` remains the certified Control entrypoint for sync OpenAI Chat
-Completions and sync Anthropic Messages (see the supported-surfaces matrix and
-docs). Callers must not depend on private module layout.
+`monitor()` remains the certified Control entrypoint for OpenAI Chat
+Completions and Anthropic Messages, sync and async, streaming and non-streaming
+(see the supported-surfaces matrix and docs). Callers must not depend on private
+module layout.
 
 ## Known concentration: `kazenai/monitor.py`
 
@@ -49,6 +50,11 @@ and re-exports used by tests. `from kazenai import monitor` does not change.
 - `kazenai/spine/guard.py` — shared FinOps reservation
 - `kazenai/attribution.py` — ContextVar attribution
 - `kazenai/enforcement.py` — local hard caps
+- `kazenai/budget.py` — `SharedBudget`, one local cap shared across clients
+- `kazenai/model_pricing.py` — the single verified price table
+- `kazenai/provider_errors.py` — which provider errors settle at $0 vs pending
+- `kazenai/integrations/` — LangChain (`bind_monitored_chat_openai` /
+  `bind_monitored_chat_anthropic`), LangGraph, LiteLLM, CrewAI adapters
 
 ## Versioning note
 

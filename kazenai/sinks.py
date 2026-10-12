@@ -146,7 +146,7 @@ class JsonlSink(EventSink):
 @dataclass
 class HttpSinkConfig:
     ingest_url: str
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)  # never in logs/tracebacks
     timeout_s: float = 2.0
     batch_max: int = 50
     flush_interval_s: float = 1.0

@@ -28,8 +28,24 @@ class TestUnknownModelPolicy(unittest.TestCase):
             cost = TokenCostEngine().cost_usd(model="unknown-model-abc", input_tokens=1000, output_tokens=1000)
             self.assertGreater(cost, 0.0)
 
-    def test_warn_policy_defaults(self):
-        self.assertEqual(unknown_model_policy(), "warn")
+    def test_block_is_the_default_in_every_environment(self):
+        self.assertEqual(unknown_model_policy(), "block")
+        with patch.dict(os.environ, {"KAZENAI_DEPLOYMENT_MODE": "development"}, clear=False):
+            self.assertEqual(unknown_model_policy(), "block")
+
+    def test_warn_opt_in_honoured_only_outside_production(self):
+        with patch.dict(os.environ, {"KAZENAI_UNKNOWN_MODEL_POLICY": "warn"}, clear=False):
+            self.assertEqual(unknown_model_policy(), "warn")
+        with patch.dict(
+            os.environ,
+            {"KAZENAI_UNKNOWN_MODEL_POLICY": "warn", "KAZENAI_DEPLOYMENT_MODE": "production"},
+            clear=False,
+        ):
+            self.assertEqual(unknown_model_policy(), "block")
+
+    def test_unrecognised_policy_value_fails_closed(self):
+        with patch.dict(os.environ, {"KAZENAI_UNKNOWN_MODEL_POLICY": "allow"}, clear=False):
+            self.assertEqual(unknown_model_policy(), "block")
 
     def test_production_defaults_to_block(self):
         with patch.dict(os.environ, {"KAZENAI_DEPLOYMENT_MODE": "production"}, clear=False):
@@ -72,17 +88,19 @@ class TestKnownPricedInvariant(unittest.TestCase):
             self.assertFalse(is_known_model(m, known, _ALIASES), f"{m!r} should be unknown")
 
     def test_known_iff_priced_nonzero(self):
+        os.environ["KAZENAI_UNKNOWN_MODEL_POLICY"] = "warn"
+        self.addCleanup(os.environ.pop, "KAZENAI_UNKNOWN_MODEL_POLICY", None)
         engine = TokenCostEngine()
         known = set(engine.known_models())
         models = [
             # proxy/gateway-prefixed (unknown)
             "my-gpt-4o-proxy", "internal-claude-haiku-4-5-router", "team-gpt-4o-gateway",
             # real dated ids (known via longest-prefix)
-            "gpt-4o-mini-2024-07-18", "gpt-4-turbo-2024-04-09", "o1-preview-2024-09-12",
+            "gpt-4o-mini-2024-07-18", "gpt-4.1-nano-2025-04-14", "o1-preview-2024-09-12",
             # exact keys
-            "gpt-4o", "claude-opus-4-8", "gemini-1.5-pro",
-            # aliases
-            "claude-sonnet-4", "gpt-4o-latest",
+            "gpt-4o", "claude-opus-4-8", "gemini-2.5-pro",
+            # unpriced version bumps (unknown)
+            "gpt-5.3", "claude-opus-5-6",
             # truncated stems (unknown)
             "gpt", "claude", "gemini",
         ]

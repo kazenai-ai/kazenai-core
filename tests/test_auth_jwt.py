@@ -17,6 +17,8 @@ def test_extract_org_id_from_metadata() -> None:
     }
     assert extract_org_id({"org_id": "org-top"}) == "org-top"
     assert extract_org_id(payload) == "org-meta"
+    # user_metadata must never grant org authority.
+    assert extract_org_id({"user_metadata": {"org_id": "org-user"}}) == ""
 
 
 def test_kazen_issuer_requires_audience() -> None:

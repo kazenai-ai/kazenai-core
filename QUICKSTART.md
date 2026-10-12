@@ -1,18 +1,18 @@
 # KazenAI Core quick start
 
 `kazenai` is the Python runtime used by KazenAI to enforce local and shared
-spending policies around supported synchronous OpenAI and Anthropic calls. Most
+spending policies around supported OpenAI and Anthropic calls. Most
 product integrations should install the customer-facing package, which
 re-exports the Core API:
 
 ```bash
-python -m pip install "kazenai-finops[openai]==1.1.1"
+python -m pip install "kazenai-finops[openai]==1.1.2"
 ```
 
 Install Core directly when you specifically want the runtime package:
 
 ```bash
-python -m pip install "kazenai[openai]==1.1.1"
+python -m pip install "kazenai[openai]==1.1.2"
 ```
 
 Python 3.10, 3.11 and 3.12 are supported.
@@ -39,9 +39,23 @@ except BudgetExceeded as exc:
     print("The call was blocked before provider dispatch:", exc)
 ```
 
-`max_budget_usd` is an in-process client/run limit. It is not an account-wide
-provider billing limit. For multiple workers or services sharing a budget, use
-the shared FinOps authority described below.
+`max_budget_usd` is an in-process limit for that one client. It is not an
+account-wide provider billing limit.
+
+When several clients make up one workflow (for example an OpenAI step and an
+Anthropic step), give them one shared cap instead:
+
+```python
+from kazenai import SharedBudget
+
+budget = SharedBudget(max_usd=1.00)
+openai_client = monitor(OpenAI(), budget=budget)
+anthropic_client = monitor(Anthropic(), budget=budget)
+```
+
+A model with no known price is blocked before dispatch (`UnknownModelError`);
+add its price with `KAZENAI_PRICING_JSON`. For multiple workers or services
+sharing a budget, use the shared FinOps authority described below.
 
 ## 2. Connect a shared FinOps authority
 
@@ -117,9 +131,12 @@ with client.messages.stream(
 
 For a streamed call, KazenAI records a reservation, marks it
 `provider_started` at dispatch, and settles it when authoritative terminal usage
-arrives. Cancellation, provider failure, or missing final usage produces an
-`outcome_unknown`/pending-reconciliation state. It is never treated as an exact
-zero-cost call and never released as though dispatch did not happen.
+arrives. Cancellation, a provider failure after dispatch, or missing final
+usage produces an `outcome_unknown`/pending-reconciliation state. It is never
+treated as an exact zero-cost call and never released as though dispatch did not
+happen. The one exception is a definitive provider refusal (HTTP 4xx such as a
+bad request, invalid key, unknown model or rate limit, but not 408/409/499):
+nothing was generated, so it settles at exactly $0 and releases the hold.
 
 `stream_cutoff_usd` estimates only output visible to the client. It cannot see
 hidden reasoning or guarantee that the provider immediately stopped generating
@@ -145,19 +162,27 @@ This explicit guard can reserve around a custom callable, but it does not make
 arbitrary provider response parsing a certified integration. The caller remains
 responsible for passing valid price and usage information.
 
-## Supported boundary in 1.1.x
+## Supported boundary in 1.1.2
+
+Verified locally with synthetic provider transports and real local KazenAI
+services, and against the live OpenAI and Anthropic APIs (2026-10-12, including
+the LiteLLM, LangChain and LangGraph rows). Source of truth:
+[docs/integrations/control-supported-matrix.md](docs/integrations/control-supported-matrix.md).
 
 | Path | Status |
 |---|---|
-| Sync OpenAI `chat.completions.create` | Supported, non-streaming and `stream=True` |
-| Sync OpenAI `chat.completions.stream` | Supported |
-| Sync Anthropic `messages.create` | Supported, non-streaming and `stream=True` |
-| Sync Anthropic `messages.stream` | Supported |
-| Async provider clients | Not supported |
+| OpenAI `chat.completions.create`, sync and async | Supported, non-streaming and `stream=True` |
+| OpenAI `chat.completions.stream` | Supported |
+| Anthropic `messages.create`, sync and async | Supported, non-streaming and `stream=True` |
+| Anthropic `messages.stream` | Supported |
+| LiteLLM | Application-owned and gateway-owned accounting (gateway-owned streaming settlement not yet verified) |
+| LangChain | `ChatOpenAI` via `bind_monitored_chat_openai`, `ChatAnthropic` via `bind_monitored_chat_anthropic`; multi-provider chains via `declare_langchain_control_boundary(runnable, *clients)` |
+| LangGraph | Supported with an explicit declared boundary listing every provider client the nodes use; raw clients inside arbitrary nodes are not intercepted |
+| Anthropic beta Messages (`client.beta.messages`) | Not supported; raises `UnsupportedModeError` on a monitored client |
 | OpenAI Responses API, including streaming | Not supported |
 | OpenAI Realtime/WebSocket | Not supported |
 | Bedrock/Vertex Anthropic wrappers | Not supported |
-| Framework helpers | Evaluation surface; wrap the underlying supported client |
+| CrewAI, AutoGen | Not supported |
 
 ## Next references
 

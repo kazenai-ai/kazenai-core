@@ -1,0 +1,383 @@
+{
+  "corpus_version": "jwt-vectors.v1",
+  "policy_ref": "jwt_policy.v1.json",
+  "clock": {
+    "now_unix": 1700000000,
+    "note": "Controlled test clock. Verifiers under test must accept now=now_unix when evaluating these vectors."
+  },
+  "synthetic_keys": {
+    "kazenai_primary": "test-kazenai-hmac-secret-32bytes!!",
+    "kazenai_rotate": "test-kazenai-rotate-secret-32byte!",
+    "supabase_hs256": "test-supabase-hmac-secret-32byte!",
+    "unrelated": "test-unrelated-hmac-secret-32byt!"
+  },
+  "runtime_keyrings": {
+    "kazenai-hs256": ["kazenai_primary", "kazenai_rotate"],
+    "supabase-hs256-legacy": ["supabase_hs256"]
+  },
+  "vectors": [
+    {
+      "id": "valid_kazenai_session",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600,
+        "iat": 1700000000
+      },
+      "expect": { "accept": true, "profile": "kazenai-hs256" }
+    },
+    {
+      "id": "valid_kazenai_rotated_key",
+      "sign_key": "kazenai_rotate",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": true, "profile": "kazenai-hs256" }
+    },
+    {
+      "id": "valid_supabase_hs256_legacy",
+      "sign_key": "supabase_hs256",
+      "claims": {
+        "sub": "user-2",
+        "org_id": "org-b",
+        "iss": "https://example.supabase.co/auth/v1",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": true, "profile": "supabase-hs256-legacy" }
+    },
+    {
+      "id": "prefix_extended_supabase_issuer",
+      "sign_key": "supabase_hs256",
+      "claims": {
+        "sub": "user-2",
+        "org_id": "org-b",
+        "iss": "https://example.supabase.co/auth/v1/evil",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "issuer" }
+    },
+    {
+      "id": "wrong_issuer",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "evil-issuer",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "issuer" }
+    },
+    {
+      "id": "wrong_audience_kazenai",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "wrong",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "audience" }
+    },
+    {
+      "id": "wrong_audience_supabase",
+      "sign_key": "supabase_hs256",
+      "claims": {
+        "sub": "user-2",
+        "org_id": "org-b",
+        "iss": "https://example.supabase.co/auth/v1",
+        "aud": "wrong",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "audience" }
+    },
+    {
+      "id": "missing_aud_supabase",
+      "sign_key": "supabase_hs256",
+      "claims": {
+        "sub": "user-2",
+        "org_id": "org-b",
+        "iss": "https://example.supabase.co/auth/v1",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "audience" }
+    },
+    {
+      "id": "missing_sub",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "missing_claim" }
+    },
+    {
+      "id": "missing_exp",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated"
+      },
+      "expect": { "accept": false, "error_category": "missing_claim" }
+    },
+    {
+      "id": "expired",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1699999999
+      },
+      "expect": { "accept": false, "error_category": "expired" }
+    },
+    {
+      "id": "not_yet_valid_nbf",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600,
+        "nbf": 1700001800
+      },
+      "expect": { "accept": false, "error_category": "not_yet_valid" }
+    },
+    {
+      "id": "wrong_signature_unrelated_key",
+      "sign_key": "unrelated",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "signature" }
+    },
+    {
+      "id": "alg_none",
+      "header": { "alg": "none", "typ": "JWT" },
+      "sign_key": null,
+      "unsigned": true,
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "algorithm" }
+    },
+    {
+      "id": "malformed_token",
+      "raw_token": "not-a-jwt",
+      "expect": { "accept": false, "error_category": "malformed" }
+    },
+    {
+      "id": "unrelated_key_must_not_verify_supabase_profile",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-2",
+        "org_id": "org-b",
+        "iss": "https://example.supabase.co/auth/v1",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "signature" }
+    },
+    {
+      "id": "tampered_payload",
+      "sign_key": "kazenai_primary",
+      "tamper_org_id": "org-attacker",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "signature" }
+    },
+    {
+      "id": "malformed_exp_type",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": "not-a-number"
+      },
+      "expect": { "accept": false, "error_category": "malformed" }
+    },
+    {
+      "id": "numeric_sub_non_string",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": 123,
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "malformed" }
+    },
+    {
+      "id": "future_iat",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600,
+        "iat": 1700000300
+      },
+      "expect": { "accept": false, "error_category": "not_yet_valid" }
+    },
+    {
+      "id": "exp_within_profile_leeway",
+      "sign_key": "kazenai_primary",
+      "verification": { "leeway_seconds": 30 },
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1699999995
+      },
+      "expect": { "accept": true, "profile": "kazenai-hs256" }
+    },
+    {
+      "id": "string_numeric_exp_accepted",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": "1700003600",
+        "iat": 1700000000
+      },
+      "expect": { "accept": true, "profile": "kazenai-hs256" }
+    },
+    {
+      "id": "numeric_jti_malformed",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600,
+        "jti": 42
+      },
+      "expect": { "accept": false, "error_category": "malformed" }
+    },
+    {
+      "id": "string_jti_accepted",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600,
+        "jti": "jti-abc"
+      },
+      "expect": { "accept": true, "profile": "kazenai-hs256" }
+    },
+    {
+      "id": "null_jti_malformed",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600,
+        "jti": null
+      },
+      "expect": { "accept": false, "error_category": "malformed" }
+    },
+    {
+      "id": "decimal_string_exp_malformed",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": "1700003600.5"
+      },
+      "expect": { "accept": false, "error_category": "malformed" }
+    },
+    {
+      "id": "exponent_string_exp_malformed",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": "1.7e9"
+      },
+      "expect": { "accept": false, "error_category": "malformed" }
+    },
+    {
+      "id": "hex_string_exp_malformed",
+      "sign_key": "kazenai_primary",
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": "0x65B9ACA0"
+      },
+      "expect": { "accept": false, "error_category": "malformed" }
+    },
+    {
+      "id": "numeric_kid_malformed",
+      "sign_key": "kazenai_primary",
+      "header": { "alg": "HS256", "kid": 1 },
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "malformed" }
+    },
+    {
+      "id": "unknown_critical_header_malformed",
+      "sign_key": "kazenai_primary",
+      "header": { "alg": "HS256", "crit": ["bork"], "bork": true },
+      "claims": {
+        "sub": "user-1",
+        "org_id": "org-a",
+        "iss": "kazenai",
+        "aud": "authenticated",
+        "exp": 1700003600
+      },
+      "expect": { "accept": false, "error_category": "malformed" }
+    }
+  ]
+}

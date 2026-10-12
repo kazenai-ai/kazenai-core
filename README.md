@@ -32,23 +32,26 @@ KazenAI:            Pre-flight check → BLOCKED → LLM call never made
 ## Install
 
 ```bash
-python -m pip install "kazenai[openai]==1.1.1"
+python -m pip install "kazenai[openai]==1.1.2"
 # Most teams install the customer package instead:
-python -m pip install "kazenai-finops[openai]==1.1.1"
+python -m pip install "kazenai-finops[openai]==1.1.2"
 # Anthropic:
-# python -m pip install "kazenai-finops[anthropic]==1.1.1"
+# python -m pip install "kazenai-finops[anthropic]==1.1.2"
 # Both providers:
-# python -m pip install "kazenai-finops[providers]==1.1.1"
+# python -m pip install "kazenai-finops[providers]==1.1.2"
 ```
 
 `kazenai-finops` re-exports this SDK and is the recommended install for product integrations.
-Provider extras pin the certified SDK ranges so a first-run install cannot silently
+Provider extras bound the SDK ranges so a first-run install cannot silently
 resolve OpenAI 3.x or Anthropic 1.x.
 
-The Control 1.1.x certification covers `openai>=1.40,<2` and
-`anthropic>=0.39,<1`. Later provider-SDK major versions are unverified until
-they are added to the supported matrix. Release `1.1.1` is a
-compatibility/distribution patch, not a new runtime capability line.
+Tested cells are OpenAI 1.109.1 and an isolated OpenAI 2.48.0 cell within the
+install range `openai>=1.40,<3`, plus Anthropic 0.125.0 within
+`anthropic>=0.39,<1`. Other versions in those ranges are compatible candidates,
+not independently verified versions. Verification uses synthetic provider
+transports and real local KazenAI services; the OpenAI and Anthropic paths are
+also verified against the live OpenAI and Anthropic APIs on 2026-10-12 (gpt-6-luna, claude-sonnet-5-5) (`tests/test_live_provider_smoke.py`, opt-in). Source of truth:
+[docs/integrations/control-supported-matrix.md](docs/integrations/control-supported-matrix.md).
 
 Requires Python 3.10+.
 
@@ -109,10 +112,14 @@ Illustrative debug output — not a customer bill or savings claim.
 
 | Path | Status |
 |------|--------|
-| Sync OpenAI `chat.completions.create` (non-streaming and `stream=True`) / `chat.completions.stream` | Supported via `monitor()` |
-| Sync Anthropic `messages.create` / `messages.stream` | Supported via `monitor()` |
-| OpenAI Responses API / async clients / Realtime | Not on the supported control path |
-| LangChain / CrewAI / LangGraph / AutoGen helpers | Available for evaluation — wrap the underlying client with `monitor()` for the supported path |
+| OpenAI `chat.completions.create`, sync/async, non-streaming and streaming | Fixture-verified and live-verified (2026-10-12) via `monitor()` |
+| Anthropic `messages.create`, sync/async, non-streaming and streaming | Fixture-verified and live-verified (2026-10-12) via `monitor()` |
+| OpenAI Responses API / Realtime | Unsupported on the Control path |
+| LangChain | Fixture- and live-verified (2026-10-12) when the actual provider client is monitored/bound (`ChatOpenAI` via `bind_monitored_chat_openai`, `ChatAnthropic` via `bind_monitored_chat_anthropic`) |
+| LangGraph | Fixture- and live-verified (2026-10-12) with an explicit declared boundary; arbitrary raw clients in nodes are not intercepted |
+| LiteLLM proxy | Live-verified (2026-10-12): app-owned and gateway-owned accounting with Agent FinOps; gateway-owned streaming settlement not yet verified |
+| CrewAI | Not in the supported matrix. 1.1.2 routes CrewAI 1.15.26 LLM/task/tool events to the owning crew (tested on the real event bus); cancellation and native `akickoff` cells are still unverified |
+| AutoGen | Unsupported |
 
 ### Streaming
 
@@ -177,6 +184,32 @@ An explicitly configured development fail-open path retains only the local
 client safeguards. It does not preserve a cross-process or account-wide budget
 guarantee.
 
+### Multi-model workflows
+
+Each `monitor(..., max_budget_usd=...)` client has its own cap, so a workflow
+with one client per provider would add those caps up. Share one instead:
+
+```python
+from kazenai import SharedBudget, monitor
+
+budget = SharedBudget(max_usd=1.00)
+planner = monitor(OpenAI(), budget=budget)
+writer = monitor(Anthropic(), budget=budget)
+```
+
+In LangChain, bind chat models with `bind_monitored_chat_openai` /
+`bind_monitored_chat_anthropic` (both accept `budget=`). In LangGraph, declare
+every provider client the nodes use:
+`declare_langgraph_control_boundary(graph, planner, writer)` then
+`wrap_graph(graph, capability="control", guarded_clients=[planner, writer])`.
+Across processes or machines, give every client the same `workflow_id` and set a
+workflow limit in Agent FinOps.
+
+A provider refusal before any output (HTTP 4xx such as unknown model, invalid
+key or rate limit) settles at exactly $0; timeouts and 5xx stay pending for
+reconciliation. Models with no known price are blocked before dispatch unless
+priced via `KAZENAI_PRICING_JSON`.
+
 ---
 
 ## Optional FinOps environment variables
@@ -188,10 +221,15 @@ guarantee.
 | `KAZENAI_DEPLOYMENT_MODE` | `production` / `staging` require fail-closed shared reservations |
 | `KAZENAI_FINOPS_RESERVE_TIMEOUT_S` | Timeout for a shared pre-call reservation |
 | `KAZENAI_TIMELINE_PATH` | Optional local JSONL evidence path |
+| `KAZENAI_SDK_SETTLE_QUEUE_DIR` | Persistent private directory for pending settlement intents |
 
-Pass `max_budget_usd`, `org_id`, `project_id`, `workspace_id` and attribution
-fields directly to `monitor()`; they are not inferred from similarly named
-environment variables.
+Pass `max_budget_usd` (or `budget=SharedBudget(...)`), `org_id`, `project_id`,
+`workspace_id` and attribution fields directly to `monitor()`; they are not
+inferred from similarly named environment variables.
+
+For shared Control deployments, read [Settlement recovery](docs/settlement-recovery.md).
+The current queue requires an explicitly supervised flusher and one process per
+queue directory; it is not a general multiprocess job queue.
 
 ---
 

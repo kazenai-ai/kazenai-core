@@ -1,4 +1,4 @@
-"""Package metadata and first-run install-contract checks for kazenai 1.1.1."""
+"""Package metadata and first-run install-contract checks for kazenai 1.1.2."""
 
 from __future__ import annotations
 
@@ -8,8 +8,9 @@ from pathlib import Path
 import kazenai
 
 _ROOT = Path(__file__).resolve().parents[1]
-_EXPECTED = "1.1.1"
-_OPENAI_BOUND = "openai>=1.40,<2"
+_EXPECTED = "1.1.2"
+# Install range covers certified OpenAI 1.109.1 + 2.x lines (see SUPPORT pins).
+_OPENAI_BOUND = "openai>=1.40,<3"
 _ANTHROPIC_BOUND = "anthropic>=0.39,<1"
 
 
@@ -27,7 +28,7 @@ def _optional_extra(name: str) -> list[str]:
     return re.findall(r'"([^"]+)"', block.group(1))
 
 
-def test_runtime_and_pyproject_version_are_1_1_1() -> None:
+def test_runtime_and_pyproject_version_match_expected() -> None:
     match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', _pyproject_text())
     assert match is not None
     assert match.group(1) == _EXPECTED
@@ -47,7 +48,7 @@ def test_optional_provider_extras_use_certified_bounds() -> None:
 def test_active_first_run_docs_prefer_bounded_extras() -> None:
     for relative in ("README.md", "QUICKSTART.md"):
         text = (_ROOT / relative).read_text(encoding="utf-8")
-        assert "kazenai[openai]==1.1.1" in text or "kazenai-finops[openai]==1.1.1" in text
+        assert f"kazenai[openai]=={_EXPECTED}" in text
         assert not re.search(
             r'pip install(?:\s+"?)kazenai(?:-finops)?(?!\[[^\]]+\])(?:"?==[0-9.]+)?\s+"?(?:openai|anthropic)\b',
             text,
@@ -58,4 +59,6 @@ def test_supported_matrix_package_line_matches_release() -> None:
     matrix = (_ROOT / "docs/integrations/control-supported-matrix.md").read_text(
         encoding="utf-8"
     )
-    assert "1.1.1 prepared" in matrix
+    match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', _pyproject_text())
+    assert match
+    assert f"`kazenai` {match.group(1)}" in matrix

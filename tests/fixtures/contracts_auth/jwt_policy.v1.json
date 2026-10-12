@@ -1,0 +1,52 @@
+{
+  "policy_version": "jwt-issuer-policy.v1",
+  "profiles": [
+    {
+      "name": "kazenai-hs256",
+      "issuer": "kazenai",
+      "algorithms": ["HS256"],
+      "audiences": ["authenticated"],
+      "identity_type": "kazen_session",
+      "key_source": "hs256_keyring",
+      "require_sub": true,
+      "require_exp": true,
+      "validate_nbf": true,
+      "validate_iat": true,
+      "leeway_seconds": 0,
+      "allow_missing_kid": true,
+      "notes": "Platform-minted session/service tokens. Keyring is bound to this issuer only (Platform may mint with SUPABASE_JWT_SECRET or KAZENAI_JWT_SECRET)."
+    },
+    {
+      "name": "supabase-hs256-legacy",
+      "issuer": "https://example.supabase.co/auth/v1",
+      "algorithms": ["HS256"],
+      "audiences": ["authenticated"],
+      "identity_type": "supabase_hs256_legacy",
+      "key_source": "hs256_keyring",
+      "require_sub": true,
+      "require_exp": true,
+      "validate_nbf": true,
+      "validate_iat": true,
+      "leeway_seconds": 0,
+      "allow_missing_kid": true,
+      "notes": "Exact issuer only. Audience required. Direct asymmetric JWKS verification is unsupported this release; session exchange uses Supabase Admin getUser then Platform remints HS256."
+    }
+  ],
+  "unsupported": {
+    "direct_asymmetric_supabase_jwks": {
+      "supported": false,
+      "reason": "Required Control path validates Platform-minted HS256 sessions; Supabase access tokens are exchanged via Admin getUser, not local JWKS."
+    }
+  },
+  "error_categories": [
+    "malformed",
+    "signature",
+    "algorithm",
+    "issuer",
+    "audience",
+    "expired",
+    "not_yet_valid",
+    "missing_claim",
+    "unavailable_key"
+  ]
+}

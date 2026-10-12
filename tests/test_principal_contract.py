@@ -28,6 +28,8 @@ FIXTURE_DIR = CONTRACTS / "fixtures" / "auth"
         "invalid_audience.json",
         "stale_revoked_membership.json",
         "client_privileged_headers_forbidden.json",
+        "self_act_as_own_org.json",
+        "self_act_as_own_org_foreign_workspace.json",
     ],
 )
 def test_core_evaluates_contract_fixtures(name: str) -> None:

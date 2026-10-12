@@ -1,14 +1,23 @@
 {
   "additionalProperties": false,
-  "description": "Canonical event schema (single source of truth for SDK + backend).\n\nStrictly forbids extra fields to ensure wire compatibility.",
+  "description": "Strict KazenEvent schema v0.3.0 \u2014 used across all KazenAI services.",
   "properties": {
     "agent_id": {
+      "default": "devagent",
       "title": "Agent Id",
       "type": "string"
     },
     "agent_role": {
-      "title": "Agent Role",
-      "type": "string"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Role"
     },
     "artifact_refs": {
       "additionalProperties": true,
@@ -38,6 +47,18 @@
       ],
       "default": null,
       "title": "Client Id"
+    },
+    "code_graph_snapshot_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Code Graph Snapshot Id"
     },
     "cost_quality_score": {
       "anyOf": [
@@ -88,6 +109,7 @@
       "title": "Drift Baseline Id"
     },
     "event_id": {
+      "minLength": 8,
       "title": "Event Id",
       "type": "string"
     },
@@ -156,6 +178,7 @@
       "title": "Latency Ms"
     },
     "org_id": {
+      "default": "local",
       "title": "Org Id",
       "type": "string"
     },
@@ -189,6 +212,7 @@
       "type": "object"
     },
     "project_id": {
+      "default": "general",
       "title": "Project Id",
       "type": "string"
     },
@@ -228,6 +252,18 @@
       "default": null,
       "title": "Replay Group Id"
     },
+    "retrieval_trace_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Retrieval Trace Id"
+    },
     "root_run_id": {
       "anyOf": [
         {
@@ -241,8 +277,16 @@
       "title": "Root Run Id"
     },
     "run_id": {
-      "title": "Run Id",
-      "type": "string"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Run Id"
     },
     "sandbox_backend": {
       "anyOf": [
@@ -286,8 +330,33 @@
       "title": "Step Id"
     },
     "surface": {
+      "default": "kazenai-agent-builder",
       "title": "Surface",
       "type": "string"
+    },
+    "timestamp_ms": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Timestamp Ms"
+    },
+    "tokens": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tokens"
     },
     "tokens_used": {
       "anyOf": [
@@ -300,6 +369,13 @@
       ],
       "default": null,
       "title": "Tokens Used"
+    },
+    "touched_node_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Touched Node Ids",
+      "type": "array"
     },
     "trace_id": {
       "anyOf": [
@@ -317,6 +393,11 @@
       "title": "Ts Ms",
       "type": "integer"
     },
+    "verification_result": {
+      "additionalProperties": true,
+      "title": "Verification Result",
+      "type": "object"
+    },
     "workspace_id": {
       "default": "default",
       "title": "Workspace Id",
@@ -324,14 +405,6 @@
     }
   },
   "required": [
-    "ts_ms",
-    "event_id",
-    "org_id",
-    "project_id",
-    "surface",
-    "agent_id",
-    "agent_role",
-    "run_id",
     "event_type"
   ],
   "title": "KazenEvent",

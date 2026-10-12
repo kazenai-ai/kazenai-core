@@ -12,6 +12,7 @@ def test_langchain_callback_emits_event() -> None:
     h.on_llm_end({"llm_output": {"token_usage": {"total_tokens": 42}}})
     assert len(events) == 1
     assert events[0].event_type == "model.call"
+    assert events[0].schema_version == "1.2"
 
 
 def test_retry_queue_roundtrip(tmp_path) -> None:

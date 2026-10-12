@@ -161,7 +161,7 @@ def test_patch_anthropic_emits_model_call():
         event_sink=sink,
         usd_per_1k_tokens=0.01,
     )
-    client.messages.create(model="claude-3-haiku", messages=[{"role": "user", "content": "hi"}])
+    client.messages.create(model="claude-haiku-4-5", messages=[{"role": "user", "content": "hi"}])
     undo()
     assert any(e.event_type == "model.call" for e in sink.events)
 
@@ -283,7 +283,7 @@ def test_monitor_entrypoint_wraps_anthropic_client(monkeypatch, tmp_path):
         timeline_path=str(timeline),
     )
     client.messages.create(
-        model="claude-3-haiku-20240307",
+        model="claude-haiku-4-5-20251001",
         messages=[{"role": "user", "content": "hi"}],
     )
     assert timeline.exists()

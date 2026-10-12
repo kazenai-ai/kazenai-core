@@ -146,6 +146,10 @@ def test_reserve_omits_empty_feature(monkeypatch):
 
 def test_reconcile_forwards_feature_slug(monkeypatch):
     monkeypatch.setenv("KAZENAI_FINOPS_URL", "http://finops:8090")
+    # Legacy reconcile path (Control lifecycle off).
+    monkeypatch.delenv("KAZENAI_FINOPS_CONTROL", raising=False)
+    monkeypatch.delenv("KAZENAI_CONTROL", raising=False)
+    monkeypatch.setenv("KAZENAI_ENV", "development")
     captured_payloads: list[dict] = []
     reconcile_resp = MagicMock()
     reconcile_resp.__enter__ = lambda s: reconcile_resp
@@ -155,25 +159,17 @@ def test_reconcile_forwards_feature_slug(monkeypatch):
         captured_payloads.append(json.loads(req.data.decode("utf-8")))
         return reconcile_resp
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=True, **kwargs):
-            self._target = target
+    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
+        ok = reconcile_budget(
+            org_id="o",
+            workspace_id="prod",
+            run_id="r",
+            reserved_cost_usd=0.1,
+            actual_cost_usd=0.08,
+            feature="support-bot",
+        )
 
-        def start(self):
-            if self._target:
-                self._target()
-
-    with patch("kazenai.spine.guard.threading.Thread", _ImmediateThread):
-        with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
-            reconcile_budget(
-                org_id="o",
-                workspace_id="prod",
-                run_id="r",
-                reserved_cost_usd=0.1,
-                actual_cost_usd=0.08,
-                feature="support-bot",
-            )
-
+    assert ok is True
     assert captured_payloads[0]["feature"] == "support-bot"
 
 

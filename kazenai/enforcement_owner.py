@@ -56,6 +56,26 @@ def _normalize_owner(owner: str) -> str:
 
 
 @contextlib.contextmanager
+def claim_configured_enforcement_owner(
+    *,
+    decision_id: Optional[str] = None,
+    reservation_id: Optional[str] = None,
+    call_id: Optional[str] = None,
+    attempt: Optional[int] = None,
+) -> Iterator[EnforcementOwnerState]:
+    """Claim the env-configured owner (default ``sdk``). Use in monitor wrappers."""
+    owner = configured_enforcement_owner() or "sdk"
+    with claim_enforcement_owner(
+        owner,
+        decision_id=decision_id,
+        reservation_id=reservation_id,
+        call_id=call_id,
+        attempt=attempt,
+    ) as state:
+        yield state
+
+
+@contextlib.contextmanager
 def claim_enforcement_owner(
     owner: str = "sdk",
     *,
@@ -130,8 +150,24 @@ def bind_decision_refs(
     return updated
 
 
+def gateway_owns_enforcement() -> bool:
+    """True when gateway is the configured/active economic owner (SDK must not reserve)."""
+    env = configured_enforcement_owner()
+    if env == "gateway":
+        return True
+    current = _OWNER.get()
+    return bool(current and current.owner == "gateway")
+
+
 def should_skip_sdk_reserve() -> bool:
-    """True when an outer owner already authorized this attempt (avoid double-charge)."""
+    """True when an outer owner already authorized this attempt (avoid double-charge).
+
+    Gateway-owned deployments skip SDK reserve entirely — admission belongs to the
+    gateway process. R11's matched-reservation rule applies to FinOps callback
+    debit suppression, not to this SDK noop path.
+    """
+    if gateway_owns_enforcement():
+        return True
     current = _OWNER.get()
     return bool(current and current.reservation_id)
 

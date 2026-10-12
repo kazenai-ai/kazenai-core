@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from .lifecycle import StreamOutcome, StreamUsage
-from .proxy import StreamIteratorProxy, StreamManagerProxy
+from .proxy import (
+    AsyncStreamIteratorProxy,
+    AsyncStreamManagerProxy,
+    StreamIteratorProxy,
+    StreamManagerProxy,
+)
 
 
 SURFACE_CREATE_STREAM = "openai.chat.completions.create.stream"
@@ -192,5 +197,77 @@ def wrap_openai_manager(
         manager,
         attempt_factory=attempt_factory,
         wrap_entered_stream=wrap_openai_entered_helper,
+        enter_scope=enter_scope,
+    )
+
+
+async def _final_usage_from_helper_async(stream: Any) -> Optional[StreamUsage]:
+    get_final = getattr(stream, "get_final_completion", None)
+    if not callable(get_final):
+        return None
+    try:
+        completion = get_final()
+        if hasattr(completion, "__await__"):
+            completion = await completion
+    except Exception:
+        return None
+    _text, usage = observe_openai_chunk({"choices": [], "usage": _value(completion, "usage")})
+    return usage
+
+
+def wrap_openai_async_stream(upstream: Any, attempt: Any) -> AsyncStreamIteratorProxy:
+    return AsyncStreamIteratorProxy(
+        upstream,
+        attempt,
+        observe_chunk=observe_openai_chunk,
+        extract_final_usage=None,
+    )
+
+
+class OpenAIAsyncEnteredStreamProxy(AsyncStreamIteratorProxy):
+    async def until_done(self) -> "OpenAIAsyncEnteredStreamProxy":
+        async for _event in self:
+            pass
+        return self
+
+    async def get_final_completion(self) -> Any:
+        await self.until_done()
+        fn = getattr(self._upstream, "get_final_completion", None)
+        if not callable(fn):
+            raise AttributeError("get_final_completion")
+        try:
+            result = fn()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+        except Exception as exc:
+            if not self._attempt.finalized:
+                from .proxy import _finalize_attempt
+
+                await _finalize_attempt(
+                    self._attempt, StreamOutcome.PROVIDER_ERROR, error=exc
+                )
+            raise
+
+
+def wrap_openai_async_entered_helper(entered: Any, attempt: Any) -> OpenAIAsyncEnteredStreamProxy:
+    return OpenAIAsyncEnteredStreamProxy(
+        entered,
+        attempt,
+        observe_chunk=observe_openai_helper_event,
+        extract_final_usage=_final_usage_from_helper_async,
+    )
+
+
+def wrap_openai_async_manager(
+    manager: Any,
+    *,
+    attempt_factory: Any,
+    enter_scope: Any = None,
+) -> AsyncStreamManagerProxy:
+    return AsyncStreamManagerProxy(
+        manager,
+        attempt_factory=attempt_factory,
+        wrap_entered_stream=wrap_openai_async_entered_helper,
         enter_scope=enter_scope,
     )
