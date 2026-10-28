@@ -11,7 +11,7 @@ from kazenai.auth.jwt import JwtVerifyConfig, JwtVerifyError, verify_hs256_token
 from kazenai.schema import KazenEvent as CoreEvent
 
 
-def test_p0_rejects_prefix_extended_supabase_issuer() -> None:
+def test_rejects_prefix_extended_supabase_issuer() -> None:
     secret = "p0-kazenai-jwt-secret-32b!!"
     trusted = "https://example.supabase.co/auth/v1"
     token = jwt.encode(
@@ -37,7 +37,7 @@ def test_p0_rejects_prefix_extended_supabase_issuer() -> None:
     assert excinfo.value.category == "issuer"
 
 
-def test_p0_tokens_17_survives_core_schema() -> None:
+def test_tokens_17_survives_core_schema() -> None:
     raw = {
         "schema_version": "1.2",
         "ts_ms": 1_700_000_000_000,

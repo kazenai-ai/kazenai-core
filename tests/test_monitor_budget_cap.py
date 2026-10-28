@@ -50,7 +50,7 @@ def _standalone_env(monkeypatch) -> None:
     monkeypatch.setenv("KAZENAI_FINOPS_RESERVATION_MODE", "fail_open")
 
 
-def test_p31_enforcement_pending_blocks_concurrent_projection():
+def test_enforcement_pending_blocks_concurrent_projection():
     """Direct unit proof: in-flight projected hold consumes shared headroom."""
     projected = 1.0
     enf = Enforcement(max_cost_usd=projected * 1.1)
@@ -64,7 +64,7 @@ def test_p31_enforcement_pending_blocks_concurrent_projection():
     assert snap["cumulative_cost_usd"] == pytest.approx(0.05)
 
 
-def test_p31_cap_boundary_allows_when_projection_fits(monkeypatch):
+def test_cap_boundary_allows_when_projection_fits(monkeypatch):
     """Cap at exactly the projected floor must allow (projected_total > limit denies)."""
     _standalone_env(monkeypatch)
     projected = _precall_projection_usd({"model": "gpt-4o"}, None)
@@ -75,7 +75,7 @@ def test_p31_cap_boundary_allows_when_projection_fits(monkeypatch):
     assert client.chat.completions.calls == 1
 
 
-def test_p31_sequential_calls_exhaust_local_cap(monkeypatch):
+def test_sequential_calls_exhaust_local_cap(monkeypatch):
     _standalone_env(monkeypatch)
     client = FakeOpenAI()
     first_proj = _precall_projection_usd({"model": "gpt-4o-mini"}, None)
@@ -96,7 +96,7 @@ def test_p31_sequential_calls_exhaust_local_cap(monkeypatch):
     assert client.chat.completions.calls == 1
 
 
-def test_p31_concurrent_calls_respect_shared_local_enforcement(monkeypatch):
+def test_concurrent_calls_respect_shared_local_enforcement(monkeypatch):
     """While one call holds projected spend, siblings must deny before provider."""
     _standalone_env(monkeypatch)
     projected = _precall_projection_usd({"model": "gpt-4o"}, None)
@@ -154,7 +154,7 @@ def test_p31_concurrent_calls_respect_shared_local_enforcement(monkeypatch):
     assert client.chat.completions.calls == 1
 
 
-def test_p31_unknown_model_is_blocked_before_dispatch_by_default(monkeypatch):
+def test_unknown_model_is_blocked_before_dispatch_by_default(monkeypatch):
     """Unknown model has no price → blocked pre-dispatch (fail closed), never projected as $0."""
     _standalone_env(monkeypatch)
     with pytest.raises(UnknownModelError):
@@ -169,21 +169,21 @@ def test_p31_unknown_model_is_blocked_before_dispatch_by_default(monkeypatch):
     assert client.chat.completions.calls == 0
 
 
-def test_p31_unknown_model_with_explicit_rate_is_projected(monkeypatch):
+def test_unknown_model_with_explicit_rate_is_projected(monkeypatch):
     """An explicit usd_per_1k_tokens is a caller-supplied price and bounds the call."""
     _standalone_env(monkeypatch)
     projected = _precall_projection_usd({"model": "totally-unknown-model-xyz"}, 0.01)
     assert projected > 0
 
 
-def test_p31_unknown_model_warn_opt_in_projects_zero_in_dev(monkeypatch):
+def test_unknown_model_warn_opt_in_projects_zero_in_dev(monkeypatch):
     """The dev-only warn opt-in keeps the historical $0 projection."""
     _standalone_env(monkeypatch)
     monkeypatch.setenv("KAZENAI_UNKNOWN_MODEL_POLICY", "warn")
     assert _precall_projection_usd({"model": "totally-unknown-model-xyz"}, None) == 0.0
 
 
-def test_p31_finops_unavailable_still_honors_local_cap(monkeypatch):
+def test_finops_unavailable_still_honors_local_cap(monkeypatch):
     """Shared authority unreachable + fail_open reservation must not bypass local cap."""
     _standalone_env(monkeypatch)
     monkeypatch.setenv("KAZENAI_FINOPS_URL", "http://127.0.0.1:1")  # nothing listening

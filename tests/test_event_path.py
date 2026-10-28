@@ -69,7 +69,7 @@ def _finops_style_event_in():
     return KazenEventIn
 
 
-def test_p35_normalize_ingest_url_strips_v1_events():
+def test_normalize_ingest_url_strips_v1_events():
     assert normalize_ingest_base_url("http://finops:8090/v1/events") == "http://finops:8090"
     assert normalize_ingest_base_url("http://finops:8090/v1/events/") == "http://finops:8090"
     assert normalize_ingest_base_url("http://finops:8090") == "http://finops:8090"
@@ -77,7 +77,7 @@ def test_p35_normalize_ingest_url_strips_v1_events():
     assert ingest_post_url("http://finops:8090") == "http://finops:8090/v1/events"
 
 
-def test_p35_kazen_event_preserves_lineage_ids():
+def test_kazen_event_preserves_lineage_ids():
     ev = KazenEvent(
         schema_version="1.2",
         ts_ms=now_ms(),
@@ -158,7 +158,7 @@ class _DualIngestServer:
         return f"http://127.0.0.1:{self.port}"
 
 
-def test_p35_dual_ingest_same_run_join_no_double_settle(tmp_path):
+def test_dual_ingest_same_run_join_no_double_settle(tmp_path):
     finops = _DualIngestServer(settle=True)
     lens = _DualIngestServer(settle=True)  # would settle if mis-routed; header must prevent
     finops.start()
@@ -251,7 +251,7 @@ def test_p35_dual_ingest_same_run_join_no_double_settle(tmp_path):
         lens.stop()
 
 
-def test_p35_cross_tenant_rejected_by_finops_store_logic():
+def test_cross_tenant_rejected_by_finops_store_logic():
     """Document Control rule: org_mismatch rejects (mirrors FinOps store)."""
     KazenEventIn = _finops_style_event_in()
 
@@ -279,7 +279,7 @@ def test_p35_cross_tenant_rejected_by_finops_store_logic():
     assert ev.org_id != principal_org
 
 
-def test_p35_derived_header_skips_settle_spy(tmp_path):
+def test_derived_header_skips_settle_spy(tmp_path):
     """Lens→FinOps derived must not settle (accounting singular)."""
     server = _DualIngestServer(settle=True)
     server.start()
@@ -320,7 +320,7 @@ def test_p35_derived_header_skips_settle_spy(tmp_path):
         server.stop()
 
 
-def test_p35_finops_event_in_keeps_lineage_fields():
+def test_finops_event_in_keeps_lineage_fields():
     KazenEventIn = _finops_style_event_in()
 
     ev = KazenEventIn.model_validate(

@@ -38,7 +38,7 @@ class FakeOpenAI:
         self.chat = FakeChat()
 
 
-def test_final1_g06_monitor_signature_has_no_api_key_parameter():
+def test_monitor_signature_has_no_api_key_parameter():
     """Documented README snippets pass api_key=...; the real signature does not."""
     sig = inspect.signature(monitor_fn)
     assert "api_key" not in sig.parameters
@@ -46,7 +46,7 @@ def test_final1_g06_monitor_signature_has_no_api_key_parameter():
     # api_key is env-only today (KAZENAI_FINOPS_API_KEY / KAZENAI_API_KEY).
 
 
-def test_final1_g06_tiny_cap_denies_before_provider_invocation(monkeypatch):
+def test_tiny_cap_denies_before_provider_invocation(monkeypatch):
     """$0.000001 local cap + known higher-priced fake call → provider invocations == 0.
 
     Isolates the *local* public-monitor contract: no FinOps URL, fail-open reservation so
@@ -65,9 +65,9 @@ def test_final1_g06_tiny_cap_denies_before_provider_invocation(monkeypatch):
     client = FakeOpenAI()
     monitor(
         client,
-        org_id="org-final1-p02",
-        project_id="proj-final1-p02",
-        workspace_id="ws-final1-p02",
+        org_id="org-tiny-cap",
+        project_id="proj-tiny-cap",
+        workspace_id="ws-tiny-cap",
         agent_id="agent-tiny-cap",
         max_budget_usd=0.000001,
     )
@@ -91,7 +91,7 @@ def test_final1_g06_tiny_cap_denies_before_provider_invocation(monkeypatch):
     )
 
 
-def test_final1_g06_budget_exceeded_is_exported():
+def test_budget_exceeded_is_exported():
     from kazenai import __all__ as public_all
 
     assert "BudgetExceeded" in public_all

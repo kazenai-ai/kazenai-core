@@ -14,7 +14,7 @@ import pytest
 
 from kazenai import monitor
 from kazenai.model_pricing import model_cost_usd_per_million
-from test_train_b_streaming import _FakeAnthropic, _FakeAnthropicEventStream, _FakeOpenAI, _standalone
+from test_streaming_contract import _FakeAnthropic, _FakeAnthropicEventStream, _FakeOpenAI, _standalone
 
 IN_TOKENS = 1000
 OUT_TOKENS = 100
