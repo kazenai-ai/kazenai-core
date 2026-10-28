@@ -6,7 +6,7 @@
 One shared file, copied into each repository's ``scripts/``. Requires Python
 3.11+ and ``license-expression`` (AboutCode, Apache-2.0); nothing else.
 
-  check    Evaluate a Syft JSON SBOM against license-policy.toml. Real SPDX
+  check    Evaluate a Syft JSON SBOM against licence-gate/license-policy.toml. SPDX
            expressions are evaluated (OR = best allowed alternative, AND = every
            operand, WITH = base licence plus exception). Exit 1 on any denial.
   notices  Write third-party notices from the packages actually resolved: a
@@ -14,7 +14,7 @@ One shared file, copied into each repository's ``scripts/``. Requires Python
            dependency graph. Each package keeps its own licence and NOTICE text.
 
 Package class comes from the purl (pkg:deb / pkg:apk / pkg:rpm / binary = OS),
-never from SBOM dependency edges. See docs in license-policy.toml.
+never from SBOM dependency edges. See docs in licence-gate/license-policy.toml.
 """
 
 from __future__ import annotations
@@ -489,15 +489,15 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("check", help="evaluate a Syft JSON SBOM")
     c.add_argument("--syft", action="append", required=True, help="Syft JSON SBOM (repeatable)")
     c.add_argument("--context", choices=["hosted-image", "library", "frontend", "service-env"], required=True)
-    c.add_argument("--policy", default="license-policy.toml")
-    c.add_argument("--exceptions", default="license-exceptions.toml")
+    c.add_argument("--policy", default="licence-gate/license-policy.toml")
+    c.add_argument("--exceptions", default="licence-gate/license-exceptions.toml")
     c.add_argument("--lock", action="append", help="requirements.lock / package-lock.json for first-party digests")
     c.add_argument("--report", help="write a JSON report")
     c.add_argument("--today", help="override today's date (tests)")
     n = sub.add_parser("notices", help="generate third-party notices")
     n.add_argument("--title", required=True)
     n.add_argument("--out", required=True)
-    n.add_argument("--policy", default="license-policy.toml")
+    n.add_argument("--policy", default="licence-gate/license-policy.toml")
     n.add_argument("--lock", action="append", help="requirements.lock (Python): notices cover these packages")
     n.add_argument("--exclude", action="append", help="first-party package names to leave out")
     n.add_argument("--python", default=sys.executable, help="interpreter of the environment to read")

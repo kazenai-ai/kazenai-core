@@ -95,8 +95,8 @@ jobs:
           fi
 
   licence-gate:
-    # Licence gate + CycloneDX SBOM (scripts/license_policy.py, license-policy.toml,
-    # license-exceptions.toml). Blocking: a denied licence, an invalid SBOM or stale
+    # Licence gate + CycloneDX SBOM (scripts/license_policy.py, licence-gate/license-policy.toml,
+    # licence-gate/license-exceptions.toml). Blocking: a denied licence, an invalid SBOM or stale
     # generated notices fail the build. Actions are pinned by commit SHA.
     runs-on: ubuntu-latest
     steps:
