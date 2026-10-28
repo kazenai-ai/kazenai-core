@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -11,7 +12,9 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, TypeVar, Union
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Any, Callable, Mapping, Optional, TypeVar, Union
 
 from ..context import get_current_context
 from ..cost_engine import TokenCostEngine
@@ -23,10 +26,34 @@ from ..lifecycle_transitions import (
 )
 from ..schema import KazenEvent, new_id, now_ms, validate_payload
 from ..sinks import EventSink, HttpSink, HttpSinkConfig, MemorySink, MultiSink
+from . import org_policy as _org_policy
+from . import transport as _transport
 
 _log = logging.getLogger("kazenai.spine")
 _T = TypeVar("_T")
-_COST_ENGINE = TokenCostEngine()
+
+
+class _LazyCostEngine:
+    """The shared engine, built on first use.
+
+    Importing the SDK must never fail (0.11). Constructing the engine validates
+    Control pricing configuration (for example ``KAZENAI_TIER_MISMATCH_MULTIPLIER``),
+    so that error now surfaces on the first priced Control call, not at
+    ``import kazenai`` in a customer process or a FinOps/Lens service.
+    """
+
+    def __init__(self) -> None:
+        self._engine: TokenCostEngine | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        engine = self.__dict__.get("_engine")
+        if engine is None:
+            engine = TokenCostEngine()
+            self.__dict__["_engine"] = engine
+        return getattr(engine, name)
+
+
+_COST_ENGINE: Any = _LazyCostEngine()
 
 _default_sink_lock = threading.Lock()
 _default_sink_instance: EventSink | None = None
@@ -359,6 +386,11 @@ class ReservationHandle:
     enforcement_owner: str = ""
     lifecycle_version: str = ""
     config_version: str = ""
+    # Bearer authority for this one reservation. Never logged or repr'd.
+    settlement_capability: Optional[str] = field(default=None, repr=False)
+    # Agent FinOps was unreachable and the organization chose fail-open: the call
+    # runs with local caps only, and there is no reservation to settle.
+    fail_open: bool = False
 
     def __float__(self) -> float:
         return float(self.reserved_cost_usd)
@@ -405,6 +437,25 @@ def _micros_to_usd(micros: int) -> float:
     return float(micros) / 1_000_000.0
 
 
+def _owner_noop_handle(*, call_id: str | None, attempt: int) -> ReservationHandle:
+    """Noop handle when an outer owner (gateway) already authorized this attempt.
+
+    It has no settlement capability, so the SDK never advances or settles the
+    owner's reservation (no second debit).
+    """
+    from ..enforcement_owner import gateway_owns_enforcement, get_enforcement_owner
+
+    owner = get_enforcement_owner()
+    return ReservationHandle(
+        reserved_cost_usd=0.0,
+        reservation_id=(owner.reservation_id if owner else "") or "",
+        call_id=(owner.call_id if owner else None) or (call_id or ""),
+        attempt=int((owner.attempt if owner and owner.attempt is not None else None) or attempt or 1),
+        lifecycle=_lifecycle_budget_enabled() or gateway_owns_enforcement(),
+        decision_id=(owner.decision_id if owner else "") or "",
+    )
+
+
 def reserve_budget(
     *,
     org_id: str,
@@ -433,25 +484,10 @@ def reserve_budget(
 
     Attribution fields prefer ambient ``AttributionContext`` then these kwargs.
     """
-    from ..enforcement_owner import (
-        assert_sdk_may_reserve,
-        bind_decision_refs,
-        gateway_owns_enforcement,
-        get_enforcement_owner,
-        should_skip_sdk_reserve,
-    )
+    from ..enforcement_owner import assert_sdk_may_reserve, bind_decision_refs, should_skip_sdk_reserve
 
     if should_skip_sdk_reserve():
-        owner = get_enforcement_owner()
-        # Gateway-owned attempts: SDK returns a noop handle (no second debit).
-        return ReservationHandle(
-            reserved_cost_usd=0.0,
-            reservation_id=(owner.reservation_id if owner else "") or "",
-            call_id=(owner.call_id if owner else None) or (call_id or ""),
-            attempt=int((owner.attempt if owner and owner.attempt is not None else None) or attempt or 1),
-            lifecycle=_lifecycle_budget_enabled() or gateway_owns_enforcement(),
-            decision_id=(owner.decision_id if owner else "") or "",
-        )
+        return _owner_noop_handle(call_id=call_id, attempt=attempt)
 
     assert_sdk_may_reserve()
 
@@ -520,7 +556,7 @@ def reserve_budget(
     )
     try:
         timeout_s = float(os.getenv("KAZENAI_FINOPS_RESERVE_TIMEOUT_S", "0.8") or "0.8")
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        with _transport.urlopen(req, timeout=timeout_s) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
             reserved = float(payload.get("estimated_cost_usd") or 0.0)
             decision_id = str(payload.get("decision_id") or "") or None
@@ -554,6 +590,25 @@ def reserve_budget(
 
 def _reserve_timeout_s() -> float:
     return float(os.getenv("KAZENAI_FINOPS_RESERVE_TIMEOUT_S", "0.8") or "0.8")
+
+
+def _handle_settlement_evidence(handle: Any) -> dict[str, Any]:
+    """Token components and modifiers for FinOps to re-price; never raises."""
+    pricing = getattr(handle, "pricing_call", None)
+    if pricing is None:
+        return {}
+    try:
+        from ..request_pricing import settlement_evidence
+
+        return settlement_evidence(pricing)
+    except Exception:
+        _log.debug("settlement evidence unavailable", exc_info=True)
+        return {}
+
+
+def _is_tier_breaker(status: int | None, detail: Any) -> bool:
+    """FinOps 409 ``tier_breaker``: admission is closed until an operator resolves it (1.4)."""
+    return status == 409 and isinstance(detail, dict) and str(detail.get("error_code") or "") == "tier_breaker"
 
 
 def _parse_finops_http_error(exc: Exception) -> tuple[int | None, Any]:
@@ -617,6 +672,10 @@ def _capture_settlement_binding(
 _LIFECYCLE_CAP_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 
 
+def _effective_api_key(api_key: str | None) -> str:
+    return (api_key if api_key is not None else _api_key()).strip()
+
+
 def _lifecycle_cap_cache_key(
     base: str,
     *,
@@ -656,11 +715,12 @@ def _fetch_server_lifecycle_capabilities(
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=_reserve_timeout_s()) as resp:
+        with _transport.urlopen(req, timeout=_reserve_timeout_s()) as resp:
             payload = json.loads(resp.read().decode("utf-8") or "{}")
             if not isinstance(payload, dict):
                 payload = {}
             _LIFECYCLE_CAP_CACHE[cache_key] = (now, payload)
+            _org_policy.remember(url, org_id, payload, api_key=_effective_api_key(api_key))
             return payload
     except Exception:
         _log.debug("server lifecycle capability fetch failed", exc_info=True)
@@ -689,7 +749,7 @@ async def _fetch_server_lifecycle_capabilities_async(
     headers = _finops_headers(org_id, api_key=api_key)
     try:
         timeout = httpx.Timeout(_reserve_timeout_s())
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with _transport.async_session(timeout) as client:
             resp = await client.get(f"{url}/v1/budget/lifecycle", headers=headers)
             if resp.status_code != 200:
                 return {}
@@ -697,6 +757,7 @@ async def _fetch_server_lifecycle_capabilities_async(
             if not isinstance(payload, dict):
                 payload = {}
             _LIFECYCLE_CAP_CACHE[cache_key] = (now, payload)
+            _org_policy.remember(url, org_id, payload, api_key=_effective_api_key(api_key))
             return payload
     except Exception:
         _log.debug("async server lifecycle capability fetch failed", exc_info=True)
@@ -715,7 +776,9 @@ def _looks_like_lifecycle_capabilities(payload: Mapping[str, Any]) -> bool:
     return isinstance(payload.get("effective_lifecycle"), Mapping)
 
 
-def _apply_lifecycle_capability_gate(caps: Mapping[str, Any]) -> None:
+def _apply_lifecycle_capability_gate(
+    caps: Mapping[str, Any], *, base: str = "", org_id: str = "", api_key: str | None = None
+) -> None:
     """Shared Control gate after capabilities are fetched (sync or async)."""
     from kazenai.lifecycle_config import (
         ClientServerLifecycleMismatch,
@@ -726,6 +789,8 @@ def _apply_lifecycle_capability_gate(caps: Mapping[str, Any]) -> None:
     # not be interpreted as a negative capability advertisement.
     if not _looks_like_lifecycle_capabilities(caps):
         if enforcement_fail_closed() or finops_reservation_fail_closed():
+            if _org_policy.allows_fail_open(base, org_id, api_key=_effective_api_key(api_key)):
+                return  # the reserve decides; it fails open only if FinOps stays unreachable
             raise BudgetUnavailable(
                 "FinOps lifecycle capabilities unavailable before Control reserve"
             )
@@ -748,7 +813,7 @@ def _ensure_server_lifecycle_compatible(
     if not resolve_effective_lifecycle().uses_reservation_settlement:
         return
     caps = _fetch_server_lifecycle_capabilities(base, org_id=org_id, api_key=api_key)
-    _apply_lifecycle_capability_gate(caps)
+    _apply_lifecycle_capability_gate(caps, base=base, org_id=org_id, api_key=api_key)
 
 
 async def _ensure_server_lifecycle_compatible_async(
@@ -765,7 +830,7 @@ async def _ensure_server_lifecycle_compatible_async(
     caps = await _fetch_server_lifecycle_capabilities_async(
         base, org_id=org_id, api_key=api_key
     )
-    _apply_lifecycle_capability_gate(caps)
+    _apply_lifecycle_capability_gate(caps, base=base, org_id=org_id, api_key=api_key)
 
 
 def _handle_to_reservation(
@@ -798,6 +863,11 @@ def _handle_to_reservation(
             else {}
         )
     bind = dict(binding or {})
+    capability = str(payload.get("settlement_capability") or "").strip()
+    # A successful lifecycle admission without a capability must not fall
+    # through to owner-only settlement.
+    if payload.get("allowed", True) is not False and str(payload.get("reservation_id") or "") and not capability:
+        raise BudgetUnavailable("lifecycle reserve response omitted settlement_capability")
     return ReservationHandle(
         reserved_cost_usd=_micros_to_usd(reserved_micros),
         reservation_id=str(payload.get("reservation_id") or ""),
@@ -834,6 +904,70 @@ def _handle_to_reservation(
         enforcement_owner=str(bind.get("enforcement_owner") or ""),
         lifecycle_version=str(bind.get("lifecycle_version") or ""),
         config_version=str(bind.get("config_version") or ""),
+        settlement_capability=capability or None,
+    )
+
+
+def _catalog_reserve_overlay(micros: int) -> tuple[int, dict[str, Any]]:
+    """Attach the active catalog decision. The integer micros from that decision win over the float ceil."""
+    from kazenai.pricing_context import current_pricing
+
+    pricing = current_pricing()
+    decision = getattr(pricing, "decision", None)
+    if decision is None or not hasattr(decision, "reserve_body_fields"):
+        return micros, {}
+    fields = dict(decision.reserve_body_fields())
+    exact = getattr(decision, "reserved_micro_usd", None)
+    if isinstance(exact, int) and not isinstance(exact, bool) and exact >= 0:
+        micros = exact
+    return micros, fields
+
+
+_UNAVAILABLE_STATUSES = frozenset({408, 429})
+
+
+def _unavailable_status(status: Optional[int]) -> bool:
+    """FinOps answered with "not now", never with a decision about this call."""
+    code = int(status or 0)
+    return code in _UNAVAILABLE_STATUSES or code >= 500
+
+
+def _is_unavailable(exc: BaseException) -> bool:
+    """No answer from FinOps: no connection, a timeout, a dropped connection, or 408/429/5xx."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return _unavailable_status(exc.code)
+    if isinstance(exc, OSError):  # URLError, TimeoutError, ConnectionError, socket errors
+        return True
+    import http.client
+
+    if isinstance(exc, http.client.HTTPException):
+        return True
+    try:
+        import httpx
+
+        return isinstance(exc, httpx.TransportError)
+    except Exception:
+        return False
+
+
+def _allows_fail_open(base: str, org_id: str, binding: Mapping[str, str]) -> bool:
+    return _org_policy.allows_fail_open(base, org_id, api_key=str(binding.get("finops_api_key") or ""))
+
+
+def _fail_open_handle(
+    *, cid: str, att: int, base: str, org_id: str, binding: Mapping[str, str], reason: str
+) -> ReservationHandle:
+    """The organization chose fail-open: run with local caps only, nothing to settle."""
+    reported = _org_policy.reported_org_id(base, org_id, api_key=str(binding.get("finops_api_key") or ""))
+    _org_policy.note_fail_open_call(reported, reason)
+    return ReservationHandle(
+        reserved_cost_usd=0.0,
+        call_id=cid,
+        attempt=att,
+        lifecycle=True,
+        fail_open=True,
+        finops_base_url=base,
+        org_id=org_id,
     )
 
 
@@ -882,7 +1016,7 @@ def _reserve_lifecycle(
             est_usd = 0.01
     if est_usd <= 0:
         est_usd = 0.01
-    micros = _usd_to_micros_ceil(est_usd)
+    micros, pricing_fields = _catalog_reserve_overlay(_usd_to_micros_ceil(est_usd))
     binding = _capture_settlement_binding(base=base, org_id=org_id, workspace_id=workspace_id)
     _ensure_server_lifecycle_compatible(
         base,
@@ -899,6 +1033,7 @@ def _reserve_lifecycle(
         "estimated_usd_micros": micros,
         "run_id": run_id or "",
     }
+    body.update(pricing_fields)
     _apply_attribution(
         body,
         feature=feature,
@@ -935,7 +1070,7 @@ def _reserve_lifecycle(
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=_reserve_timeout_s()) as resp:
+            with _transport.urlopen(req, timeout=_reserve_timeout_s()) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
                 handle = _handle_to_reservation(
                     payload,
@@ -959,16 +1094,24 @@ def _reserve_lifecycle(
                 return handle
         except urllib.error.HTTPError as exc:
             status, detail = _parse_finops_http_error(exc)
-            if status == 402:
+            if status == 402 or _is_tier_breaker(status, detail):
                 reason = detail.get("reason") or detail.get("error_code") or "budget exhausted"
                 raise BudgetExceeded(f"Pre-call reservation denied: {reason}") from exc
             if finops_reservation_fail_closed():
+                if _unavailable_status(status) and _allows_fail_open(base, org_id, binding):
+                    return _fail_open_handle(
+                        cid=cid, att=att, base=base, org_id=org_id, binding=binding, reason=f"HTTP {status}"
+                    )
                 raise BudgetUnavailable(f"Pre-call reservation HTTP {status}") from exc
             return ReservationHandle(reserved_cost_usd=0.0, call_id=cid, attempt=att, lifecycle=True)
         except (BudgetExceeded, BudgetUnavailable):
             raise
         except Exception as exc:
             if finops_reservation_fail_closed() or enforcement_fail_closed():
+                if _is_unavailable(exc) and _allows_fail_open(base, org_id, binding):
+                    return _fail_open_handle(
+                        cid=cid, att=att, base=base, org_id=org_id, binding=binding, reason=type(exc).__name__
+                    )
                 raise BudgetUnavailable(f"Pre-call reservation unavailable: {exc}") from exc
             return ReservationHandle(reserved_cost_usd=0.0, call_id=cid, attempt=att, lifecycle=True)
 
@@ -1015,7 +1158,7 @@ def _build_lifecycle_reserve_body(
             est_usd = 0.01
     if est_usd <= 0:
         est_usd = 0.01
-    micros = _usd_to_micros_ceil(est_usd)
+    micros, pricing_fields = _catalog_reserve_overlay(_usd_to_micros_ceil(est_usd))
     body: dict[str, Any] = {
         "lifecycle_version": "reservation.lifecycle.v1",
         "call_id": identities.call_id,
@@ -1026,6 +1169,7 @@ def _build_lifecycle_reserve_body(
         "estimated_usd_micros": micros,
         "run_id": run_id or "",
     }
+    body.update(pricing_fields)
     _apply_attribution(
         body,
         feature=feature,
@@ -1107,7 +1251,7 @@ async def _reserve_lifecycle_async(
         ),
     ) as span:
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with _transport.async_session(timeout) as client:
                 resp = await client.post(
                     f"{base}/v1/budget/reserve",
                     content=json.dumps(body),
@@ -1124,7 +1268,22 @@ async def _reserve_lifecycle_async(
                     reason = detail.get("reason") or detail.get("error_code") or "budget exhausted"
                     raise BudgetExceeded(f"Pre-call reservation denied: {reason}")
                 if resp.status_code >= 400:
+                    status, detail = _parse_finops_http_error(
+                        httpx.HTTPStatusError("reserve", request=resp.request, response=resp)
+                    )
+                    if _is_tier_breaker(status, detail):
+                        reason = detail.get("reason") or "tier breaker open"
+                        raise BudgetExceeded(f"Pre-call reservation denied: {reason}")
                     if finops_reservation_fail_closed():
+                        if _unavailable_status(resp.status_code) and _allows_fail_open(base, org_id, binding):
+                            return _fail_open_handle(
+                                cid=cid,
+                                att=att,
+                                base=base,
+                                org_id=org_id,
+                                binding=binding,
+                                reason=f"HTTP {resp.status_code}",
+                            )
                         raise BudgetUnavailable(
                             f"Pre-call reservation HTTP {resp.status_code}"
                         )
@@ -1156,6 +1315,10 @@ async def _reserve_lifecycle_async(
             raise
         except Exception as exc:
             if finops_reservation_fail_closed() or enforcement_fail_closed():
+                if _is_unavailable(exc) and _allows_fail_open(base, org_id, binding):
+                    return _fail_open_handle(
+                        cid=cid, att=att, base=base, org_id=org_id, binding=binding, reason=type(exc).__name__
+                    )
                 raise BudgetUnavailable(f"Pre-call reservation unavailable: {exc}") from exc
             return ReservationHandle(reserved_cost_usd=0.0, call_id=cid, attempt=att, lifecycle=True)
 
@@ -1182,7 +1345,13 @@ async def reserve_budget_async(
     """Async admission using native httpx I/O (no asyncio.to_thread + urlopen)."""
     import httpx
 
-    from ..enforcement_owner import bind_decision_refs
+    from ..enforcement_owner import assert_sdk_may_reserve, bind_decision_refs, should_skip_sdk_reserve
+
+    # Same single-enforcement-owner rule as the sync path.
+    if should_skip_sdk_reserve():
+        return _owner_noop_handle(call_id=call_id, attempt=attempt)
+
+    assert_sdk_may_reserve()
 
     base = _finops_url()
     if not base:
@@ -1241,7 +1410,7 @@ async def reserve_budget_async(
     )
     timeout = httpx.Timeout(_reserve_timeout_s())
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with _transport.async_session(timeout) as client:
             resp = await client.post(
                 f"{base}/v1/budget/check",
                 content=json.dumps({k: v for k, v in body.items() if v is not None}),
@@ -1331,6 +1500,18 @@ def _ack_settle_intent(path: str | None, fingerprint: str | None) -> None:
         _log.debug("settle intent ack failed", exc_info=True)
 
 
+def _release_settle_intent(path: str | None, fingerprint: str | None) -> None:
+    """The send finished without an ack: hand the journaled record to the flusher now."""
+    if not path or not fingerprint:
+        return
+    try:
+        from kazenai.spine.settle_queue import get_settle_queue
+
+        get_settle_queue().release(path, fingerprint=fingerprint)
+    except Exception:
+        _log.debug("settle intent release failed", exc_info=True)
+
+
 def _enqueue_settle_intent(
     payload: dict[str, Any],
     *,
@@ -1348,6 +1529,79 @@ def _enqueue_settle_intent(
         _log.debug("settle intent enqueue failed", exc_info=True)
 
 
+class SettleRejected(Exception):
+    """FinOps refused a settle body for good; sending it again cannot succeed."""
+
+    def __init__(self, status: int, error_code: str) -> None:
+        super().__init__(f"settle rejected: HTTP {status} {error_code}")
+        self.status = status
+        self.error_code = error_code
+
+
+class SettleRetry(Exception):
+    """A settle POST should be tried again after ``retry_after_s`` seconds."""
+
+    def __init__(self, status: int, retry_after_s: float | None = None) -> None:
+        super().__init__(f"settle retry: HTTP {status}")
+        self.status = status
+        self.retry_after_s = retry_after_s
+
+
+# A 409 with these codes means FinOps already holds a different intent for the key.
+_PERMANENT_SETTLE_CONFLICTS = frozenset({"idempotency_payload_mismatch"})
+
+
+def _retry_after_seconds(exc: urllib.error.HTTPError, *, cap_s: float = 300.0) -> float | None:
+    """Read Retry-After as delay seconds. HTTP dates and values above the cap are bounded."""
+    headers = getattr(exc, "headers", None)
+    raw = ""
+    if headers is not None:
+        raw = str(headers.get("Retry-After") or "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = _http_date_delay_seconds(raw)
+        if seconds is None:
+            return None
+    if seconds < 0:
+        return None
+    return min(cap_s, seconds)
+
+
+def _http_date_delay_seconds(raw: str) -> float | None:
+    """Seconds until an HTTP-date Retry-After. Unparseable dates are ignored."""
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (when - datetime.now(timezone.utc)).total_seconds()
+
+
+def _permanent_settle_rejection(exc: urllib.error.HTTPError) -> SettleRejected | None:
+    """Permanent 4xx, except 408 and 429, which the caller retries.
+
+    The reason is the error code only. The response body is not kept.
+    """
+    status = int(getattr(exc, "code", 0) or 0)
+    if status in (408, 429) or not (400 <= status < 500):
+        return None
+    try:
+        parsed = json.loads(exc.read().decode("utf-8") or "{}")
+    except Exception:
+        parsed = {}
+    detail = parsed.get("detail") if isinstance(parsed, dict) else None
+    code = str((detail or {}).get("error_code") or "") if isinstance(detail, dict) else ""
+    if status == 409 and code not in _PERMANENT_SETTLE_CONFLICTS:
+        code = code or "http_409"
+    return SettleRejected(status, code or f"http_{status}")
+
+
 def _post_settle_sync(
     base: str,
     org_id: str,
@@ -1357,7 +1611,10 @@ def _post_settle_sync(
     api_key: str | None = None,
     enqueue_on_failure: bool = True,
     journal_before_send: bool = True,
+    raise_on_permanent: bool = False,
 ) -> bool:
+    """POST one settle body. ``raise_on_permanent`` lets recovery tell a final
+    refusal (``SettleRejected``) apart from a failure worth retrying."""
     event = str(payload.get("event") or "")
     from kazenai.otel import build_control_attributes, control_span, link_recovery_span
 
@@ -1399,6 +1656,7 @@ def _post_settle_sync(
             _log.error("settle intent journal failed before send: %s", exc)
             raise
 
+    acked = False
     try:
         # Build/inject headers *inside* the settlement span so traceparent
         # parentage matches the active client span.
@@ -1410,7 +1668,7 @@ def _post_settle_sync(
                 headers=_finops_headers(org_id, api_key=api_key),
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            with _transport.urlopen(req, timeout=timeout_s) as resp:
                 raw = resp.read() if hasattr(resp, "read") else b"{}"
                 try:
                     parsed = json.loads(raw.decode("utf-8") or "{}")
@@ -1421,6 +1679,7 @@ def _post_settle_sync(
                 ack = _finops_result_ack(parsed, event=event)
                 if ack:
                     _ack_settle_intent(journal_path, journal_fp)
+                    acked = True
                 elif enqueue_on_failure and not journal_path:
                     code = str(parsed.get("result") or parsed.get("status") or "unacked")
                     _enqueue_settle_intent(
@@ -1431,6 +1690,23 @@ def _post_settle_sync(
                         error=f"result_{code}",
                     )
                 return ack
+    except urllib.error.HTTPError as exc:
+        rejection = _permanent_settle_rejection(exc) if raise_on_permanent else None
+        if rejection is not None:
+            raise rejection from exc
+        status = int(getattr(exc, "code", 0) or 0)
+        if raise_on_permanent and (status in (408, 429) or status >= 500):
+            raise SettleRetry(status, _retry_after_seconds(exc)) from exc
+        _log.debug("lifecycle settle %s failed", event, exc_info=True)
+        if enqueue_on_failure and not journal_path:
+            _enqueue_settle_intent(
+                payload,
+                base=base,
+                org_id=org_id,
+                api_key=api_key,
+                error=f"http_{getattr(exc, 'code', 0)}",
+            )
+        return False
     except Exception:
         _log.debug("lifecycle settle %s failed", event, exc_info=True)
         if enqueue_on_failure and not journal_path:
@@ -1442,6 +1718,9 @@ def _post_settle_sync(
                 error="transport_error",
             )
         return False
+    finally:
+        if journal_path and not acked:
+            _release_settle_intent(journal_path, journal_fp)
 
 
 def reconcile_budget(
@@ -1478,6 +1757,9 @@ def reconcile_budget(
     )
     if not base:
         return False
+    if handle is not None and handle.fail_open:
+        # Ran under the organization's fail-open setting: no reservation to settle.
+        return False
     if use_lifecycle and not (handle and handle.reservation_id):
         _log.warning(
             "lifecycle settle skipped: missing reservation_id (refusing legacy reconcile in Control)"
@@ -1490,6 +1772,8 @@ def reconcile_budget(
         # provider_started must already have been recorded before dispatch.
         # Reconcile only settles known usage; never invents a second start.
         actual_micros = _usd_to_micros_ceil(float(actual_cost_usd))
+        if not handle.settlement_capability:
+            raise BudgetUnavailable("lifecycle reservation has no settlement capability")
         payload = build_settle_payload(
             reservation_id=handle.reservation_id,
             call_id=handle.call_id or f"call_{run_id}",
@@ -1497,6 +1781,8 @@ def reconcile_budget(
             org_id=settle_org,
             event="usage_known",
             actual_usd_micros=actual_micros,
+            settlement_capability=handle.settlement_capability,
+            usage_evidence=_handle_settlement_evidence(handle),
         )
         return _post_settle_sync(
             base, settle_org, payload, timeout_s=2.0, api_key=settle_key
@@ -1518,7 +1804,7 @@ def reconcile_budget(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=2.0):
+        with _transport.urlopen(req, timeout=2.0):
             return True
     except Exception:
         _log.debug("legacy reconcile failed", exc_info=True)
@@ -1555,6 +1841,9 @@ async def reconcile_budget_async(
     )
     if not base:
         return False
+    if handle is not None and handle.fail_open:
+        # Ran under the organization's fail-open setting: no reservation to settle.
+        return False
     if use_lifecycle and not (handle and handle.reservation_id):
         _log.warning(
             "lifecycle settle skipped: missing reservation_id (refusing legacy reconcile in Control)"
@@ -1568,10 +1857,12 @@ async def reconcile_budget_async(
     journal_fp: str | None = None
     lifecycle_payload: dict[str, Any] | None = None
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with _transport.async_session(timeout) as client:
             if use_lifecycle and handle is not None and handle.reservation_id:
                 # provider_started must already have been recorded before dispatch.
                 actual_micros = _usd_to_micros_ceil(float(actual_cost_usd))
+                if not handle.settlement_capability:
+                    raise BudgetUnavailable("lifecycle reservation has no settlement capability")
                 payload = build_settle_payload(
                     reservation_id=handle.reservation_id,
                     call_id=handle.call_id or f"call_{run_id}",
@@ -1579,6 +1870,8 @@ async def reconcile_budget_async(
                     org_id=settle_org,
                     event="usage_known",
                     actual_usd_micros=actual_micros,
+                    settlement_capability=handle.settlement_capability,
+                    usage_evidence=_handle_settlement_evidence(handle),
                 )
                 lifecycle_payload = payload
                 # Journal before await so CancelledError / ConnectError keep intent.
@@ -1612,6 +1905,7 @@ async def reconcile_budget_async(
                         "lifecycle settle usage_known failed HTTP %s",
                         resp.status_code,
                     )
+                    _release_settle_intent(journal_path, journal_fp)
                     return False
                 try:
                     parsed = resp.json()
@@ -1622,6 +1916,8 @@ async def reconcile_budget_async(
                 ack = _finops_result_ack(parsed, event="usage_known")
                 if ack:
                     _ack_settle_intent(journal_path, journal_fp)
+                else:
+                    _release_settle_intent(journal_path, journal_fp)
                 return ack
 
             payload = {
@@ -1653,6 +1949,8 @@ async def reconcile_budget_async(
                 )
             except Exception:
                 _log.debug("async settle journal on failure failed", exc_info=True)
+        else:
+            _release_settle_intent(journal_path, journal_fp)
         if isinstance(exc, (_asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
             raise
         _log.debug("async reconcile failed", exc_info=True)
@@ -1706,6 +2004,8 @@ def signal_reservation_event(
         if event == "usage_known"
         else None
     )
+    if not handle.settlement_capability:
+        raise BudgetUnavailable("lifecycle reservation has no settlement capability")
     payload = build_settle_payload(
         reservation_id=handle.reservation_id,
         call_id=handle.call_id or f"call_{run_id}",
@@ -1713,6 +2013,8 @@ def signal_reservation_event(
         org_id=settle_org,
         event=event,
         actual_usd_micros=actual_micros,
+        settlement_capability=handle.settlement_capability,
+        usage_evidence=_handle_settlement_evidence(handle),
     )
     if not _post_settle_sync(
         base, settle_org, payload, timeout_s=_reserve_timeout_s(), api_key=settle_key
@@ -1768,6 +2070,8 @@ async def signal_reservation_event_async(
         if event == "usage_known"
         else None
     )
+    if not handle.settlement_capability:
+        raise BudgetUnavailable("lifecycle reservation has no settlement capability")
     payload = build_settle_payload(
         reservation_id=handle.reservation_id,
         call_id=handle.call_id or f"call_{run_id}",
@@ -1775,6 +2079,8 @@ async def signal_reservation_event_async(
         org_id=settle_org,
         event=event,
         actual_usd_micros=actual_micros,
+        settlement_capability=handle.settlement_capability,
+        usage_evidence=_handle_settlement_evidence(handle),
     )
     journal_path: str | None = None
     journal_fp: str | None = None
@@ -1787,13 +2093,14 @@ async def signal_reservation_event_async(
             api_key=settle_key,
             error="pre_send",
         )
-        async with httpx.AsyncClient(timeout=httpx.Timeout(_reserve_timeout_s())) as client:
+        async with _transport.async_session(httpx.Timeout(_reserve_timeout_s())) as client:
             resp = await client.post(
                 f"{base}/v1/budget/settle",
                 content=json.dumps(payload),
                 headers=_finops_headers(settle_org, api_key=settle_key),
             )
             if resp.status_code >= 400:
+                _release_settle_intent(journal_path, journal_fp)
                 if required:
                     raise BudgetUnavailable(
                         f"reservation lifecycle {event} failed with HTTP {resp.status_code}"
@@ -1811,6 +2118,8 @@ async def signal_reservation_event_async(
             ack = _finops_result_ack(parsed, event=event)
             if ack:
                 _ack_settle_intent(journal_path, journal_fp)
+            else:
+                _release_settle_intent(journal_path, journal_fp)
             if not ack and required:
                 raise BudgetUnavailable(
                     f"reservation lifecycle {event} not acknowledged "
@@ -1833,6 +2142,8 @@ async def signal_reservation_event_async(
                 )
             except Exception:
                 _log.debug("async lifecycle journal on failure failed", exc_info=True)
+        else:
+            _release_settle_intent(journal_path, journal_fp)
         if isinstance(exc, (_asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
             raise
         if required:
@@ -1880,6 +2191,417 @@ def _resolve_context(
     return org_id, workspace_id, run_id, agent_id, project_id or "default", None
 
 
+# --- guarded calls --------------------------------------------------------------
+#
+# One lifecycle for every guarded call, the same one ``monitor()`` follows:
+#   reserve -> provider_started (before dispatch) -> provider call ->
+#   usage_known (exact cost) | usage_known $0 (definitive provider refusal) |
+#   outcome_unknown (error, cancellation or no usage: the hold stays for reconciliation).
+# Lifecycle signalling after the call is best effort: the settle journal redelivers
+# what does not land, and the provider result (or error) is always returned.
+
+
+def _guard_sdk_settles(reserved: Any) -> bool:
+    """True when this call owns a lifecycle reservation it must advance and settle.
+
+    A gateway-owned (noop) handle, a fail-open handle or a local handle without a
+    reservation has nothing for the SDK to settle.
+    """
+    return (
+        isinstance(reserved, ReservationHandle)
+        and bool(reserved.lifecycle and reserved.reservation_id and reserved.settlement_capability)
+        and not reserved.fail_open
+    )
+
+
+def _guard_legacy(reserved: Any) -> bool:
+    """Legacy ``/v1/budget/check`` reservations are plain floats."""
+    return not isinstance(reserved, ReservationHandle)
+
+
+def _usage_total_tokens(resp: Any) -> int | None:
+    usage = getattr(resp, "usage", None)
+    if usage is None and isinstance(resp, dict):
+        usage = resp.get("usage")
+    if usage is None:
+        return None
+    total = usage.get("total_tokens") if isinstance(usage, dict) else getattr(usage, "total_tokens", None)
+    try:
+        return int(total) if total is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _guard_llm_price(model: str, resp: Any) -> tuple[int | None, float | None]:
+    """Tokens and cost; cost is None when the provider reported no usage (never a false $0)."""
+    usage = getattr(resp, "usage", None)
+    if usage is None and isinstance(resp, dict):
+        usage = resp.get("usage")
+    if usage is None:
+        return None, None
+    return _extract_usage_cost(model, resp)
+
+
+def _guard_signal(*, org_id: str, run_id: str, reserved: Any, event: str, actual_cost_usd: float | None = None) -> None:
+    try:
+        signal_reservation_event(
+            org_id=org_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved,
+            event=event,
+            actual_cost_usd=actual_cost_usd,
+        )
+    except Exception:
+        _log.warning("guarded call: reservation %s not recorded", event, exc_info=True)
+
+
+async def _guard_signal_async(
+    *, org_id: str, run_id: str, reserved: Any, event: str, actual_cost_usd: float | None = None
+) -> None:
+    try:
+        await signal_reservation_event_async(
+            org_id=org_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved,
+            event=event,
+            actual_cost_usd=actual_cost_usd,
+        )
+    except Exception:
+        _log.warning("guarded call: reservation %s not recorded", event, exc_info=True)
+
+
+def _guard_start(*, org_id: str, run_id: str, reserved: Any) -> None:
+    """Record provider_started before dispatch; refuse the call when it can't be recorded."""
+    if not _guard_sdk_settles(reserved):
+        return
+    try:
+        signal_reservation_event(
+            org_id=org_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved,
+            event="provider_started",
+            required=finops_reservation_fail_closed(),
+        )
+    except BaseException:
+        # The provider was not called: give the reservation back.
+        _guard_signal(org_id=org_id, run_id=run_id, reserved=reserved, event="cancel_before_call")
+        raise
+
+
+async def _guard_start_async(*, org_id: str, run_id: str, reserved: Any) -> None:
+    if not _guard_sdk_settles(reserved):
+        return
+    try:
+        await signal_reservation_event_async(
+            org_id=org_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved,
+            event="provider_started",
+            required=finops_reservation_fail_closed(),
+        )
+    except BaseException:
+        await _guard_signal_async(org_id=org_id, run_id=run_id, reserved=reserved, event="cancel_before_call")
+        raise
+
+
+def _guard_rejected(exc: BaseException) -> bool:
+    from ..provider_errors import is_definitive_provider_rejection
+
+    return isinstance(exc, Exception) and is_definitive_provider_rejection(exc)
+
+
+def _guard_legacy_reconcile(
+    *, org_id: str, workspace_id: str, run_id: str, reserved: Any, actual_cost_usd: float, feature: str
+) -> None:
+    try:
+        reconcile_budget(
+            org_id=org_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved,
+            actual_cost_usd=actual_cost_usd,
+            feature=feature,
+        )
+    except Exception:
+        _log.warning("guarded call: legacy reconcile failed", exc_info=True)
+
+
+async def _guard_legacy_reconcile_async(
+    *, org_id: str, workspace_id: str, run_id: str, reserved: Any, actual_cost_usd: float, feature: str
+) -> None:
+    try:
+        await reconcile_budget_async(
+            org_id=org_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            reserved_cost_usd=reserved,
+            actual_cost_usd=actual_cost_usd,
+            feature=feature,
+        )
+    except Exception:
+        _log.warning("guarded call: legacy reconcile failed", exc_info=True)
+
+
+def _guard_failed(*, exc: BaseException, org_id: str, workspace_id: str, run_id: str, reserved: Any, feature: str) -> None:
+    """After a provider error or cancellation. A definitive refusal settles $0;
+    anything else may have been billed, so the hold stays pending."""
+    rejected = _guard_rejected(exc)
+    if _guard_sdk_settles(reserved):
+        if rejected:
+            _guard_signal(org_id=org_id, run_id=run_id, reserved=reserved, event="usage_known", actual_cost_usd=0.0)
+        else:
+            _guard_signal(org_id=org_id, run_id=run_id, reserved=reserved, event="outcome_unknown")
+    elif _guard_legacy(reserved) and rejected:
+        _guard_legacy_reconcile(
+            org_id=org_id, workspace_id=workspace_id, run_id=run_id, reserved=reserved, actual_cost_usd=0.0, feature=feature
+        )
+
+
+async def _guard_failed_async(
+    *, exc: BaseException, org_id: str, workspace_id: str, run_id: str, reserved: Any, feature: str
+) -> None:
+    rejected = _guard_rejected(exc)
+    if _guard_sdk_settles(reserved):
+        if rejected:
+            await _guard_signal_async(org_id=org_id, run_id=run_id, reserved=reserved, event="usage_known", actual_cost_usd=0.0)
+        else:
+            await _guard_signal_async(org_id=org_id, run_id=run_id, reserved=reserved, event="outcome_unknown")
+    elif _guard_legacy(reserved) and rejected:
+        await _guard_legacy_reconcile_async(
+            org_id=org_id, workspace_id=workspace_id, run_id=run_id, reserved=reserved, actual_cost_usd=0.0, feature=feature
+        )
+
+
+def _guard_settle(
+    *, org_id: str, workspace_id: str, run_id: str, reserved: Any, actual_cost_usd: float | None, feature: str
+) -> None:
+    """One settlement per call, with the exact cost."""
+    if _guard_sdk_settles(reserved):
+        if actual_cost_usd is None:
+            _guard_signal(org_id=org_id, run_id=run_id, reserved=reserved, event="outcome_unknown")
+            return
+        try:
+            settled = reconcile_budget(
+                org_id=org_id,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                reserved_cost_usd=reserved,
+                actual_cost_usd=actual_cost_usd,
+                feature=feature,
+            )
+        except Exception:
+            _log.warning("guarded call: settlement failed", exc_info=True)
+            settled = False
+        if settled is not True:
+            # Keep the exact amount as the intent; the journal redelivers it.
+            _guard_signal(org_id=org_id, run_id=run_id, reserved=reserved, event="usage_known", actual_cost_usd=actual_cost_usd)
+        return
+    if _guard_legacy(reserved) and actual_cost_usd is not None:
+        _guard_legacy_reconcile(
+            org_id=org_id, workspace_id=workspace_id, run_id=run_id, reserved=reserved,
+            actual_cost_usd=actual_cost_usd, feature=feature,
+        )
+
+
+async def _guard_settle_async(
+    *, org_id: str, workspace_id: str, run_id: str, reserved: Any, actual_cost_usd: float | None, feature: str
+) -> None:
+    if _guard_sdk_settles(reserved):
+        if actual_cost_usd is None:
+            await _guard_signal_async(org_id=org_id, run_id=run_id, reserved=reserved, event="outcome_unknown")
+            return
+        try:
+            settled = await reconcile_budget_async(
+                org_id=org_id,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                reserved_cost_usd=reserved,
+                actual_cost_usd=actual_cost_usd,
+                feature=feature,
+            )
+        except Exception:
+            _log.warning("guarded call: settlement failed", exc_info=True)
+            settled = False
+        if settled is not True:
+            await _guard_signal_async(
+                org_id=org_id, run_id=run_id, reserved=reserved, event="usage_known", actual_cost_usd=actual_cost_usd
+            )
+        return
+    if _guard_legacy(reserved) and actual_cost_usd is not None:
+        await _guard_legacy_reconcile_async(
+            org_id=org_id, workspace_id=workspace_id, run_id=run_id, reserved=reserved,
+            actual_cost_usd=actual_cost_usd, feature=feature,
+        )
+
+
+def _guard_reserve_event(
+    *,
+    event_type: str,
+    ids: tuple[str, str, str, str, str | None, str],
+    parent_step_id: str | None,
+    agent_role: str,
+    surface: str,
+    model: str,
+    feature: str,
+    allowed: bool,
+    projected_cost_usd: float | None,
+    reserved_cost_usd: float | None = None,
+    reason: str | None = None,
+    event_sink: EventSink | None,
+) -> None:
+    oid, wid, rid, aid, pid, step_id = ids
+    extra: dict[str, Any] = {}
+    if reserved_cost_usd is not None:
+        extra["reserved_cost_usd"] = reserved_cost_usd
+    if reason is not None:
+        extra["reason"] = reason
+    _emit_event(
+        _budget_event(
+            event_type=event_type,
+            org_id=oid,
+            workspace_id=wid,
+            run_id=rid,
+            agent_id=aid,
+            agent_role=agent_role,
+            surface=surface,
+            project_id=pid or "default",
+            step_id=step_id,
+            parent_step_id=parent_step_id,
+            model=model,
+            feature=feature,
+            allowed=allowed,
+            projected_cost_usd=projected_cost_usd,
+            **extra,
+        ),
+        event_sink=event_sink,
+    )
+
+
+def _guard_model_event(
+    *,
+    ids: tuple[str, str, str, str, str | None, str],
+    parent_step_id: str | None,
+    agent_role: str,
+    surface: str,
+    model: str,
+    feature: str,
+    tokens_used: int | None,
+    cost_usd: float | None,
+    elapsed_ms: float,
+    event_sink: EventSink | None,
+) -> None:
+    oid, wid, rid, aid, pid, step_id = ids
+    _emit_event(
+        KazenEvent(
+            schema_version="1.2",
+            ts_ms=now_ms(),
+            event_id=new_id(),
+            org_id=oid,
+            workspace_id=wid,
+            project_id=pid or "default",
+            surface=surface,
+            agent_id=aid,
+            agent_role=agent_role,
+            run_id=rid,
+            step_id=step_id,
+            parent_step_id=parent_step_id,
+            event_type="model.call",
+            tokens_used=tokens_used,
+            # None when usage was missing or unpriceable: unknown, never a free call.
+            cost_usd=None if cost_usd is None else float(cost_usd),
+            latency_ms=int(elapsed_ms),
+            payload={"model": model, "feature": feature, "elapsed_ms": elapsed_ms},
+        ),
+        event_sink=event_sink,
+    )
+
+
+def _guarded_call(
+    fn: Callable[[], _T],
+    *,
+    price: Callable[[Any], tuple[int | None, float | None]],
+    model: str,
+    org_id: str,
+    workspace_id: str,
+    run_id: str,
+    agent_id: str,
+    agent_role: str,
+    surface: str,
+    project_id: str | None,
+    feature: str,
+    projected_cost_usd: float | None,
+    input_tokens: int,
+    event_sink: EventSink | None,
+    increment_step: bool,
+) -> _T:
+    ids = _resolve_context(
+        org_id=org_id,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        agent_id=agent_id,
+        project_id=project_id,
+    )
+    oid, wid, rid, _aid, _pid, _step = ids
+    parent_step_id = get_current_context().parent_step_id if get_current_context() else None
+    common = dict(
+        ids=ids,
+        parent_step_id=parent_step_id,
+        agent_role=agent_role,
+        surface=surface,
+        model=model,
+        feature=feature,
+        event_sink=event_sink,
+    )
+
+    try:
+        reserved = reserve_budget(
+            org_id=oid,
+            workspace_id=wid,
+            run_id=rid,
+            model=model,
+            input_tokens=input_tokens,
+            estimated_cost_usd=projected_cost_usd,
+            increment_step=increment_step,
+            feature=feature,
+        )
+    except (BudgetExceeded, BudgetUnavailable) as exc:
+        _guard_reserve_event(
+            event_type="finops.budget.denied", allowed=False, reason=str(exc),
+            projected_cost_usd=projected_cost_usd, **common,
+        )
+        raise
+    _guard_reserve_event(
+        event_type="finops.budget.reserve", allowed=True, reserved_cost_usd=float(reserved),
+        projected_cost_usd=projected_cost_usd, **common,
+    )
+
+    _guard_start(org_id=oid, run_id=rid, reserved=reserved)
+    started = time.perf_counter()
+    try:
+        resp = fn()
+    except BaseException as exc:
+        _guard_failed(exc=exc, org_id=oid, workspace_id=wid, run_id=rid, reserved=reserved, feature=feature)
+        raise
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    try:
+        tokens_used, actual_cost = price(resp)
+    except BaseException:
+        # Billed but not priceable (for example an unknown model under the block policy).
+        _guard_signal(org_id=oid, run_id=rid, reserved=reserved, event="outcome_unknown")
+        raise
+    _guard_settle(org_id=oid, workspace_id=wid, run_id=rid, reserved=reserved, actual_cost_usd=actual_cost, feature=feature)
+    _guard_model_event(tokens_used=tokens_used, cost_usd=actual_cost, elapsed_ms=elapsed_ms, **common)
+    return resp
+
+
+def _is_async_callable(fn: Any) -> bool:
+    """Coroutine functions, partials of them, and objects with an async ``__call__``."""
+    if inspect.iscoroutinefunction(fn):
+        return True
+    call = getattr(fn, "__call__", None)
+    return call is not None and inspect.iscoroutinefunction(call)
+
+
 def guarded_llm_call(
     fn: Callable[[], _T],
     *,
@@ -1897,128 +2619,24 @@ def guarded_llm_call(
     event_sink: EventSink | None = None,
     increment_step: bool = True,
 ) -> _T:
-    """Reserve budget, invoke provider, reconcile actual cost, emit typed events."""
-    oid, wid, rid, aid, pid, step_id = _resolve_context(
+    """Reserve budget, invoke provider, settle the actual cost once, emit typed events."""
+    return _guarded_call(
+        fn,
+        price=lambda resp: _guard_llm_price(model, resp),
+        model=model,
         org_id=org_id,
         workspace_id=workspace_id,
         run_id=run_id,
         agent_id=agent_id,
-        project_id=project_id,
-    )
-    parent_step_id = get_current_context().parent_step_id if get_current_context() else None
-
-    reserved = 0.0
-    try:
-        reserved = reserve_budget(
-            org_id=oid,
-            workspace_id=wid,
-            run_id=rid,
-            model=model,
-            input_tokens=input_tokens,
-            estimated_cost_usd=projected_cost_usd,
-            increment_step=increment_step,
-            feature=feature,
-        )
-        _emit_event(
-            _budget_event(
-                event_type="finops.budget.reserve",
-                org_id=oid,
-                workspace_id=wid,
-                run_id=rid,
-                agent_id=aid,
-                agent_role=agent_role,
-                surface=surface,
-                project_id=pid or "default",
-                step_id=step_id,
-                parent_step_id=parent_step_id,
-                model=model,
-                feature=feature,
-                allowed=True,
-                reserved_cost_usd=float(reserved),
-                projected_cost_usd=projected_cost_usd,
-            ),
-            event_sink=event_sink,
-        )
-    except BudgetExceeded as exc:
-        _emit_event(
-            _budget_event(
-                event_type="finops.budget.denied",
-                org_id=oid,
-                workspace_id=wid,
-                run_id=rid,
-                agent_id=aid,
-                agent_role=agent_role,
-                surface=surface,
-                project_id=pid or "default",
-                step_id=step_id,
-                parent_step_id=parent_step_id,
-                model=model,
-                feature=feature,
-                allowed=False,
-                reason=str(exc),
-                projected_cost_usd=projected_cost_usd,
-            ),
-            event_sink=event_sink,
-        )
-        raise
-    except BudgetUnavailable as exc:
-        _emit_event(
-            _budget_event(
-                event_type="finops.budget.denied",
-                org_id=oid,
-                workspace_id=wid,
-                run_id=rid,
-                agent_id=aid,
-                agent_role=agent_role,
-                surface=surface,
-                project_id=pid or "default",
-                step_id=step_id,
-                parent_step_id=parent_step_id,
-                model=model,
-                feature=feature,
-                allowed=False,
-                reason=str(exc),
-                projected_cost_usd=projected_cost_usd,
-            ),
-            event_sink=event_sink,
-        )
-        raise
-
-    started = time.perf_counter()
-    resp = fn()
-    elapsed_ms = (time.perf_counter() - started) * 1000.0
-    tokens_used, actual_cost = _extract_usage_cost(model, resp)
-
-    reconcile_budget(
-        org_id=oid,
-        workspace_id=wid,
-        run_id=rid,
-        reserved_cost_usd=reserved,
-        actual_cost_usd=actual_cost,
-        feature=feature,
-    )
-
-    model_event = KazenEvent(
-        schema_version="1.2",
-        ts_ms=now_ms(),
-        event_id=new_id(),
-        org_id=oid,
-        workspace_id=wid,
-        project_id=pid or "default",
-        surface=surface,
-        agent_id=aid,
         agent_role=agent_role,
-        run_id=rid,
-        step_id=step_id,
-        parent_step_id=parent_step_id,
-        event_type="model.call",
-        tokens_used=tokens_used,
-        cost_usd=actual_cost,
-        latency_ms=int(elapsed_ms),
-        payload={"model": model, "feature": feature, "elapsed_ms": elapsed_ms},
+        surface=surface,
+        project_id=project_id,
+        feature=feature,
+        projected_cost_usd=projected_cost_usd,
+        input_tokens=input_tokens,
+        event_sink=event_sink,
+        increment_step=increment_step,
     )
-    _emit_event(model_event, event_sink=event_sink)
-    return resp
 
 
 async def aguarded_llm_call(
@@ -2038,17 +2656,28 @@ async def aguarded_llm_call(
     event_sink: EventSink | None = None,
     increment_step: bool = True,
 ) -> Any:
-    """Async wrapper — awaits async ``fn`` or runs sync ``fn`` in a thread."""
-    oid, wid, rid, aid, pid, step_id = _resolve_context(
+    """Async wrapper: awaits async ``fn`` (or whatever ``fn`` returns, if awaitable)
+    and runs a sync ``fn`` in a thread. The provider call is settled only after
+    its result is complete."""
+    ids = _resolve_context(
         org_id=org_id,
         workspace_id=workspace_id,
         run_id=run_id,
         agent_id=agent_id,
         project_id=project_id,
     )
+    oid, wid, rid, _aid, _pid, _step = ids
     parent_step_id = get_current_context().parent_step_id if get_current_context() else None
+    common = dict(
+        ids=ids,
+        parent_step_id=parent_step_id,
+        agent_role=agent_role,
+        surface=surface,
+        model=model,
+        feature=feature,
+        event_sink=event_sink,
+    )
 
-    reserved = 0.0
     try:
         reserved = await reserve_budget_async(
             org_id=oid,
@@ -2060,109 +2689,40 @@ async def aguarded_llm_call(
             increment_step=increment_step,
             feature=feature,
         )
-        _emit_event(
-            _budget_event(
-                event_type="finops.budget.reserve",
-                org_id=oid,
-                workspace_id=wid,
-                run_id=rid,
-                agent_id=aid,
-                agent_role=agent_role,
-                surface=surface,
-                project_id=pid or "default",
-                step_id=step_id,
-                parent_step_id=parent_step_id,
-                model=model,
-                feature=feature,
-                allowed=True,
-                reserved_cost_usd=float(reserved),
-                projected_cost_usd=projected_cost_usd,
-            ),
-            event_sink=event_sink,
-        )
-    except BudgetExceeded as exc:
-        _emit_event(
-            _budget_event(
-                event_type="finops.budget.denied",
-                org_id=oid,
-                workspace_id=wid,
-                run_id=rid,
-                agent_id=aid,
-                agent_role=agent_role,
-                surface=surface,
-                project_id=pid or "default",
-                step_id=step_id,
-                parent_step_id=parent_step_id,
-                model=model,
-                feature=feature,
-                allowed=False,
-                reason=str(exc),
-                projected_cost_usd=projected_cost_usd,
-            ),
-            event_sink=event_sink,
+    except (BudgetExceeded, BudgetUnavailable) as exc:
+        _guard_reserve_event(
+            event_type="finops.budget.denied", allowed=False, reason=str(exc),
+            projected_cost_usd=projected_cost_usd, **common,
         )
         raise
-    except BudgetUnavailable as exc:
-        _emit_event(
-            _budget_event(
-                event_type="finops.budget.denied",
-                org_id=oid,
-                workspace_id=wid,
-                run_id=rid,
-                agent_id=aid,
-                agent_role=agent_role,
-                surface=surface,
-                project_id=pid or "default",
-                step_id=step_id,
-                parent_step_id=parent_step_id,
-                model=model,
-                feature=feature,
-                allowed=False,
-                reason=str(exc),
-                projected_cost_usd=projected_cost_usd,
-            ),
-            event_sink=event_sink,
-        )
-        raise
+    _guard_reserve_event(
+        event_type="finops.budget.reserve", allowed=True, reserved_cost_usd=float(reserved),
+        projected_cost_usd=projected_cost_usd, **common,
+    )
 
+    await _guard_start_async(org_id=oid, run_id=rid, reserved=reserved)
     started = time.perf_counter()
-    if asyncio.iscoroutinefunction(fn):
-        resp = await fn()
-    else:
-        resp = await asyncio.to_thread(fn)
+    try:
+        if _is_async_callable(fn):
+            resp = await fn()
+        else:
+            resp = await asyncio.to_thread(fn)
+        # ``lambda: async_client.create(...)`` returns an un-awaited coroutine.
+        while inspect.isawaitable(resp):
+            resp = await resp
+    except BaseException as exc:
+        await _guard_failed_async(exc=exc, org_id=oid, workspace_id=wid, run_id=rid, reserved=reserved, feature=feature)
+        raise
     elapsed_ms = (time.perf_counter() - started) * 1000.0
-    tokens_used, actual_cost = _extract_usage_cost(model, resp)
-
-    await reconcile_budget_async(
-        org_id=oid,
-        workspace_id=wid,
-        run_id=rid,
-        reserved_cost_usd=reserved,
-        actual_cost_usd=actual_cost,
-        feature=feature,
+    try:
+        tokens_used, actual_cost = _guard_llm_price(model, resp)
+    except BaseException:
+        await _guard_signal_async(org_id=oid, run_id=rid, reserved=reserved, event="outcome_unknown")
+        raise
+    await _guard_settle_async(
+        org_id=oid, workspace_id=wid, run_id=rid, reserved=reserved, actual_cost_usd=actual_cost, feature=feature
     )
-    _emit_event(
-        KazenEvent(
-            schema_version="1.2",
-            ts_ms=now_ms(),
-            event_id=new_id(),
-            org_id=oid,
-            workspace_id=wid,
-            project_id=pid or "default",
-            surface=surface,
-            agent_id=aid,
-            agent_role=agent_role,
-            run_id=rid,
-            step_id=step_id,
-            parent_step_id=parent_step_id,
-            event_type="model.call",
-            tokens_used=tokens_used,
-            cost_usd=actual_cost,
-            latency_ms=int(elapsed_ms),
-            payload={"model": model, "feature": feature, "elapsed_ms": elapsed_ms},
-        ),
-        event_sink=event_sink,
-    )
+    _guard_model_event(tokens_used=tokens_used, cost_usd=actual_cost, elapsed_ms=elapsed_ms, **common)
     return resp
 
 
@@ -2181,9 +2741,11 @@ def guarded_embedding_call(
     feature: str = "embedding",
     event_sink: EventSink | None = None,
 ) -> Any:
+    """Like ``guarded_llm_call`` but priced with embedding rates, in one settlement."""
     est_tokens = sum(max(1, len(t) // 4) for t in texts)
-    resp = guarded_llm_call(
+    return _guarded_call(
         fn,
+        price=lambda resp: (_usage_total_tokens(resp), _embedding_cost(model, resp, texts)),
         model=model,
         org_id=org_id,
         workspace_id=workspace_id,
@@ -2193,25 +2755,8 @@ def guarded_embedding_call(
         surface=surface,
         project_id=project_id,
         feature=feature,
+        projected_cost_usd=None,
         input_tokens=est_tokens,
         event_sink=event_sink,
         increment_step=True,
     )
-    # Reconcile with embedding-specific cost if the generic path under-estimated.
-    actual = _embedding_cost(model, resp, texts)
-    oid, wid, rid, _, pid, _ = _resolve_context(
-        org_id=org_id,
-        workspace_id=workspace_id,
-        run_id=run_id,
-        agent_id=agent_id,
-        project_id=project_id,
-    )
-    reconcile_budget(
-        org_id=oid,
-        workspace_id=wid,
-        run_id=rid,
-        reserved_cost_usd=0.0,
-        actual_cost_usd=actual,
-        feature=feature,
-    )
-    return resp
