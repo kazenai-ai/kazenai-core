@@ -1,9 +1,7 @@
 """Prompt-injection detection — canonical, shared across KazenAI services.
 
-This is the single source of truth for injection patterns. Services that
-previously had their own detector (orchestrator ``security/injection_detector``)
-or only ad-hoc regex filters (brain ``modules/content_safety``) should converge
-on this module.
+This is the single source of truth for injection patterns; services should use
+this module rather than their own regex filters.
 
 The core API (``scan`` / ``scan_and_raise``) is framework-agnostic. The
 ``scan_and_raise_or_http`` helper lazily imports FastAPI so that importing this

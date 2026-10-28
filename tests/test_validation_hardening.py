@@ -79,7 +79,7 @@ def test_require_canonical_default_org_fails_in_prod(monkeypatch):
 def test_background_task_context_roundtrip_and_activate():
     from kazenai.context import BackgroundTaskContext, get_current_context
 
-    btc = BackgroundTaskContext(org_id="acme", workspace_id="ws1", agent_id="growthops")
+    btc = BackgroundTaskContext(org_id="acme", workspace_id="ws1", agent_id="support-agent")
     kwargs = dict(btc.to_kwargs())
     kwargs["real_arg"] = 1
     restored = BackgroundTaskContext.pop_kwargs(kwargs)
