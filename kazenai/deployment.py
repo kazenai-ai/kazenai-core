@@ -5,15 +5,94 @@ from __future__ import annotations
 import os
 
 
+from typing import Mapping, Optional
+
+# M10/M13 (0.11): one deployment mode for every service and the SDK.
+#
+#   KAZENAI_DEPLOYMENT_MODE  canonical: development | test | staging | production
+#   KAZENAI_ENV, KAZENAI_FINOPS_ENV, KAZENAI_AGENTLENS_ENV  legacy signals, same aliases
+#
+# Normal calls never raise: on conflicting signals they use the most restrictive
+# mode. Services call validate_deployment_mode_startup() and refuse to start on a
+# conflict or an unknown value; the SDK raises LifecycleConfigError at monitor().
+CANONICAL_MODES = ("development", "test", "staging", "production")
+MODE_ENV_VARS = ("KAZENAI_DEPLOYMENT_MODE", "KAZENAI_ENV", "KAZENAI_FINOPS_ENV", "KAZENAI_AGENTLENS_ENV")
+_MODE_ALIASES = {
+    "development": "development",
+    "dev": "development",
+    "local": "development",
+    "test": "test",
+    "testing": "test",
+    "ci": "test",
+    "staging": "staging",
+    "stage": "staging",
+    "production": "production",
+    "prod": "production",
+    "saas": "production",
+}
+_RESTRICTIVENESS = {"development": 0, "test": 1, "staging": 2, "production": 3}
+PRODUCTION_LIKE_MODES = frozenset({"staging", "production"})
+
+
+class DeploymentModeConflict(ValueError):
+    """Deployment-mode signals disagree, or one is not a known mode."""
+
+
+def deployment_mode_signals(env: Optional[Mapping[str, str]] = None) -> dict[str, str]:
+    """Raw (lower-cased) value of each mode variable that is set."""
+    source = os.environ if env is None else env
+    out: dict[str, str] = {}
+    for name in MODE_ENV_VARS:
+        raw = str(source.get(name, "") or "").strip().lower()
+        if raw:
+            out[name] = raw
+    return out
+
+
+def resolve_deployment_mode(env: Optional[Mapping[str, str]] = None, *, strict: bool = False) -> str:
+    """Canonical mode. ``strict`` raises on unknown values or disagreeing signals."""
+    canonical: dict[str, str] = {}
+    for name, raw in deployment_mode_signals(env).items():
+        mode = _MODE_ALIASES.get(raw)
+        if mode is None:
+            if strict:
+                raise DeploymentModeConflict(
+                    f"{name}={raw!r} is not a deployment mode (use one of {', '.join(CANONICAL_MODES)})"
+                )
+            mode = "production"  # unknown: fail safe
+        canonical[name] = mode
+    if not canonical:
+        return "development"
+    distinct = set(canonical.values())
+    if len(distinct) > 1:
+        if strict:
+            detail = ", ".join(f"{k}={v}" for k, v in sorted(canonical.items()))
+            raise DeploymentModeConflict(f"deployment mode signals disagree: {detail}")
+        return max(distinct, key=_RESTRICTIVENESS.__getitem__)
+    return distinct.pop()
+
+
 def deployment_mode() -> str:
-    return os.getenv(
-        "KAZENAI_DEPLOYMENT_MODE",
-        os.getenv("KAZENAI_ENV", os.getenv("KAZENAI_FINOPS_ENV", "development")),
-    ).strip().lower()
+    return resolve_deployment_mode()
+
+
+def is_production_like(env: Optional[Mapping[str, str]] = None) -> bool:
+    return resolve_deployment_mode(env) in PRODUCTION_LIKE_MODES
 
 
 def is_saas_deployment() -> bool:
-    return deployment_mode() in {"saas", "production", "prod", "staging"}
+    return is_production_like()
+
+
+def validate_deployment_mode_startup(service_name: str) -> str:
+    """Services refuse to start when mode signals conflict or are unknown."""
+    try:
+        return resolve_deployment_mode(strict=True)
+    except DeploymentModeConflict as exc:
+        import logging
+
+        logging.getLogger("kazenai.deployment").critical("%s: %s", service_name, exc)
+        raise SystemExit(f"{service_name}: {exc}") from exc
 
 
 def _env_truthy(name: str) -> bool | None:
@@ -23,21 +102,6 @@ def _env_truthy(name: str) -> bool | None:
     if raw in {"0", "false", "no", "off"}:
         return False
     return None
-
-
-def brain_strict_enabled() -> bool:
-    """Strict Brain when explicitly enabled or in saas/staging/prod deploys."""
-    explicit = _env_truthy("KAZENAI_BRAIN_STRICT")
-    if explicit is not None:
-        return explicit
-    return is_saas_deployment()
-
-
-def graph_strict_enabled() -> bool:
-    explicit = _env_truthy("KAZENAI_GRAPH_STRICT")
-    if explicit is not None:
-        return explicit
-    return is_saas_deployment()
 
 
 def is_dev_env() -> bool:
@@ -60,9 +124,8 @@ def enforcement_fail_closed() -> bool:
         from kazenai.lifecycle_config import resolve_effective_lifecycle
 
         cfg = resolve_effective_lifecycle()
-        if cfg.failure_policy == "fail_open":
-            return not is_dev_env()
-        return True
+        # The resolver already applies the KAZENAI_ENV=dev rule.
+        return cfg.failure_policy != "fail_open"
     except Exception:
         pass
     raw = os.getenv("KAZENAI_ENFORCEMENT_MODE", "").strip().lower()
@@ -79,9 +142,8 @@ def finops_reservation_fail_closed() -> bool:
         from kazenai.lifecycle_config import resolve_effective_lifecycle
 
         cfg = resolve_effective_lifecycle()
-        if cfg.failure_policy == "fail_open":
-            return not is_dev_env()
-        return True
+        # The resolver already applies the KAZENAI_ENV=dev rule.
+        return cfg.failure_policy != "fail_open"
     except Exception:
         pass
     raw = os.getenv("KAZENAI_FINOPS_RESERVATION_MODE", "").strip().lower()
@@ -104,7 +166,6 @@ def validate_prod_fail_closed_posture(service_name: str) -> None:
     if not is_saas_deployment():
         return
     import logging
-    import sys
 
     log = logging.getLogger("kazenai.deployment")
     mode = deployment_mode()
@@ -116,49 +177,6 @@ def validate_prod_fail_closed_posture(service_name: str) -> None:
                 service_name,
                 var,
                 mode,
-            )
-            raise SystemExit(1)
-    if service_name in {"growthops", "kazenai-agent-growthops"}:
-        if _env_truthy("GROWTHOPS_PRODUCT_TRUTH_FAIL_OPEN") is True:
-            log.critical(
-                "%s: GROWTHOPS_PRODUCT_TRUTH_FAIL_OPEN refused when KAZENAI_DEPLOYMENT_MODE=%s",
-                service_name,
-                mode,
-            )
-            raise SystemExit(1)
-    if service_name == "brain" and _env_truthy("KAZENAI_BRAIN_STRICT") is False:
-        log.critical(
-            "brain: KAZENAI_BRAIN_STRICT=0 refused when KAZENAI_DEPLOYMENT_MODE=%s",
-            mode,
-        )
-        raise SystemExit(1)
-    if service_name == "builder":
-        if _env_truthy("KAZENAI_WEBHOOK_FF") is True:
-            log.critical(
-                "builder: KAZENAI_WEBHOOK_FF refused when KAZENAI_DEPLOYMENT_MODE=%s",
-                mode,
-            )
-            raise SystemExit(1)
-        if _env_truthy("KAZENAI_WEBHOOK_INSECURE_DEV") is True and not is_dev_env():
-            log.critical(
-                "builder: KAZENAI_WEBHOOK_INSECURE_DEV refused outside KAZENAI_ENV=dev "
-                "(KAZENAI_DEPLOYMENT_MODE=%s)",
-                mode,
-            )
-            raise SystemExit(1)
-        if not os.getenv("GITHUB_WEBHOOK_SECRET", "").strip():
-            log.critical(
-                "builder: GITHUB_WEBHOOK_SECRET required when KAZENAI_DEPLOYMENT_MODE=%s",
-                mode,
-            )
-            raise SystemExit(1)
-        sandbox_mode = os.getenv("KAZENAI_SECURITY_SANDBOX", "off").strip().lower()
-        if sandbox_mode not in {"docker", "gvisor"}:
-            log.critical(
-                "builder: KAZENAI_SECURITY_SANDBOX must be docker or gvisor when "
-                "KAZENAI_DEPLOYMENT_MODE=%s (got %r)",
-                mode,
-                sandbox_mode,
             )
             raise SystemExit(1)
 

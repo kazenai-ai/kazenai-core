@@ -1,17 +1,26 @@
 """CrewAI integration — Observe listeners + Control kickoff/akickoff wrappers.
 
-Control requires a monitored OpenAI/Anthropic client that is actually bound to
-the crew/agent LLM path (or gateway ownership). Listener callbacks never
+Certified for CrewAI 1.15.26 native OpenAI and Anthropic LLMs: ``kickoff``,
+native ``akickoff`` and ``kickoff_async``, sequential and hierarchical crews whose
+every LLM is bound, nested crews, cancellation and concurrent kickoffs.
+
+Control requires every LLM a crew can call to be bound to a monitored
+OpenAI/Anthropic client (``bind_crew_llm_client``), or gateway ownership.
+Crew features that call models or embedders KazenAI cannot see (memory,
+knowledge, an unbound planning/manager/function-calling LLM, ``llm_overlay``,
+``Crew(stream=True)``) are refused under Control. Listener callbacks never
 authorize settlement.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import os
 import threading
 import warnings
-from typing import Any, Callable, Optional
+import weakref
+from typing import Any, Callable, Iterable, Optional
 
 from .adapter_contract import (
     CapabilityLevel,
@@ -29,7 +38,11 @@ from .adapter_contract import (
 
 
 _LISTENER_LOCK = threading.Lock()
+# Keyed by listener, so two adapters on one crew each keep their own handlers.
 _REGISTERED_LISTENERS: dict[int, Any] = {}
+# id(object) -> ids of the listeners whose crew graph contains it. An object in
+# more than one graph (an LLM shared by two crews) is ambiguous.
+_OWNERSHIP: dict[int, set[int]] = {}
 
 
 class CrewExecutionScope:
@@ -147,6 +160,18 @@ def _ownership_graph(crew: Any) -> tuple[list[Any], set[str]]:
     return objs, keys
 
 
+def _release_ownership(listener_id: int, state: dict[str, frozenset[int]]) -> None:
+    """Drop a listener's ownership entries (on detach, or when it is collected)."""
+    with _LISTENER_LOCK:
+        for oid in state.get("ids", frozenset()):
+            owners = _OWNERSHIP.get(oid)
+            if owners is not None:
+                owners.discard(listener_id)
+                if not owners:
+                    _OWNERSHIP.pop(oid, None)
+        state["ids"] = frozenset()
+
+
 class KazenCrewListener:
     """Observe-level listener for crew/task/tool/LLM notifications."""
 
@@ -157,25 +182,41 @@ class KazenCrewListener:
         self._owned_objs: list[Any] = []
         self._owned_ids: frozenset[int] = frozenset()
         self._owned_keys: frozenset[str] = frozenset()
+        # Shared with the finalizer (which must not reference ``self``), so a
+        # listener collected without detach() cannot leave stale entries whose
+        # object ids get reused.
+        self._ownership_state: dict[str, frozenset[int]] = {"ids": frozenset()}
+        weakref.finalize(self, _release_ownership, id(self), self._ownership_state)
 
     def bind_crew(self, crew: Any) -> None:
         self._crew_ref = crew
         self.refresh_ownership()
 
+    def _set_owned(self, objs: list[Any], keys: set[str]) -> None:
+        me = id(self)
+        new_ids = frozenset(id(o) for o in objs)
+        with _LISTENER_LOCK:
+            for oid in self._owned_ids - new_ids:
+                owners = _OWNERSHIP.get(oid)
+                if owners is not None:
+                    owners.discard(me)
+                    if not owners:
+                        _OWNERSHIP.pop(oid, None)
+            for oid in new_ids:
+                _OWNERSHIP.setdefault(oid, set()).add(me)
+            self._owned_objs = objs
+            self._owned_ids = new_ids
+            self._ownership_state["ids"] = new_ids
+            self._owned_keys = frozenset(keys)
+
     def refresh_ownership(self) -> None:
         """Rebuild the ownership registry (agents/tasks may change before kickoff)."""
         crew = self._crew_ref
         objs, keys = _ownership_graph(crew) if crew is not None else ([], set())
-        with _LISTENER_LOCK:
-            self._owned_objs = objs
-            self._owned_ids = frozenset(id(o) for o in objs)
-            self._owned_keys = frozenset(keys)
+        self._set_owned(objs, keys)
 
     def clear_ownership(self) -> None:
-        with _LISTENER_LOCK:
-            self._owned_objs = []
-            self._owned_ids = frozenset()
-            self._owned_keys = frozenset()
+        self._set_owned([], set())
 
     def owns_event(self, source: Any, event: Any = None) -> bool:
         """True when a bus event belongs to this listener's crew.
@@ -187,10 +228,12 @@ class KazenCrewListener:
         """
         owned = self._crew_ref
         if owned is None:
-            return True
+            # An unbound listener owns nothing.
+            return False
         local = _TASK_SCOPE.get()
         if local is not None and local.crew is not None and local.crew is not owned:
             return False
+        in_own_scope = local is not None and local.crew is owned
         if source is owned:
             return True
         owned_ids = self._owned_ids
@@ -202,7 +245,13 @@ class KazenCrewListener:
             if cand is None:
                 continue
             if id(cand) in owned_ids:
-                return True
+                with _LISTENER_LOCK:
+                    shared = len(_OWNERSHIP.get(id(cand), ())) > 1
+                # An object several crews share only belongs to the one whose
+                # kickoff it runs under.
+                if not shared or in_own_scope:
+                    return True
+                continue
             if _safe_attr(cand, "crew") is owned:
                 return True
         if event is not None:
@@ -312,11 +361,11 @@ class KazenCrewListener:
 def _register_listener(crew: Any, listener: KazenCrewListener) -> None:
     """Register on CrewAI's event bus using the pinned decorator-style ``on`` API."""
     listener.bind_crew(crew)
-    key = id(crew)
+    key = id(listener)
     with _LISTENER_LOCK:
         if key in _REGISTERED_LISTENERS:
             return
-        _REGISTERED_LISTENERS[key] = {"listener": listener, "handlers": []}
+        _REGISTERED_LISTENERS[key] = {"listener": listener, "crew": crew, "handlers": []}
 
     bus = None
     for mod_name in (
@@ -459,8 +508,8 @@ def _register_listener(crew: Any, listener: KazenCrewListener) -> None:
             continue
 
 
-def _unregister_listener(crew: Any) -> None:
-    key = id(crew)
+def _unregister_listener(listener: KazenCrewListener) -> None:
+    key = id(listener)
     with _LISTENER_LOCK:
         entry = _REGISTERED_LISTENERS.pop(key, None)
     if not isinstance(entry, dict):
@@ -490,8 +539,85 @@ def _unregister_listener(crew: Any) -> None:
                 pass
 
 
+def _is_bound(llm: Any, allowed: tuple[Any, ...]) -> bool:
+    if llm is None:
+        return False
+    if any(llm is client for client in allowed):
+        return True
+    marker = getattr(llm, "_kazenai_bound_guarded_client", None)
+    if marker is not None and any(marker is client for client in allowed):
+        return True
+    ident = _client_identity(llm)
+    return any(ident is client for client in allowed)
+
+
+def unguarded_crew_paths(crew: Any, allowed: Iterable[Any]) -> list[str]:
+    """Every place ``crew`` could call a model or embedder outside ``allowed``.
+
+    Empty means each LLM the crew can call is bound to one of the guarded
+    clients. Memory, knowledge and embedders use models KazenAI cannot see.
+    """
+    allowed = tuple(c for c in allowed if c is not None)
+    gaps: list[str] = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        if _safe_attr(crew, "memory"):
+            gaps.append("crew.memory")
+        if _safe_attr(crew, "knowledge_sources") or _safe_attr(crew, "knowledge"):
+            gaps.append("crew.knowledge")
+        if _safe_attr(crew, "embedder"):
+            gaps.append("crew.embedder")
+        fc = _safe_attr(crew, "function_calling_llm")
+        if fc is not None and not _is_bound(fc, allowed):
+            gaps.append("crew.function_calling_llm")
+        if _safe_attr(crew, "planning") and not _is_bound(_safe_attr(crew, "planning_llm"), allowed):
+            gaps.append("crew.planning_llm")
+        process = str(getattr(_safe_attr(crew, "process"), "value", _safe_attr(crew, "process")) or "")
+        manager_agent = _safe_attr(crew, "manager_agent")
+        manager_llm = _safe_attr(crew, "manager_llm")
+        if manager_llm is not None and not _is_bound(manager_llm, allowed):
+            gaps.append("crew.manager_llm")
+        if process == "hierarchical" and manager_llm is None and manager_agent is None:
+            gaps.append("crew.manager_llm (hierarchical default)")
+        agents = list(_safe_attr(crew, "agents") or [])
+        if manager_agent is not None:
+            agents.append(manager_agent)
+        for index, agent in enumerate(agents):
+            label = f"agent[{index}]" if agent is not manager_agent else "crew.manager_agent"
+            if not _is_bound(_safe_attr(agent, "llm"), allowed):
+                gaps.append(f"{label}.llm")
+            afc = _safe_attr(agent, "function_calling_llm")
+            if afc is not None and not _is_bound(afc, allowed):
+                gaps.append(f"{label}.function_calling_llm")
+            planning = _safe_attr(agent, "planning_config")
+            planning_llm = _safe_attr(planning, "llm") if planning is not None else None
+            if planning_llm is not None and not _is_bound(planning_llm, allowed):
+                gaps.append(f"{label}.planning_config.llm")
+            if _safe_attr(agent, "memory"):
+                gaps.append(f"{label}.memory")
+            if _safe_attr(agent, "knowledge_sources") or _safe_attr(agent, "knowledge"):
+                gaps.append(f"{label}.knowledge")
+            if _safe_attr(agent, "embedder"):
+                gaps.append(f"{label}.embedder")
+    return gaps
+
+
+def _overlay_active() -> bool:
+    try:
+        from crewai.llm_overlay import active  # type: ignore
+    except Exception:
+        return False
+    try:
+        return active.get() is not None
+    except Exception:
+        return False
+
+
+_CANCEL_TYPES: tuple[type[BaseException], ...] = (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit)
+
+
 class CrewAdapter:
-    """Wraps kickoff and native akickoff with scoped operation context."""
+    """Wraps kickoff, native akickoff and kickoff_async with scoped operation context."""
 
     def __init__(
         self,
@@ -505,6 +631,7 @@ class CrewAdapter:
         capability: CapabilityLevel | str = CapabilityLevel.OBSERVE,
         on_event: Callable[[Any], Any] | None = None,
         guarded_client: Any | None = None,
+        guarded_clients: Iterable[Any] | None = None,
         listener: KazenCrewListener | None = None,
     ) -> None:
         if getattr(crew, "kickoff", None) is None and getattr(crew, "akickoff", None) is None:
@@ -524,37 +651,84 @@ class CrewAdapter:
             operation_id=operation_id,
             capability=self._capability,
         )
+        clients = [c for c in [guarded_client, *(guarded_clients or [])] if c is not None]
+        self._guarded_clients = tuple(clients)
         if self._capability == CapabilityLevel.CONTROL:
             gateway = os.getenv("KAZENAI_ENFORCEMENT_OWNER", "").strip().lower() == "gateway"
-            if guarded_client is None and not gateway:
+            if not clients and not gateway:
                 raise UnsupportedFrameworkPath(
                     "CrewAI Control requires guarded_client=monitor(OpenAI(...)) bound via "
                     "bind_crew_llm_client / declare_crew_control_boundary, or gateway ownership",
                     code="unguarded_control_boundary",
                 )
-            if guarded_client is not None:
-                reject_openai_responses_api(guarded_client)
-                require_control_client(guarded_client, label="CrewAI LLM client")
+            for client in clients:
+                reject_openai_responses_api(client)
+                require_control_client(client, label="CrewAI LLM client")
+            if clients:
                 # An unrelated monitored client must not certify Control.
-                if not crew_binds_guarded_client(crew, guarded_client):
+                if not any(crew_binds_guarded_client(crew, c) for c in clients):
                     raise UnsupportedFrameworkPath(
                         "CrewAI Control requires the guarded_client to be bound to the crew/agent "
                         "LLM path (bind_crew_llm_client or declare_crew_control_boundary); "
                         "passing an unrelated monitored client is not an enforcement boundary",
                         code="unguarded_control_boundary",
                     )
+                self._check_boundary()
         _register_listener(crew, self._listener)
         mark_attached(self)
+
+    def _check_boundary(self) -> None:
+        # A declared boundary is the caller's assertion about its own wiring.
+        if getattr(self._crew, "_kazenai_crew_control_boundary", None) is not None:
+            return
+        gaps = unguarded_crew_paths(self._crew, self._guarded_clients)
+        if gaps:
+            raise UnsupportedFrameworkPath(
+                "CrewAI Control: these paths can call a model outside the guarded clients: "
+                + ", ".join(gaps)
+                + ". Bind each LLM with bind_crew_llm_client (pass every client as "
+                "guarded_clients=[...]) or turn the feature off.",
+                code="unguarded_control_boundary",
+            )
+
+    def _preflight(self) -> None:
+        """Runtime refusals: paths that drop the guard or the operation scope."""
+        if self._capability != CapabilityLevel.CONTROL or not self._guarded_clients:
+            return
+        if _safe_attr(self._crew, "stream"):
+            raise UnsupportedFrameworkPath(
+                "CrewAI Control does not support Crew(stream=True): the crew runs after "
+                "kickoff returns, outside the operation scope",
+                code="unsupported_framework_path",
+            )
+        if _overlay_active():
+            raise UnsupportedFrameworkPath(
+                "CrewAI Control does not support llm_overlay: it rebuilds agent LLMs "
+                "without the guarded client",
+                code="unguarded_control_boundary",
+            )
+        self._check_boundary()
+
+    def _new_op(self) -> Any:
+        outer = _TASK_SCOPE.get()
+        metadata: dict[str, Any] = {}
+        if outer is not None and outer.crew is not self._crew:
+            # A crew kicked off inside another crew's task or tool.
+            metadata["parent_operation_id"] = outer.op.operation_id
+        return new_operation(**self._op_kwargs, metadata=metadata)
 
     def _bind(self, op: Any) -> Any:
         self._listener.refresh_ownership()
         scope = CrewExecutionScope(op, crew=self._crew)
         with _LISTENER_LOCK:
             _ACTIVE_OPS.setdefault(id(self._crew), []).append(scope)
-        token = _TASK_SCOPE.set(scope)
-        return token
+        return _TASK_SCOPE.set(scope)
 
     def _unbind(self, token: Any = None) -> None:
+        # The scope this kickoff pushed (concurrent kickoffs of one crew pop their own).
+        scope = _TASK_SCOPE.get() if token is not None else None
+        if scope is not None and scope.crew is not self._crew:
+            scope = None
         if token is not None:
             try:
                 _TASK_SCOPE.reset(token)
@@ -564,100 +738,111 @@ class CrewAdapter:
             stack = _ACTIVE_OPS.get(id(self._crew))
             if not stack:
                 return
-            stack.pop()
+            if scope is not None and scope in stack:
+                stack.remove(scope)
+            else:
+                stack.pop()
             if not stack:
                 _ACTIVE_OPS.pop(id(self._crew), None)
 
     @staticmethod
     def _is_hook_aborted(exc: BaseException) -> bool:
-        return type(exc).__name__ == "HookAborted"
+        return any(cls.__name__ == "HookAborted" for cls in type(exc).__mro__)
+
+    def _terminal_event(self, op: Any, mode: str, exc: BaseException) -> None:
+        if isinstance(exc, _CANCEL_TYPES):
+            emit_framework_event(
+                op=op,
+                event_type="workflow.error",
+                on_event=self._on_event,
+                payload={"mode": mode, "terminal": "cancelled", "error_type": type(exc).__name__},
+            )
+        elif self._is_hook_aborted(exc):
+            emit_framework_event(
+                op=op,
+                event_type="workflow.suspend",
+                on_event=self._on_event,
+                payload={"mode": mode, "signal": "HookAborted", "error_type": type(exc).__name__},
+            )
+        else:
+            emit_framework_event(
+                op=op,
+                event_type="workflow.error",
+                on_event=self._on_event,
+                payload={"mode": mode, "error_type": type(exc).__name__},
+            )
 
     def kickoff(self, *args: Any, **kwargs: Any) -> Any:
         from kazenai.otel import build_control_attributes, workflow_span
 
-        op = new_operation(**self._op_kwargs)
+        self._preflight()
+        op = self._new_op()
         with enter_operation(op):
             with workflow_span(
                 "kazenai.workflow",
                 attributes=build_control_attributes(operation_id=op.operation_id),
             ):
-                token = self._bind(op)
+                bound = self._bind(op)
                 emit_framework_event(op=op, event_type="workflow.start", on_event=self._on_event, payload={"mode": "kickoff"})
-                terminal = "success"
                 try:
-                    return self._crew.kickoff(*args, **kwargs)
-                except Exception as exc:
-                    if self._is_hook_aborted(exc):
-                        terminal = "abort"
-                        emit_framework_event(
-                            op=op,
-                            event_type="workflow.suspend",
-                            on_event=self._on_event,
-                            payload={"mode": "kickoff", "signal": "HookAborted"},
-                        )
-                    else:
-                        terminal = "error"
-                        emit_framework_event(
-                            op=op,
-                            event_type="workflow.error",
-                            on_event=self._on_event,
-                            payload={"mode": "kickoff", "error_type": type(exc).__name__},
-                        )
+                    result = self._crew.kickoff(*args, **kwargs)
+                except BaseException as exc:
+                    self._terminal_event(op, "kickoff", exc)
                     raise
+                else:
+                    emit_framework_event(op=op, event_type="workflow.end", on_event=self._on_event, payload={"mode": "kickoff"})
+                    return result
                 finally:
-                    if terminal == "success":
-                        emit_framework_event(op=op, event_type="workflow.end", on_event=self._on_event, payload={"mode": "kickoff"})
-                    self._unbind(token)
+                    self._unbind(bound)
 
     async def akickoff(self, *args: Any, **kwargs: Any) -> Any:
-        """Native async kickoff when present. Thread-backed kickoff_async is not certified here."""
+        """Native async kickoff (``Crew.akickoff``)."""
+        from kazenai.otel import build_control_attributes, workflow_span
+
         native = getattr(self._crew, "akickoff", None)
         if native is None:
             raise UnsupportedFrameworkPath(
-                "Native akickoff() unavailable on this CrewAI version; "
-                "thread-backed kickoff_async is not Control-certified",
+                "Native akickoff() unavailable on this CrewAI version; use kickoff_async()",
                 code="unsupported_framework_path",
             )
-        op = new_operation(**self._op_kwargs)
+        self._preflight()
+        op = self._new_op()
         with enter_operation(op):
-            token = self._bind(op)
-            emit_framework_event(op=op, event_type="workflow.start", on_event=self._on_event, payload={"mode": "akickoff"})
-            terminal = "success"
-            try:
-                return await native(*args, **kwargs)
-            except Exception as exc:
-                if self._is_hook_aborted(exc):
-                    terminal = "abort"
-                    emit_framework_event(
-                        op=op,
-                        event_type="workflow.suspend",
-                        on_event=self._on_event,
-                        payload={"mode": "akickoff", "signal": "HookAborted"},
-                    )
+            with workflow_span(
+                "kazenai.workflow",
+                attributes=build_control_attributes(operation_id=op.operation_id),
+            ):
+                bound = self._bind(op)
+                emit_framework_event(op=op, event_type="workflow.start", on_event=self._on_event, payload={"mode": "akickoff"})
+                try:
+                    result = await native(*args, **kwargs)
+                except BaseException as exc:
+                    self._terminal_event(op, "akickoff", exc)
+                    raise
                 else:
-                    terminal = "error"
-                    emit_framework_event(
-                        op=op,
-                        event_type="workflow.error",
-                        on_event=self._on_event,
-                        payload={"mode": "akickoff", "error_type": type(exc).__name__},
-                    )
-                raise
-            finally:
-                if terminal == "success":
                     emit_framework_event(op=op, event_type="workflow.end", on_event=self._on_event, payload={"mode": "akickoff"})
-                self._unbind(token)
+                    return result
+                finally:
+                    self._unbind(bound)
+
+    async def kickoff_async(self, *args: Any, **kwargs: Any) -> Any:
+        """``kickoff`` on a worker thread (CrewAI's ``kickoff_async`` model).
+
+        The thread runs to completion even if the awaiting task is cancelled, so
+        its spend is still checked and settled; prefer ``akickoff`` when you need
+        cancellation to stop model calls.
+        """
+        return await asyncio.to_thread(self.kickoff, *args, **kwargs)
 
     def detach(self) -> None:
-        self._unbind()
-        _unregister_listener(self._crew)
+        _unregister_listener(self._listener)
         self._listener.clear_ownership()
         mark_detached(self)
 
 
-def wrap_crew_kickoff(crew: Any, **monitor_kwargs: Any) -> Callable[..., Any]:
+def wrap_crew_kickoff(crew: Any, **adapter_kwargs: Any) -> Callable[..., Any]:
     """Compatibility shim: returns sync kickoff callable."""
-    adapter = CrewAdapter(crew, **monitor_kwargs)
+    adapter = CrewAdapter(crew, **adapter_kwargs)
 
     def kickoff(*args: Any, **kwargs: Any) -> Any:
         return adapter.kickoff(*args, **kwargs)
@@ -666,43 +851,157 @@ def wrap_crew_kickoff(crew: Any, **monitor_kwargs: Any) -> Callable[..., Any]:
 
 
 def wrap_crew(crew: Any, **kwargs: Any) -> CrewAdapter:
-    """Preferred entry: kickoff + akickoff adapter."""
+    """Preferred entry: kickoff, akickoff and kickoff_async adapter."""
     return CrewAdapter(crew, **kwargs)
 
 
 def abort_on_budget_denial(exc: BaseException) -> BaseException:
-    """Convert Control denial into CrewAI's verified blocking signal when available."""
-    try:
-        from crewai.hooks import HookAborted  # type: ignore
+    """Return ``exc`` as a CrewAI stop signal (``HookAborted``) when CrewAI is installed.
 
-        return HookAborted(str(exc))
+    The result is still an instance of the original KazenAI exception, so callers
+    that catch ``BudgetExceeded`` keep working, while CrewAI treats it as a
+    deliberate stop and does not retry the task.
+    """
+    stop = _crew_stop_class(type(exc))
+    if stop is None or isinstance(exc, stop):
+        return exc
+    converted = stop.__new__(stop)
+    converted.__dict__.update(getattr(exc, "__dict__", {}))
+    converted.args = exc.args
+    converted.__cause__ = exc
+    return converted
+
+
+_STOP_CLASSES: dict[type, type] = {}
+
+
+def _crew_stop_class(base: type) -> Optional[type]:
+    try:
+        from crewai.hooks.dispatch import HookAborted  # type: ignore
+    except Exception:
+        try:
+            from crewai.hooks import HookAborted  # type: ignore
+        except Exception:
+            return None
+    if issubclass(base, HookAborted):
+        return base
+    with _LISTENER_LOCK:
+        cls = _STOP_CLASSES.get(base)
+        if cls is None:
+            cls = type(f"CrewAI{base.__name__}", (base, HookAborted), {"__module__": __name__})
+            _STOP_CLASSES[base] = cls
+    return cls
+
+
+_STOP_PATCH_LOCK = threading.Lock()
+_STOP_PATCHED: set[type] = set()
+
+
+def _install_crewai_stop_patch(llm_cls: type) -> None:
+    """Make a KazenAI denial inside a bound CrewAI LLM a non-retried CrewAI stop.
+
+    CrewAI retries a failed task ``max_retry_limit`` times unless the error is a
+    ``HookAborted``. A budget denial is a deliberate stop, so on LLMs bound with
+    ``bind_crew_llm_client`` it is re-raised as ``BudgetExceeded`` *and*
+    ``HookAborted``. Unbound LLMs are untouched.
+    """
+    from ..enforcement import KazenBlock
+
+    with _STOP_PATCH_LOCK:
+        if llm_cls in _STOP_PATCHED:
+            return
+        orig_call = llm_cls.__dict__.get("call")
+        orig_acall = llm_cls.__dict__.get("acall")
+
+        if orig_call is not None:
+
+            def call(self: Any, *args: Any, **kwargs: Any) -> Any:
+                try:
+                    return orig_call(self, *args, **kwargs)
+                except KazenBlock as exc:
+                    if getattr(self, "_kazenai_bound_guarded_client", None) is None:
+                        raise
+                    raise abort_on_budget_denial(exc) from exc
+
+            call.__wrapped__ = orig_call  # type: ignore[attr-defined]
+            setattr(llm_cls, "call", call)
+
+        if orig_acall is not None:
+
+            async def acall(self: Any, *args: Any, **kwargs: Any) -> Any:
+                try:
+                    return await orig_acall(self, *args, **kwargs)
+                except KazenBlock as exc:
+                    if getattr(self, "_kazenai_bound_guarded_client", None) is None:
+                        raise
+                    raise abort_on_budget_denial(exc) from exc
+
+            acall.__wrapped__ = orig_acall  # type: ignore[attr-defined]
+            setattr(llm_cls, "acall", acall)
+        _STOP_PATCHED.add(llm_cls)
+
+
+def _native_provider(llm: Any) -> Optional[str]:
+    """``"openai"`` / ``"anthropic"`` for the certified CrewAI native LLM classes."""
+    try:
+        from crewai.llms.providers.openai.completion import OpenAICompletion  # type: ignore
+
+        if type(llm) is OpenAICompletion:
+            return "openai"
     except Exception:
         pass
-    return exc
+    try:
+        from crewai.llms.providers.anthropic.completion import AnthropicCompletion  # type: ignore
+
+        if type(llm) is AnthropicCompletion:
+            return "anthropic"
+    except Exception:
+        pass
+    return None
+
+
+def _is_crewai_llm(obj: Any) -> bool:
+    try:
+        from crewai.llms.base_llm import BaseLLM  # type: ignore
+    except Exception:
+        return False
+    return isinstance(obj, BaseLLM)
 
 
 def _bind_crewai_native_llm(llm: Any, guarded: Any, monitor_kwargs: dict) -> bool:
     """CrewAI 1.15 native providers keep SDK clients in ``_client`` / ``_async_client``.
 
-    Swap in monitored clients there (sync and async) and keep the LLM object;
-    replacing the LLM itself breaks the crew ("LLM must be resolved").
+    Swap in monitored clients there (sync and async, on one budget) and keep the
+    LLM object; replacing the LLM itself breaks the crew ("LLM must be resolved").
+    Only the native OpenAI and Anthropic classes are certified; any other CrewAI
+    LLM (Gemini, Azure, Bedrock, LiteLLM-routed) is refused untouched.
     """
-    if not (hasattr(llm, "_get_sync_client") and hasattr(llm, "_get_async_client")):
+    if not _is_crewai_llm(llm) and not (hasattr(llm, "_get_sync_client") and hasattr(llm, "_get_async_client")):
         return False
-    provider = type(llm).__name__.lower()
-    client_is_anthropic = hasattr(guarded, "messages") and not hasattr(guarded, "chat")
-    if ("anthropic" in provider) != client_is_anthropic:
+    provider = _native_provider(llm)
+    if provider is None:
         raise UnsupportedFrameworkPath(
-            f"bind_crew_llm_client: {type(llm).__name__} needs a matching "
-            f"{'Anthropic' if 'anthropic' in provider else 'OpenAI'} client",
+            f"bind_crew_llm_client: {type(llm).__name__} is not a certified CrewAI LLM; "
+            "use a native OpenAI or Anthropic model (LLM(model='gpt-…') or 'anthropic/claude-…')",
             code="unguarded_control_boundary",
         )
-    from ..monitor import monitor
+    from ..monitor import _detect_client_kind, monitor
 
-    llm._client = guarded
+    client_is_anthropic = _detect_client_kind(guarded) == "anthropic"
+    if (provider == "anthropic") != client_is_anthropic:
+        raise UnsupportedFrameworkPath(
+            f"bind_crew_llm_client: {type(llm).__name__} needs a matching "
+            f"{'Anthropic' if provider == 'anthropic' else 'OpenAI'} client",
+            code="unguarded_control_boundary",
+        )
     try:
         raw_async = llm._async_client if llm._async_client is not None else llm._build_async_client()
-        llm._async_client = raw_async if is_monitored_client(raw_async) else monitor(raw_async, **monitor_kwargs)
+        if is_monitored_client(raw_async):
+            guarded_async = raw_async
+        else:
+            sibling = getattr(guarded, "_kazenai_monitor_sibling", None)
+            # One budget for sync and async calls of this LLM.
+            guarded_async = sibling(raw_async) if callable(sibling) else monitor(raw_async, **monitor_kwargs)
     except Exception:
         # No async client could be built (e.g. no API key yet): async calls would be
         # unguarded, so refuse rather than certify half the LLM.
@@ -710,19 +1009,22 @@ def _bind_crewai_native_llm(llm: Any, guarded: Any, monitor_kwargs: dict) -> boo
             "bind_crew_llm_client could not monitor the CrewAI LLM async client",
             code="unguarded_control_boundary",
         )
+    llm._client = guarded
+    llm._async_client = guarded_async
     try:
         object.__setattr__(llm, "_kazenai_bound_guarded_client", guarded)
     except Exception:
         pass
+    _install_crewai_stop_patch(type(llm))
     return True
 
 
 def bind_crew_llm_client(crew_or_agent: Any, openai_client: Any, **monitor_kwargs: Any) -> Any:
     """Attach a monitored provider client to a CrewAI crew/agent LLM.
 
-    CrewAI 1.15 native LLMs (``LLM(model="gpt-4o-mini")`` or an Anthropic model)
-    get monitored ``_client``/``_async_client``; pass an OpenAI client for OpenAI
-    models and an Anthropic client for Anthropic models.
+    CrewAI 1.15 native LLMs (``LLM(model="gpt-…")`` or an ``anthropic/claude-…``
+    model) get monitored ``_client``/``_async_client`` on one budget; pass an
+    OpenAI client for OpenAI models and an Anthropic client for Anthropic models.
     """
     from ..monitor import monitor
 
@@ -742,6 +1044,10 @@ def bind_crew_llm_client(crew_or_agent: Any, openai_client: Any, **monitor_kwarg
                 setattr(holder, "_kazenai_bound_guarded_client", guarded)
             except Exception:
                 pass
+            continue
+        if _is_crewai_llm(native_llm) or isinstance(native_llm, str):
+            # A CrewAI LLM we cannot bind (or a bare model name) must never be
+            # replaced by the raw client; it stays unbound and Control refuses it.
             continue
         holder_bound = False
         for attr in ("llm", "client", "_client"):

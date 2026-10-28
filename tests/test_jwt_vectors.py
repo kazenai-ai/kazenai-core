@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import importlib.util
 import json
 from pathlib import Path
 
@@ -35,6 +36,12 @@ def test_vendored_corpus_matches_manifest_and_sibling():
         if sibling.is_file():
             assert sibling.read_bytes() == data, (
                 f"vendored {name} drifted from kazenai-contracts; re-vendor it"
+            )
+        if importlib.util.find_spec("kazenai_contracts") is not None:
+            from kazenai_contracts.resources import auth_fixture_text
+
+            assert auth_fixture_text(name).encode() == data, (
+                f"vendored {name} drifted from the kazenai-contracts wheel"
             )
 
 

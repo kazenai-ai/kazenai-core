@@ -18,11 +18,26 @@ def test_known_model_pricing():
     assert p.output_per_1k == pytest.approx(0.00060)
 
 
-def test_dated_snapshot_resolves_to_base():
+def test_dated_snapshot_does_not_inherit_base():
+    """A dated id that is not an explicit alias does not inherit the base price."""
     engine = TokenCostEngine()
-    p = engine.price("claude-haiku-4-5-20251001")
-    assert p.input_per_1k == pytest.approx(0.00100)
-    assert p.output_per_1k == pytest.approx(0.00500)
+    for model in ("gpt-4o-2024-99-99", "claude-sonnet-latest", "claude-haiku-4-5-20991231", "claude-sonnet-4-7-20270101"):
+        with pytest.raises(UnknownModelError):
+            engine.price(model)
+
+
+def test_documented_snapshots_are_exact_aliases_of_their_base_row():
+    """Snapshot ids the provider documents bill exactly as their base row (no prefix logic)."""
+    engine = TokenCostEngine()
+    for snapshot, base in (
+        ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+        ("claude-sonnet-4-5-20250929", "claude-sonnet-4-5"),
+        ("gpt-4o-mini-2024-07-18", "gpt-4o-mini"),
+        ("gpt-4.1-mini-2025-04-14", "gpt-4.1-mini"),
+    ):
+        assert engine.price(snapshot) == engine.price(base), snapshot
+    # A separately priced snapshot is not collapsed into its family.
+    assert engine.price("gpt-4o-2024-05-13") != engine.price("gpt-4o")
 
 
 def test_dotted_version_is_priced():
@@ -73,11 +88,28 @@ def test_from_usage_object_attributes():
 def test_env_pricing_override(monkeypatch):
     monkeypatch.setenv(
         "KAZENAI_PRICING_JSON",
-        json.dumps({"custom-model": {"input_per_1k": 0.01, "output_per_1k": 0.02}}),
+        json.dumps(
+            {
+                "currency": "USD",
+                "unit": "per_1m_tokens",
+                "source": "operator-test",
+                "verified_on": "2026-10-16",
+                "rows": [
+                    {
+                        "provider": "openai",
+                        "model": "custom-model",
+                        "request_tier": "standard",
+                        "context_band": "short",
+                        "expected_reported_tier": "default",
+                        "rates": {"input": "10", "output": "20"},
+                    }
+                ],
+            }
+        ),
     )
     engine = TokenCostEngine()
     p = engine.price("custom-model")
-    assert p.input_per_1k == 0.01
+    assert p.input_per_1k == pytest.approx(0.01)
     assert engine.cost_usd(model="custom-model", input_tokens=1000, output_tokens=0) == pytest.approx(0.01)
 
 
@@ -102,23 +134,22 @@ def test_unknown_model_warn_opt_in_returns_zero_and_logs(monkeypatch, caplog):
 
 
 def test_prefix_match_versioned_model():
+    """Undocumented dated snapshots do not inherit a base price."""
     engine = TokenCostEngine()
-    p = engine.price("gpt-4o-2024-11-20-snapshot")
-    assert p.input_per_1k == pytest.approx(0.00250)
+    with pytest.raises(UnknownModelError):
+        engine.price("gpt-4o-2024-11-20-snapshot")
 
 
 def test_versioned_id_resolves_to_correct_base_not_pricier_family():
-    """Regression: a real dated model id must resolve to its own base
-    family (longest-prefix), not the insertion-first pricier row."""
+    """Dated ids resolve only through the explicit alias table, never by family prefix."""
     engine = TokenCostEngine()
-    # gpt-4o-mini-2024-07-18 must price as gpt-4o-mini, NOT gpt-4o (17x).
     assert engine.price("gpt-4o-mini-2024-07-18") == engine.price("gpt-4o-mini")
     assert engine.price("gpt-4o-mini-2024-07-18") != engine.price("gpt-4o")
-    # gpt-4.1-mini-2025-04-14 must resolve to gpt-4.1-mini, not gpt-4.1.
     assert engine.price("gpt-4.1-mini-2025-04-14") == engine.price("gpt-4.1-mini")
     assert engine.price("gpt-4.1-mini-2025-04-14") != engine.price("gpt-4.1")
-    # o1-preview-2024-... must resolve to o1, not the unknown path.
-    assert engine.price("o1-preview-2024-09-12") == engine.price("o1")
+    for model in ("o1-preview-2024-09-12", "gpt-4.1-mini-2025-99-99", "gpt-4o-mini-latest"):
+        with pytest.raises(UnknownModelError):
+            engine.price(model)
 
 
 def test_truncated_stems_fall_through_to_unknown(caplog, monkeypatch):

@@ -1,0 +1,24 @@
+{
+  "fixture_id": "self_act_as_own_org",
+  "expect": "accept",
+  "principal": {
+    "identity_kind": "human",
+    "subject_id": "user-alice",
+    "actor_id": "user-alice",
+    "user_id": "user-alice",
+    "org_id": "org-a",
+    "workspace_id": "ws-a",
+    "role": "developer",
+    "auth_type": "api_key",
+    "authorized_org_ids": ["org-a"],
+    "authorized_workspace_ids": ["ws-a"],
+    "delegation": { "kind": "none" }
+  },
+  "request": {
+    "headers": {
+      "X-Kazen-Act-As-Org": "org-a"
+    },
+    "body_org_id": "org-a",
+    "body_workspace_id": "ws-a"
+  }
+}

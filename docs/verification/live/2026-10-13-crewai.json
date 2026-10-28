@@ -1,0 +1,179 @@
+{
+  "schema": "kazenai.live-evidence-summary.v1",
+  "note": "Summary of paid live runs against the provider APIs. Raw run records are kept privately; sha256 identifies each one. No keys or prompts are recorded. Every run of the day is listed; failed runs show only their outcome.",
+  "source_tree": "kazenai 1.2.0",
+  "claim": "CrewAI 1.15.26 with native OpenAI and Anthropic LLMs bound to monitored clients: kickoff, native akickoff, cancellation, nested crews and a two-provider crew on one local budget and on one Agent FinOps budget.",
+  "command": "KAZENAI_LIVE_PROVIDER_SMOKE=1 pytest -m live tests/test_live_framework_smoke.py -k crewai (the Agent FinOps cell also needs KAZENAI_LIVE_FINOPS_URL and KAZENAI_LIVE_FINOPS_DB_URL)",
+  "failed_attempts_note": "7 runs of the Agent FinOps cell failed before the passing run, while fixes to Agent FinOps were completed. The passing run is the last one listed.",
+  "runs": [
+    {
+      "artifact": "live-framework-smoke-20261013T162107Z.json",
+      "sha256": "99c43918da0bd54f0c9501bbf654d6325840e87bd88b476f9421e17ab6606d88",
+      "recorded_at_utc": "20261013T162107Z",
+      "versions": {
+        "kazenai": "1.2.0",
+        "openai": "2.54.0",
+        "anthropic": "0.125.0",
+        "langchain": "1.4.4",
+        "langchain-core": "1.6.9",
+        "langchain-openai": "1.7.0",
+        "langgraph": "1.2.14",
+        "langgraph-checkpoint-sqlite": "3.1.1",
+        "crewai": "1.15.26"
+      },
+      "all_passed": true,
+      "cells": [
+        {
+          "cell": "crewai.akickoff.anthropic",
+          "model": "claude-haiku-4-5",
+          "passed": true,
+          "input_tokens": 77,
+          "output_tokens": 13,
+          "recorded_cost_usd": 0.000142,
+          "expected_cost_usd": 0.00014199999999999998,
+          "denied_before_dispatch": true,
+          "framework": "crewai"
+        },
+        {
+          "cell": "crewai.akickoff.cancel",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 71,
+          "output_tokens": 386,
+          "recorded_cost_usd": 0.0002001,
+          "expected_cost_usd": 0.0002001,
+          "framework": "crewai"
+        },
+        {
+          "cell": "crewai.akickoff.openai",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 72,
+          "output_tokens": 26,
+          "recorded_cost_usd": 2.0200000000000003e-05,
+          "expected_cost_usd": 2.02e-05,
+          "denied_before_dispatch": true,
+          "framework": "crewai"
+        },
+        {
+          "cell": "crewai.kickoff.anthropic",
+          "model": "claude-haiku-4-5",
+          "passed": true,
+          "input_tokens": 77,
+          "output_tokens": 13,
+          "recorded_cost_usd": 0.000142,
+          "expected_cost_usd": 0.00014199999999999998,
+          "denied_before_dispatch": true,
+          "framework": "crewai"
+        },
+        {
+          "cell": "crewai.kickoff.openai",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 72,
+          "output_tokens": 12,
+          "recorded_cost_usd": 1.32e-05,
+          "expected_cost_usd": 1.32e-05,
+          "denied_before_dispatch": true,
+          "framework": "crewai"
+        },
+        {
+          "cell": "crewai.multi_provider.shared_local_budget",
+          "models": [
+            "gpt-6-luna",
+            "claude-haiku-4-5"
+          ],
+          "passed": true,
+          "denied_before_dispatch": true,
+          "framework": "crewai"
+        },
+        {
+          "cell": "crewai.nested",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "framework": "crewai"
+        }
+      ]
+    },
+    {
+      "artifact": "live-framework-smoke-20261013T162406Z.json",
+      "sha256": "2f21a23e7f417b05d3b81907453dc5e178f2049b301690e755faf88531ff0134",
+      "recorded_at_utc": "20261013T162406Z",
+      "all_passed": false
+    },
+    {
+      "artifact": "live-framework-smoke-20261013T162503Z.json",
+      "sha256": "5addb8aa4cd2a3f2458d5ffc6f588a024f6c181114d4803d9ad8c22645dc4353",
+      "recorded_at_utc": "20261013T162503Z",
+      "all_passed": false
+    },
+    {
+      "artifact": "live-framework-smoke-20261013T162553Z.json",
+      "sha256": "882552ea0f150d342cde0ac03e9d6ca4eaf3b12245a830a7b4d249e801f73c29",
+      "recorded_at_utc": "20261013T162553Z",
+      "all_passed": false
+    },
+    {
+      "artifact": "live-framework-smoke-20261013T162611Z.json",
+      "sha256": "cb573b7f58f43f2bb96286efe99ac302a923adf9771e3d8eb5312fc68571e6b3",
+      "recorded_at_utc": "20261013T162611Z",
+      "all_passed": false
+    },
+    {
+      "artifact": "live-framework-smoke-20261013T162626Z.json",
+      "sha256": "6f4c71de7c7e4d818bdae90d0136e910bfcc064382f4ddb7c58d803625bee3dc",
+      "recorded_at_utc": "20261013T162626Z",
+      "all_passed": false
+    },
+    {
+      "artifact": "live-framework-smoke-20261013T162707Z.json",
+      "sha256": "d0c4b73473e61c9be19f7963da752d0e6bef17abaddbd87904603bf9ad65cb2d",
+      "recorded_at_utc": "20261013T162707Z",
+      "all_passed": false
+    },
+    {
+      "artifact": "live-framework-smoke-20261013T162901Z.json",
+      "sha256": "0bb6d45b79f5e296a90896fccca48e6970b8956f7597a3d262cf647de9292433",
+      "recorded_at_utc": "20261013T162901Z",
+      "all_passed": false
+    },
+    {
+      "artifact": "live-framework-smoke-20261013T163159Z.json",
+      "sha256": "7468d700b2dc60bb512db27368b48a8c6f3aa6a8b236e1222e54d7d21e8dbe39",
+      "recorded_at_utc": "20261013T163159Z",
+      "versions": {
+        "kazenai": "1.2.0",
+        "openai": "2.54.0",
+        "anthropic": "0.125.0",
+        "langchain": "1.4.4",
+        "langchain-core": "1.6.9",
+        "langchain-openai": "1.7.0",
+        "langgraph": "1.2.14",
+        "langgraph-checkpoint-sqlite": "3.1.1",
+        "crewai": "1.15.26"
+      },
+      "all_passed": true,
+      "cells": [
+        {
+          "cell": "crewai.multi_provider.shared_finops_budget",
+          "models": [
+            "gpt-6-luna",
+            "claude-haiku-4-5"
+          ],
+          "passed": true,
+          "framework": "crewai",
+          "full_runs": 7,
+          "llm_calls": 14,
+          "reservations": 14,
+          "settled_usd": 0.001762,
+          "receipts": {
+            "allow": 28,
+            "deny": 1
+          },
+          "deny_reason": "insufficient_capacity",
+          "workflow_limit_usd": 0.01
+        }
+      ]
+    }
+  ]
+}

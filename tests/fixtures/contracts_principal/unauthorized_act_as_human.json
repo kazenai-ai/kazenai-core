@@ -1,0 +1,23 @@
+{
+  "fixture_id": "unauthorized_act_as_human",
+  "expect": "reject",
+  "reject_reason": "X-Kazen-Act-As-Org not authorized for this credential",
+  "principal": {
+    "identity_kind": "human",
+    "subject_id": "user-alice",
+    "actor_id": "user-alice",
+    "org_id": "org-a",
+    "workspace_id": "ws-a",
+    "role": "developer",
+    "auth_type": "supabase",
+    "authorized_org_ids": ["org-a"],
+    "delegation": { "kind": "none" }
+  },
+  "request": {
+    "headers": {
+      "X-Kazen-Act-As-Org": "org-b"
+    },
+    "body_org_id": "org-b",
+    "body_workspace_id": "ws-b"
+  }
+}

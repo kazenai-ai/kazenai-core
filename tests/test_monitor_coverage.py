@@ -53,5 +53,5 @@ def test_patch_openai_sink_emit_failure_still_returns(monkeypatch):
     sink.emit.side_effect = RuntimeError("sink down")
 
     patch_openai(client, org_id="o", project_id="p", agent_id="a", event_sink=sink)
-    resp = client.chat.completions.create(messages=[])
+    resp = client.chat.completions.create(model="gpt-4o-mini", messages=[])
     assert resp is not None

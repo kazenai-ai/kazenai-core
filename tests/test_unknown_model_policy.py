@@ -55,7 +55,7 @@ class TestUnknownModelPolicy(unittest.TestCase):
         known = {"gpt-4o", "claude-3"}
         self.assertFalse(is_known_model("", known))
         self.assertTrue(is_known_model("gpt-4o", known))
-        self.assertTrue(is_known_model("gpt-4o-mini", known))
+        self.assertFalse(is_known_model("gpt-4o-mini", known))
 
     def test_enforce_unknown_model_allows_known(self):
         enforce_unknown_model("gpt-4o", known_keys={"gpt-4o"})
@@ -95,7 +95,7 @@ class TestKnownPricedInvariant(unittest.TestCase):
         models = [
             # proxy/gateway-prefixed (unknown)
             "my-gpt-4o-proxy", "internal-claude-haiku-4-5-router", "team-gpt-4o-gateway",
-            # real dated ids (known via longest-prefix)
+            # dated snapshots are not aliases
             "gpt-4o-mini-2024-07-18", "gpt-4.1-nano-2025-04-14", "o1-preview-2024-09-12",
             # exact keys
             "gpt-4o", "claude-opus-4-8", "gemini-2.5-pro",

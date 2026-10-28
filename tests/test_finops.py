@@ -90,3 +90,22 @@ def test_finops_trajectory_remaining_budget() -> None:
     traj = derived["trajectory"]
     assert traj.remaining_budget_usd is not None
     assert traj.remaining_budget_usd <= 10.0
+
+
+def test_derived_events_keep_the_trigger_workspace() -> None:
+    """Derived events used to default to workspace "default".
+
+    The SDK uploads them in the same batch as the model.call; a key bound to its
+    own workspace then had the whole batch rejected (422 mixed workspaces, or 403
+    workspace mismatch), so its telemetry never arrived.
+    """
+    c = FinOpsController(cfg=FinOpsConfig(budget_usd=0.0001, soft_pause_pct=0.5, loop_anomaly_threshold=0.0))
+    derived: dict = {}
+    for _ in range(3):
+        ev = _event(cost_usd=0.0001).model_copy(update={"workspace_id": "ws-live"})
+        derived.update(c.handle_llm_call(ev))
+    events = {k: v for k, v in derived.items() if isinstance(v, KazenEvent)}
+    assert {"trajectory", "loop_anomaly"} <= set(events)
+    for kind, ev in events.items():
+        assert ev.workspace_id == "ws-live", kind
+        assert ev.org_id == "org"

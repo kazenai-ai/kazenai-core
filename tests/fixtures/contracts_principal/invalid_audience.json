@@ -1,0 +1,17 @@
+{
+  "fixture_id": "invalid_audience_kazen_jwt",
+  "expect": "reject",
+  "reject_reason": "jwt audience mismatch",
+  "jwt": {
+    "alg": "HS256",
+    "claims": {
+      "sub": "user-alice",
+      "iss": "kazenai",
+      "aud": "wrong-audience",
+      "exp": 4102444800,
+      "org_id": "org-a"
+    },
+    "secret": "test-secret-not-for-production-use-32b",
+    "expected_audience": "authenticated"
+  }
+}

@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import stat
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +29,7 @@ def _handle(**kwargs):
         workspace_id="ws",
         finops_base_url="https://finops.invalid",
         finops_api_key="SYNTHETIC-ONLY",
+        settlement_capability="kzcap1.test." + "A" * 43,
     )
     base.update(kwargs)
     return guard.ReservationHandle(**base)
@@ -74,8 +72,9 @@ def test_f01_process_death_during_sync_reconcile_keeps_journal(tmp_path):
                 "    reserved_cost_usd=0.02, reservation_id='rsv-f01', call_id='call-f01',",
                 "    attempt=1, lifecycle=True, org_id='org-f01', workspace_id='ws',",
                 "    finops_base_url='https://finops.invalid', finops_api_key='SYNTHETIC',",
+                "    settlement_capability='kzcap1.test.' + 'A' * 43,",
                 ")",
-                "with patch('urllib.request.urlopen', crash):",
+                "with patch('kazenai.spine.transport.urlopen', crash):",
                 "    guard.reconcile_budget(org_id='org-f01', workspace_id='ws', run_id='run',",
                 "                           reserved_cost_usd=h, actual_cost_usd=0.012)",
             ]
@@ -174,18 +173,23 @@ def test_f02_fingerprint_identity_permissions_and_no_default_creds(tmp_path):
 
 
 def test_f02_stale_ack_does_not_delete_replacement(tmp_path):
+    # Records are journaled for the configured FinOps, so the flush sends them
+    # (a record for another URL is quarantined before any send, see §8).
     q = sq.reset_settle_queue_for_tests(str(tmp_path / "race"))
-    q.enqueue(_body(12000), org_id="org-a", base_url="https://a.invalid")
-    q.enqueue(_body(19000), org_id="org-b", base_url="https://b.invalid")
+    q.enqueue(_body(12000), org_id="org-a", base_url="https://finops.invalid")
+    q.enqueue(_body(19000), org_id="org-b", base_url="https://finops.invalid")
+    sent: list[int] = []
 
-    def replace_during_flush(*args, **kwargs):
-        q.enqueue(_body(27000), org_id="org-c", base_url="https://c.invalid")
+    def replace_during_flush(base, org, body, **kwargs):
+        sent.append(int(body["actual_usd_micros"]))
+        q.enqueue(_body(27000), org_id="org-c", base_url="https://finops.invalid")
         return True
 
     with patch.object(guard, "_post_settle_sync", replace_during_flush):
-        flush = sq.flush_pending_settlements()
+        flush = sq.flush_pending_settlements(default_base_url="https://finops.invalid", default_api_key="configured-key")
     pending = q.list_pending()
     amounts = sorted(int(p["body"]["actual_usd_micros"]) for p in pending)
+    assert sent, "the race needs at least one send"
     assert 27000 in amounts
     assert flush["applied"] + flush["failed"] >= 1
 

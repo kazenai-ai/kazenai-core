@@ -18,6 +18,21 @@ _CRITICAL_SECRET_ENV_VARS = (
     "KAZENAI_FINOPS_MASTER_KEY",
     "KAZENAI_FINOPS_API_KEY",
     "KAZENAI_PLATFORM_SERVICE_TOKEN",
+    "KAZENAI_PLATFORM_FINOPS_CLIENT_TOKEN",
+    "KAZENAI_PLATFORM_LENS_CLIENT_TOKEN",
+    "KAZENAI_LENS_FINOPS_OUTBOX_KEY",
+)
+
+# FinOps and Lens verify Platform tokens with public keys only. In
+# production-like modes they must not hold an HS256 signing secret or the
+# Platform private key, or they could forge sessions anywhere.
+_PLATFORM_ONLY_SECRET_ENV_VARS = (
+    "SUPABASE_JWT_SECRET",
+    "KAZENAI_SUPABASE_JWT_SECRET",
+    "KAZENAI_JWT_SECRET",
+    "KAZENAI_PLATFORM_JWT_SECRET",
+    "JWT_SECRET",
+    "KAZENAI_SESSION_JWT_PRIVATE_KEY",
 )
 
 _STRIPE_ENV = "STRIPE_SECRET_KEY"
@@ -50,9 +65,21 @@ def _env_value(name: str) -> str:
     return os.getenv(name, "").strip()
 
 
-def validate_secret_hygiene_startup(*, service_name: str = "kazenai") -> None:
-    """Refuse startup when critical secrets are reused, weak, or live Stripe in non-prod."""
+def validate_secret_hygiene_startup(*, service_name: str = "kazenai", holds_signing_secrets: bool = False) -> None:
+    """Refuse startup when critical secrets are reused, weak, or live Stripe in non-prod.
+
+    ``holds_signing_secrets=False`` (FinOps, Lens) also refuses any Platform-only
+    signing secret in production-like modes.
+    """
     errors: list[str] = []
+
+    if not holds_signing_secrets and is_saas_deployment():
+        for name in _PLATFORM_ONLY_SECRET_ENV_VARS:
+            if _env_value(name):
+                errors.append(
+                    f"{name} must not be set for {service_name}: it verifies Platform tokens "
+                    "with public keys only (KAZENAI_SESSION_JWT_PUBLIC_KEYS)"
+                )
 
     stripe = _env_value(_STRIPE_ENV)
     if stripe.startswith("sk_live_") and not is_saas_deployment():

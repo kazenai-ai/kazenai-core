@@ -7,4 +7,4 @@ Report suspected vulnerabilities privately to **founder@kazenai.com**. Please do
 The `kazenai` SDK defaults to metadata-only capture (request/response bodies omitted). Secret redaction runs before sinks/logs. Capturing request or response bodies requires explicit configuration.
 
 ## Scope
-This repository's license covers the SDK code. Agent FinOps, Agent Lens and other hosted KazenAI services are separate products with separate terms.
+This repository's license covers the SDK code. Agent FinOps (including run receipts) and other hosted KazenAI services are separate products with separate terms.

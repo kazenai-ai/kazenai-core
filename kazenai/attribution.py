@@ -153,6 +153,25 @@ def use_attribution(
         _ATTR.reset(token)
 
 
+@contextlib.contextmanager
+def use_child_operation(operation_id: str, attempt_id: Optional[str] = None) -> Iterator[AttributionContext]:
+    """Start a child operation inside the current attribution scope.
+
+    A framework run started from inside another run (a crew kicked off from a
+    task of another crew) is its own operation: it keeps the parent's customer,
+    feature and workflow but gets a new ``operation_id`` / ``attempt_id``,
+    which ``use_attribution`` would reject as a conflict.
+    """
+    parent = _ATTR.get()
+    base = parent if parent is not None else AttributionContext()
+    child = replace(base, operation_id=operation_id, attempt_id=attempt_id).normalized()
+    token = _ATTR.set(child)
+    try:
+        yield child
+    finally:
+        _ATTR.reset(token)
+
+
 def resolve_attribution(
     *,
     business_subject_ref: Optional[str] = None,

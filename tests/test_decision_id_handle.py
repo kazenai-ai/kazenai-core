@@ -21,6 +21,7 @@ def test_lifecycle_reserve_preserves_decision_id(monkeypatch):
         "call_id": "call_1",
         "attempt": 1,
         "reserved_usd_micros": 10_000,
+        "settlement_capability": "kzcap1.test." + "A" * 43,
         "decision_id": "dec_xyz",
         "decision_receipt": {
             "decision_id": "dec_xyz",
@@ -60,7 +61,7 @@ def test_lifecycle_reserve_preserves_decision_id(monkeypatch):
             return _Resp(caps)
         return _Resp(payload)
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=_urlopen):
+    with patch("kazenai.spine.transport.urlopen", side_effect=_urlopen):
         handle = reserve_budget(org_id="o", workspace_id="w", run_id="r")
     assert isinstance(handle, ReservationHandle)
     assert handle.decision_id == "dec_xyz"
@@ -82,6 +83,7 @@ def test_lifecycle_reserve_falls_back_to_request_attribution(monkeypatch):
     payload = {
         "reservation_id": "rsv_2",
         "reserved_usd_micros": 10_000,
+        "settlement_capability": "kzcap1.test." + "A" * 43,
         "decision_receipt": {"decision_id": "dec_fallback"},
     }
     caps = {
@@ -112,7 +114,7 @@ def test_lifecycle_reserve_falls_back_to_request_attribution(monkeypatch):
             return _Resp(caps)
         return _Resp(payload)
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=_urlopen):
+    with patch("kazenai.spine.transport.urlopen", side_effect=_urlopen):
         handle = reserve_budget(
             org_id="o",
             workspace_id="w",

@@ -28,6 +28,7 @@ _LEGACY_FINOPS_ENV = {
     "KAZENAI_ENV": "dev",
     "KAZENAI_ENFORCEMENT_MODE": "fail_open",
     "KAZENAI_FINOPS_RESERVATION_MODE": "fail_open",
+    "KAZENAI_SDK_SETTLE_AUTO_FLUSH": "0",
 }
 
 
@@ -75,7 +76,7 @@ class TestReserveCalledBeforeLLMCall(unittest.TestCase):
             return mock_resp_obj
 
         with patch.dict("os.environ", _LEGACY_FINOPS_ENV, clear=True):
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
                 # Simulate the sequence monitor.py follows:
                 reserved = _try_reserve_budget(
                     org_id="test-org", workspace_id="default", run_id="run-001"
@@ -95,7 +96,7 @@ class TestReserveCalledBeforeLLMCall(unittest.TestCase):
 
         env = {**_LEGACY_FINOPS_ENV, "KAZENAI_FINOPS_RESERVE_TIMEOUT_S": "2.5"}
         with patch.dict("os.environ", env, clear=True):
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
                 _try_reserve_budget(
                     org_id="test-org", workspace_id="default", run_id="run-timeout"
                 )
@@ -126,7 +127,7 @@ class TestBudgetExceededRaisesBeforeApiCall(unittest.TestCase):
             "KAZENAI_FINOPS_RESERVATION_MODE": "fail_closed",
         }
         with patch.dict("os.environ", env, clear=True):
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
                 with self.assertRaises(BudgetExceeded) as ctx:
                     _try_reserve_budget(
                         org_id="test-org", workspace_id="default", run_id="run-002"
@@ -157,7 +158,7 @@ class TestFinopsTimeoutFailsOpen(unittest.TestCase):
             "KAZENAI_FINOPS_RESERVATION_MODE": "fail_open",
         }
         with patch.dict("os.environ", dev_env, clear=True):
-            with patch("urllib.request.urlopen", side_effect=slow_urlopen):
+            with patch("kazenai.spine.transport.urlopen", side_effect=slow_urlopen):
                 result = _try_reserve_budget(
                     org_id="test-org", workspace_id="default", run_id="run-003"
                 )
@@ -171,7 +172,7 @@ class TestFinopsTimeoutFailsOpen(unittest.TestCase):
             "KAZENAI_FINOPS_RESERVATION_MODE": "fail_closed",
         }
         with patch.dict("os.environ", prod_env, clear=True):
-            with patch("urllib.request.urlopen", side_effect=slow_urlopen):
+            with patch("kazenai.spine.transport.urlopen", side_effect=slow_urlopen):
                 with self.assertRaises(BudgetUnavailable):
                     _try_reserve_budget(
                         org_id="test-org", workspace_id="default", run_id="run-003"
@@ -196,7 +197,7 @@ class TestReconcileFiresAfterCall(unittest.TestCase):
             return mock_resp
 
         with patch.dict("os.environ", _LEGACY_FINOPS_ENV, clear=True):
-            with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
                 ok = _try_reconcile_budget(
                     org_id="test-org",
                     workspace_id="default",
@@ -226,10 +227,11 @@ class TestReconcileFiresAfterCall(unittest.TestCase):
             attempt=2,
             lifecycle=True,
             finops_base_url="http://localhost:8090",
+            settlement_capability="kzcap1.test." + "A" * 43,
         )
         with patch.dict("os.environ", _LEGACY_FINOPS_ENV, clear=True):
             with patch(
-                "kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen
+                "kazenai.spine.transport.urlopen", side_effect=fake_urlopen
             ):
                 self.assertTrue(
                     signal_reservation_event(
@@ -275,7 +277,7 @@ class TestReconcileFiresAfterCall(unittest.TestCase):
             "KAZENAI_PROFILE": "legacy",
         }
         with patch.dict("os.environ", dev_env, clear=True):
-            with patch("urllib.request.urlopen", side_effect=lambda *a, **kw: urlopen_called.append(1)):
+            with patch("kazenai.spine.transport.urlopen", side_effect=lambda *a, **kw: urlopen_called.append(1)):
                 result = _try_reserve_budget(
                     org_id="test-org", workspace_id="default", run_id="run-005"
                 )
@@ -312,7 +314,7 @@ class TestWorkspaceIdScoping(unittest.TestCase):
             return mock_resp
 
         with patch.dict("os.environ", _LEGACY_FINOPS_ENV, clear=True):
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
                 _try_reserve_budget(
                     org_id="test-org",
                     workspace_id="billing-ws-99",
@@ -342,7 +344,7 @@ class TestActAsOrgHeader(unittest.TestCase):
 
         env = {**_LEGACY_FINOPS_ENV, "KAZENAI_FINOPS_API_KEY": "svc-key"}
         with patch.dict("os.environ", env, clear=True):
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
                 _try_reserve_budget(org_id="tenant-org", workspace_id="default", run_id="run-actas")
 
         self.assertEqual(len(captured), 1)
@@ -359,7 +361,7 @@ class TestActAsOrgHeader(unittest.TestCase):
 
         env = {**_LEGACY_FINOPS_ENV, "KAZENAI_FINOPS_API_KEY": "svc-key"}
         with patch.dict("os.environ", env, clear=True):
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
                 _try_reconcile_budget(
                     org_id="tenant-org",
                     workspace_id="default",

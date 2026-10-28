@@ -3,6 +3,12 @@
 Starts a real LiteLLM proxy subprocess, fake OpenAI upstream oracle(s), and
 (optionally) in-process FakeFinOps. Hermetic proofs remain in
 ``test_litellm_control.py``.
+
+Opt-in (KAZENAI_LITELLM_PROXY_TESTS=1). The proxy runs from a test-only
+open-components compatibility harness (tests/litellm_proxy_harness.lock), not a
+certified LiteLLM Proxy deployment: ``litellm[proxy]`` would also install
+BerriAI's proprietary ``litellm-enterprise``, whose production use requires a
+BerriAI agreement, so the harness installs the proxy requirements without it.
 """
 
 from __future__ import annotations
@@ -33,12 +39,21 @@ from test_litellm_control import FakeFinOps, _serve_finops
 REPO = Path(__file__).resolve().parents[2]
 EXAMPLES = REPO / "kazenai-examples" / "litellm-otel-control"
 ARTIFACTS = REPO / "artifacts"
-LITELLM_VENV = ARTIFACTS / "kazenai-litellm-venv"
-LITELLM_MAIN = Path(os.getenv("KAZENAI_LITELLM_SOURCE", "/nonexistent-litellm-source"))
+# A separate venv name: the old `kazenai-litellm-venv` was built from
+# `litellm[proxy]` and contains litellm-enterprise, so it must not be reused.
+LITELLM_VENV = ARTIFACTS / "kazenai-litellm-harness-venv"
+HARNESS_LOCK = Path(__file__).resolve().parent / "litellm_proxy_harness.lock"
 
 CONFIG_APP = EXAMPLES / "configs" / "proxy_app_owned.yaml"
 CONFIG_GATEWAY = EXAMPLES / "configs" / "proxy_gateway_owned.yaml"
 FAKE_UPSTREAM = EXAMPLES / "fake_upstream.py"
+
+if os.getenv("KAZENAI_LITELLM_PROXY_TESTS") != "1":
+    pytest.skip(
+        "LiteLLM proxy tests are opt-in (KAZENAI_LITELLM_PROXY_TESTS=1); they run a "
+        "third-party proxy under its own terms from the open-components test harness",
+        allow_module_level=True,
+    )
 
 # Needs the kazenai-examples LiteLLM configs and gateway callback beside this repo.
 if not (EXAMPLES / "kazenai_litellm_callback.py").is_file():
@@ -81,40 +96,45 @@ def _litellm_bin() -> Path:
     return LITELLM_VENV / "bin" / "litellm"
 
 
+def _assert_no_enterprise_package(python: Path) -> None:
+    probe = subprocess.run(
+        [str(python), "-c", "import importlib.util, sys; sys.exit(importlib.util.find_spec('litellm_enterprise') is not None)"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # Not a skip: a harness that contains the proprietary package is a failure.
+    assert probe.returncode == 0, "litellm_enterprise is installed in the LiteLLM test harness"
+
+
 def _ensure_litellm_venv() -> Path:
-    """Return litellm CLI path or pytest.skip with reason."""
+    """Return the litellm CLI from the open-components harness, or skip."""
     bin_path = _litellm_bin()
-    if bin_path.is_file():
-        return bin_path
-
-    py = sys.executable
-    LITELLM_VENV.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        subprocess.run([py, "-m", "venv", str(LITELLM_VENV)], check=True, capture_output=True, text=True)
-        pip = LITELLM_VENV / "bin" / "pip"
-        subprocess.run([str(pip), "install", "-U", "pip"], check=True, capture_output=True, text=True)
-        install_target = "litellm[proxy]==1.104.2"
-        if LITELLM_MAIN.is_dir():
-            install_target = f"{LITELLM_MAIN}[proxy]"
-        subprocess.run(
-            [str(pip), "install", install_target],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        subprocess.run(
-            [str(pip), "install", "-e", str(REPO / "kazen-event-schema"), "-e", str(REPO / "kazenai-core")],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-    except Exception as exc:
-        pytest.skip(f"LiteLLM proxy venv bootstrap failed: {exc}")
-
+    python = LITELLM_VENV / "bin" / "python"
     if not bin_path.is_file():
-        pytest.skip("LiteLLM CLI missing after venv bootstrap")
+        LITELLM_VENV.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run([sys.executable, "-m", "venv", str(LITELLM_VENV)], check=True, capture_output=True, text=True)
+            pip = LITELLM_VENV / "bin" / "pip"
+            subprocess.run(
+                [str(pip), "install", "--require-hashes", "--no-deps", "-r", str(HARNESS_LOCK)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+            subprocess.run(
+                [str(pip), "install", "--no-deps", "-e", str(REPO / "kazen-event-schema"), "-e", str(REPO / "kazenai-core")],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except Exception as exc:
+            pytest.skip(f"LiteLLM harness venv bootstrap failed: {exc}")
+        if not bin_path.is_file():
+            pytest.skip("LiteLLM CLI missing after harness bootstrap")
+    _assert_no_enterprise_package(python)
     return bin_path
 
 

@@ -1,0 +1,28 @@
+{
+  "fixture_id": "valid_service_act_as",
+  "expect": "accept",
+  "principal": {
+    "identity_kind": "service",
+    "subject_id": "svc-finops-proxy",
+    "actor_id": "svc-finops-proxy",
+    "org_id": "svc-home",
+    "workspace_id": "default",
+    "role": "service",
+    "auth_type": "service_token",
+    "delegation": {
+      "kind": "act_as_org",
+      "asserted_org_id": "org-a",
+      "audience": "finops",
+      "scope": ["budget.reserve", "budget.reconcile"]
+    }
+  },
+  "request": {
+    "headers": {
+      "X-Kazen-Act-As-Org": "org-a",
+      "X-Kazen-Org-Id": "org-a"
+    },
+    "body_org_id": "org-a",
+    "body_workspace_id": "ws-a"
+  },
+  "audit_must_include": ["actor_id", "subject_id", "delegation.kind"]
+}

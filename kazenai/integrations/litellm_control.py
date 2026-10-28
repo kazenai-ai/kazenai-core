@@ -1,8 +1,8 @@
 """LiteLLM gateway Control helpers.
 
 Runs in the *gateway* process (or hermetic tests). Does not import LiteLLM.
-Application packages must not depend on LiteLLM internals; load the CustomLogger
-from ``kazenai-examples/litellm-otel-control`` inside the pinned gateway.
+Application packages must not depend on LiteLLM internals; load the gateway
+CustomLogger, ``kazenai.integrations.litellm_gateway``, inside the pinned gateway.
 
 Two modes:
   - application-owned: SDK reserves/settles; gateway retries/fallbacks off
@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, MutableMapping, Optional
 from urllib import error as urllib_error
 from urllib import request as urllib_request
+
+from ..spine import transport as _transport
 
 
 LIFECYCLE_VERSION = "reservation.lifecycle.v1"
@@ -123,7 +125,11 @@ def _canonical_model_name(model: str) -> str:
 
 
 def estimate_cost_usd(
-    *, model: str, prompt_tokens: int, completion_tokens: int
+    *,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    audio_prompt_tokens: int | None = 0,
 ) -> float | None:
     """Authoritative local price when known; ``None`` when pricing is unavailable.
 
@@ -131,9 +137,16 @@ def estimate_cost_usd(
     Callers should settle ``outcome_unknown`` / pending when this returns None.
     LiteLLM provider prefixes are stripped before lookup. A ``$0.00`` result for
     an unrecognized model is treated as unavailable pricing (not a free call).
+
+    ``audio_prompt_tokens`` is the audio share of ``prompt_tokens``. Gemini 2.5
+    bills audio input above text, so it is priced at the audio rate. ``None``
+    means unknown: every prompt token is priced at the higher of the two rates
+    (a ceiling, used for holds). Settle with :func:`estimate_cost_from_response`,
+    which reads the audio share from the provider usage.
     """
     try:
         from kazenai.cost_engine import TokenCostEngine
+        from kazenai.price_catalog import cost_micro_usd, micro_usd_to_decimal
         from kazenai.pricing_policy import resolve_model_key
 
         engine = TokenCostEngine()
@@ -143,13 +156,28 @@ def estimate_cost_usd(
         for candidate in (canon, raw):
             if candidate not in candidates:
                 candidates.append(candidate)
+        prompt = max(0, int(prompt_tokens))
         for candidate in candidates:
             known = resolve_model_key(candidate, engine.known_models(), {})
             if known is None:
                 continue
+            row = engine._row(candidate)
+            if row is not None:
+                rates = row.rates
+                if audio_prompt_tokens is None:
+                    audio = prompt if rates.audio_input is not None and rates.audio_input > rates.input else 0
+                else:
+                    audio = min(prompt, max(0, int(audio_prompt_tokens)))
+                micros = cost_micro_usd(
+                    rates,
+                    input_tokens=prompt - audio,
+                    audio_input_tokens=audio,
+                    output_tokens=max(0, int(completion_tokens)),
+                )
+                return float(micro_usd_to_decimal(micros))
             cost = engine.cost_usd(
                 model=candidate,
-                input_tokens=int(prompt_tokens),
+                input_tokens=prompt,
                 output_tokens=int(completion_tokens),
             )
             if cost is None:
@@ -160,10 +188,47 @@ def estimate_cost_usd(
         return None
 
 
-def estimate_reserve_usd(*, model: str, prompt_tokens: int, completion_tokens: int) -> float:
-    """Conservative pre-dispatch hold. Never used as a final settlement amount."""
+def extract_audio_prompt_tokens(response: Any) -> int:
+    """Audio share of the prompt from provider usage (0 when not reported)."""
+    usage = getattr(response, "usage", None)
+    if usage is None and isinstance(response, Mapping):
+        usage = response.get("usage")
+    if usage is None:
+        return 0
+    from kazenai.request_pricing import usage_components
+
+    return int(usage_components(usage).get("audio_input_tokens") or 0)
+
+
+def estimate_cost_from_response(*, model: str, response: Any) -> float | None:
+    """Settlement price from a provider response, audio input included."""
+    prompt, completion, _total = extract_usage_tokens(response)
+    return estimate_cost_usd(
+        model=model,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        audio_prompt_tokens=extract_audio_prompt_tokens(response),
+    )
+
+
+def estimate_reserve_usd(
+    *,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    audio_prompt_tokens: int | None = None,
+) -> float:
+    """Conservative pre-dispatch hold. Never used as a final settlement amount.
+
+    Without ``audio_prompt_tokens`` the hold assumes the prompt may be audio and
+    uses the higher audio rate where the model publishes one. Pass ``0`` for a
+    text-only request to hold at the text rate.
+    """
     priced = estimate_cost_usd(
-        model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        audio_prompt_tokens=audio_prompt_tokens,
     )
     if priced is not None and priced > 0:
         return float(priced)
@@ -391,7 +456,7 @@ class GatewayFinOpsClient:
             method="POST",
         )
         try:
-            with urllib_request.urlopen(req, timeout=self.timeout_s) as resp:
+            with _transport.urlopen(req, timeout=self.timeout_s) as resp:
                 raw = resp.read().decode("utf-8")
                 payload = json.loads(raw) if raw else {}
                 return int(resp.status), payload if isinstance(payload, dict) else {}

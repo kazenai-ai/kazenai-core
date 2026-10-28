@@ -350,6 +350,9 @@ def test_u02_durable_settle_queue_keeps_pending_and_flushes(tmp_path, monkeypatc
     first = flush_pending_settlements(default_base_url="http://finops.test", default_api_key="k")
     assert first["failed"] == 1
     assert len(q.list_pending()) == 1
+    # A failed post is not retried until its persisted backoff is due.
+    later = __import__("time").time() + 10_000
+    monkeypatch.setattr("kazenai.spine.settle_queue.time.time", lambda: later)
     second = flush_pending_settlements(default_base_url="http://finops.test", default_api_key="k")
     assert second["applied"] == 1
     assert len(q.list_pending()) == 0
@@ -399,7 +402,7 @@ def test_u02_post_settle_sync_enqueues_on_pending_result(tmp_path, monkeypatch):
             return False
 
     monkeypatch.setattr(
-        "kazenai.spine.guard.urllib.request.urlopen",
+        "kazenai.spine.transport.urlopen",
         lambda *a, **k: _Resp(),
     )
     body = {
@@ -421,7 +424,7 @@ def test_u02_post_settle_sync_enqueues_on_pending_result(tmp_path, monkeypatch):
     from kazenai.spine.guard import flush_pending_settlements as guard_flush
 
     monkeypatch.setattr(
-        "kazenai.spine.guard.urllib.request.urlopen",
+        "kazenai.spine.transport.urlopen",
         lambda *a, **k: (_ for _ in ()).throw(TimeoutError("down")),
     )
     out = guard_flush(default_base_url="http://finops.test", default_api_key="k")
@@ -494,3 +497,27 @@ def test_u10_workflow_span_covers_invoke(monkeypatch):
     names = [s.name for s in exporter.get_finished_spans()]
     assert "kazenai.workflow" in names
     _record("u10_workflow_span", "pass", ",".join(names))
+
+
+def test_settle_queue_tmp_fallback_is_per_user_and_refuses_a_foreign_folder(monkeypatch, tmp_path):
+    """No HOME: the shared temp folder is per user, and one another user owns is refused."""
+    import os
+
+    import pytest
+
+    from kazenai.spine import settle_queue
+
+    if not hasattr(os, "getuid"):
+        pytest.skip("POSIX ownership check")
+    for name in ("KAZENAI_SDK_SETTLE_QUEUE_DIR", "XDG_STATE_HOME", "HOME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(settle_queue.tempfile, "gettempdir", lambda: str(tmp_path))
+    root = settle_queue._default_root()
+    assert root == str(tmp_path / f"kazenai-sdk-settle-queue-{os.getuid()}")
+    assert (os.stat(root).st_mode & 0o777) == 0o700
+
+    monkeypatch.setattr(settle_queue.os, "getuid", lambda: os.stat(root).st_uid + 1)
+    other = tmp_path / f"kazenai-sdk-settle-queue-{os.stat(root).st_uid + 1}"
+    other.mkdir()
+    with pytest.raises(PermissionError):
+        settle_queue._default_root()

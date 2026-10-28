@@ -5,7 +5,7 @@ integration under test and checks the same contract as the provider smoke:
 a real response, a recorded cost equal to the pricing table applied to the
 provider-reported input/output tokens, and denial before dispatch.
 
-Cells that use the shared spend authority run against a real Agent FinOps
+Cells that use the shared budget ledger run against a real Agent FinOps
 service (Control profile, Postgres) and read its ledger directly.
 
 Required environment:
@@ -35,6 +35,7 @@ import os
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -133,7 +134,7 @@ def _write_evidence():
     target.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     versions = {}
-    for dist in ("kazenai", "openai", "anthropic", "langchain", "langchain-core", "langchain-openai", "langgraph", "langgraph-checkpoint-sqlite"):
+    for dist in ("kazenai", "openai", "anthropic", "langchain", "langchain-core", "langchain-openai", "langgraph", "langgraph-checkpoint-sqlite", "crewai"):
         try:
             versions[dist] = metadata.version(dist)
         except metadata.PackageNotFoundError:
@@ -860,3 +861,289 @@ def test_provider_rejection_releases_finops_hold(monkeypatch):
         assert int(rows[0]["actual_usd_micros"] or 0) == 0
         assert client._kazenai_enforcement.snapshot()["pending_projected_usd"] == 0.0
         cell.update(state=rows[0]["state"], reserved_usd_micros=rows[0]["reserved_usd_micros"], settled_usd_micros=0)
+
+
+# --------------------------------------------------------------------------- CrewAI
+
+
+def _crewai_env(monkeypatch) -> None:
+    pytest.importorskip("crewai")
+    monkeypatch.setenv("CREWAI_DISABLE_TELEMETRY", "true")
+    monkeypatch.setenv("CREWAI_TRACING_ENABLED", "false")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+
+
+def _crew_llm(provider: str, key: str) -> Any:
+    import crewai
+
+    if provider == "openai":
+        return crewai.LLM(model=_openai_model(), api_key=key)
+    return crewai.LLM(model=f"anthropic/{_anthropic_model()}", api_key=key, max_tokens=400)
+
+
+def _crew_raw(provider: str, key: str) -> Any:
+    if provider == "openai":
+        import openai
+
+        return openai.OpenAI(api_key=key, max_retries=0)
+    import anthropic
+
+    return anthropic.Anthropic(api_key=key, max_retries=0)
+
+
+def _crew_model(provider: str) -> str:
+    return _openai_model() if provider == "openai" else _anthropic_model()
+
+
+def _crew_agent(llm: Any, role: str, **kwargs: Any) -> Any:
+    import crewai
+
+    kwargs.setdefault("max_iter", 2)
+    return crewai.Agent(role=role, goal="Answer briefly", backstory="A concise assistant.", llm=llm,
+                        allow_delegation=False, **kwargs)
+
+
+def _one_task_crew(agent: Any, description: str, **task_kwargs: Any) -> Any:
+    import crewai
+
+    task = crewai.Task(description=description, expected_output="One short sentence.", agent=agent, **task_kwargs)
+    return crewai.Crew(agents=[agent], tasks=[task])
+
+
+def _llm_price(llm: Any, model: str) -> tuple[float, int, int, int]:
+    usage = llm.get_token_usage_summary()
+    return _price(model, usage.prompt_tokens, usage.completion_tokens), usage.prompt_tokens, usage.completion_tokens, usage.successful_requests
+
+
+def _crew_denied_before_dispatch(provider: str, use_async: bool) -> bool:
+    """A 1e-9 budget and an invalid key: BudgetExceeded (a CrewAI stop) proves no dispatch."""
+    from crewai.hooks.dispatch import HookAborted
+
+    from kazenai import BudgetExceeded
+    from kazenai.integrations.crewai import bind_crew_llm_client, wrap_crew
+
+    llm = _crew_llm(provider, "sk-invalid-never-dispatched")
+    crew = _one_task_crew(_crew_agent(llm, "denied"), "Say hello.")
+    guarded = bind_crew_llm_client(crew, _crew_raw(provider, "sk-invalid-never-dispatched"), max_budget_usd=1e-9)
+    adapter = wrap_crew(crew, capability="control", guarded_client=guarded)
+    with pytest.raises(BudgetExceeded) as info:
+        asyncio.run(adapter.akickoff()) if use_async else adapter.kickoff()
+    assert isinstance(info.value, HookAborted), "a denial must stop the crew, not be retried"
+    return True
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+@pytest.mark.parametrize("mode", ["kickoff", "akickoff"])
+def test_crewai_control(monkeypatch, provider, mode):
+    from kazenai.integrations.crewai import bind_crew_llm_client, wrap_crew
+
+    _local_mode(monkeypatch)
+    _crewai_env(monkeypatch)
+    key = _key("OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY")
+    model = _crew_model(provider)
+    with _Cell(f"crewai.{mode}.{provider}", model=model, framework="crewai") as cell:
+        llm = _crew_llm(provider, key)
+        crew = _one_task_crew(_crew_agent(llm, "assistant"), "Name one planet in our solar system.")
+        guarded = bind_crew_llm_client(crew, _crew_raw(provider, key), max_budget_usd=0.25,
+                                       soft_pause_pct=100.0, loop_anomaly_threshold=1.0)
+        adapter = wrap_crew(crew, capability="control", guarded_client=guarded)
+        result = asyncio.run(adapter.akickoff()) if mode == "akickoff" else adapter.kickoff()
+        assert str(result).strip(), "empty crew result"
+        expected, inp, out, requests = _llm_price(llm, model)
+        recorded = _recorded(guarded)
+        assert requests >= 1 and recorded > 0
+        assert recorded == pytest.approx(expected, rel=1e-6, abs=1e-9)
+        cell.update(input_tokens=inp, output_tokens=out, llm_requests=requests,
+                    recorded_cost_usd=recorded, expected_cost_usd=expected,
+                    denied_before_dispatch=_crew_denied_before_dispatch(provider, mode == "akickoff"))
+
+
+def test_crewai_multi_provider_shared_local_budget(monkeypatch):
+    """An OpenAI researcher and an Anthropic writer on one SharedBudget, then denied when it runs out."""
+    import crewai
+
+    from kazenai import BudgetExceeded, SharedBudget
+    from kazenai.integrations.crewai import bind_crew_llm_client, wrap_crew
+
+    _local_mode(monkeypatch)
+    _crewai_env(monkeypatch)
+    okey, akey = _key("OPENAI_API_KEY"), _key("ANTHROPIC_API_KEY")
+    with _Cell("crewai.multi_provider.shared_local_budget", models=[_openai_model(), _anthropic_model()], framework="crewai") as cell:
+        o_llm, a_llm = _crew_llm("openai", okey), _crew_llm("anthropic", akey)
+        researcher = _crew_agent(o_llm, "researcher")
+        writer = _crew_agent(a_llm, "writer")
+        tasks = [
+            crewai.Task(description="List two facts about Mars.", expected_output="Two short facts.", agent=researcher),
+            crewai.Task(description="Turn the facts into one sentence.", expected_output="One sentence.", agent=writer),
+        ]
+        crew = crewai.Crew(agents=[researcher, writer], tasks=tasks)
+        budget = SharedBudget(0.25, name="live-crew")
+        g_openai = bind_crew_llm_client(researcher, _crew_raw("openai", okey), budget=budget,
+                                        soft_pause_pct=100.0, loop_anomaly_threshold=1.0)
+        g_anthropic = bind_crew_llm_client(writer, _crew_raw("anthropic", akey), budget=budget,
+                                           soft_pause_pct=100.0, loop_anomaly_threshold=1.0)
+        adapter = wrap_crew(crew, capability="control", guarded_clients=[g_openai, g_anthropic])
+        adapter.kickoff()
+        o_cost, o_in, o_out, o_req = _llm_price(o_llm, _openai_model())
+        a_cost, a_in, a_out, a_req = _llm_price(a_llm, _anthropic_model())
+        assert o_req >= 1 and a_req >= 1
+        assert budget.spent_usd == pytest.approx(o_cost + a_cost, rel=1e-6, abs=1e-9)
+
+        # Same crew on a budget that is already spent: denied before any provider call.
+        spent = budget.spent_usd
+        tight = SharedBudget(1e-9, name="live-crew-exhausted")
+        bind_crew_llm_client(researcher, _crew_raw("openai", "sk-invalid-never-dispatched"), budget=tight)
+        bind_crew_llm_client(writer, _crew_raw("anthropic", "sk-invalid-never-dispatched"), budget=tight)
+        with pytest.raises(BudgetExceeded):
+            crew.kickoff()
+        assert budget.spent_usd == spent and tight.spent_usd == 0.0
+        cell.update(spent_usd=spent, by_model_usd={_openai_model(): o_cost, _anthropic_model(): a_cost},
+                    llm_requests={"openai": o_req, "anthropic": a_req}, denied_before_dispatch=True)
+
+
+def test_crewai_akickoff_cancel(monkeypatch):
+    """Cancelling akickoff stops the crew; a call already sent finishes and is charged exactly once."""
+    _local_mode(monkeypatch)
+    _crewai_env(monkeypatch)
+    from kazenai.integrations import crewai as crew_mod
+    from kazenai.integrations.crewai import bind_crew_llm_client, wrap_crew
+
+    key = _key("OPENAI_API_KEY")
+    model = _openai_model()
+    with _Cell("crewai.akickoff.cancel", model=model, framework="crewai") as cell:
+        llm = _crew_llm("openai", key)
+        crew = _one_task_crew(_crew_agent(llm, "assistant"), "Write a haiku about budgets.")
+        guarded = bind_crew_llm_client(crew, _crew_raw("openai", key), max_budget_usd=0.25,
+                                       soft_pause_pct=100.0, loop_anomaly_threshold=1.0)
+        events: List[Any] = []
+        adapter = wrap_crew(crew, capability="control", guarded_client=guarded, on_event=events.append)
+        sent = threading.Event()
+        original = guarded.chat.completions.create
+
+        def _mark(*a: Any, **k: Any) -> Any:
+            sent.set()
+            return original(*a, **k)
+
+        guarded.chat.completions.create = _mark
+        guarded.chat.completions.__dict__.pop("with_raw_response", None)
+
+        async def _run() -> None:
+            task = asyncio.create_task(adapter.akickoff())
+            for _ in range(600):
+                await asyncio.sleep(0.01)
+                if sent.is_set():
+                    break
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(_run())
+        assert sent.is_set(), "the cancel must land after a provider call was sent"
+        deadline = time.time() + 60
+        while llm.get_token_usage_summary().successful_requests == 0 and time.time() < deadline:
+            time.sleep(0.2)
+        time.sleep(0.5)
+        expected, inp, out, requests = _llm_price(llm, model)
+        snap = guarded._kazenai_enforcement.snapshot()
+        types = [e.event_type for e in events]
+        assert "workflow.end" not in types
+        assert any((e.payload or {}).get("terminal") == "cancelled" for e in events)
+        assert crew_mod._ACTIVE_OPS.get(id(crew)) is None
+        assert snap["cumulative_cost_usd"] == pytest.approx(expected, rel=1e-6, abs=1e-9)
+        assert snap["pending_projected_usd"] == 0.0
+        cell.update(llm_requests=requests, input_tokens=inp, output_tokens=out,
+                    recorded_cost_usd=snap["cumulative_cost_usd"], expected_cost_usd=expected)
+
+
+def test_crewai_nested(monkeypatch):
+    """A crew kicked off from another crew's task: its own operation, both spends exact."""
+    import crewai
+
+    from kazenai.integrations.crewai import bind_crew_llm_client, wrap_crew
+
+    _local_mode(monkeypatch)
+    _crewai_env(monkeypatch)
+    key = _key("OPENAI_API_KEY")
+    model = _openai_model()
+    with _Cell("crewai.nested", model=model, framework="crewai") as cell:
+        inner_llm = _crew_llm("openai", key)
+        inner = _one_task_crew(_crew_agent(inner_llm, "fact checker"), "Is Mars red? Answer yes or no.")
+        g_inner = bind_crew_llm_client(inner, _crew_raw("openai", key), max_budget_usd=0.25,
+                                       soft_pause_pct=100.0, loop_anomaly_threshold=1.0)
+        inner_events: List[Any] = []
+        inner_adapter = wrap_crew(inner, capability="control", guarded_client=g_inner, on_event=inner_events.append)
+
+        outer_llm = _crew_llm("openai", key)
+        outer_agent = _crew_agent(outer_llm, "planner")
+        outer = crewai.Crew(agents=[outer_agent], tasks=[crewai.Task(
+            description="Name the fourth planet from the Sun.", expected_output="One word.", agent=outer_agent,
+            callback=lambda _out: inner_adapter.kickoff())])
+        g_outer = bind_crew_llm_client(outer, _crew_raw("openai", key), max_budget_usd=0.25,
+                                       soft_pause_pct=100.0, loop_anomaly_threshold=1.0)
+        outer_events: List[Any] = []
+        wrap_crew(outer, capability="control", guarded_client=g_outer, on_event=outer_events.append).kickoff()
+
+        o_cost, *_ = _llm_price(outer_llm, model)
+        i_cost, *_ = _llm_price(inner_llm, model)
+        assert _recorded(g_outer) == pytest.approx(o_cost, rel=1e-6, abs=1e-9)
+        assert _recorded(g_inner) == pytest.approx(i_cost, rel=1e-6, abs=1e-9)
+        outer_ops = {e.payload["operation_id"] for e in outer_events}
+        inner_ops = {e.payload["operation_id"] for e in inner_events}
+        assert len(outer_ops) == 1 and len(inner_ops) == 1 and outer_ops != inner_ops
+        cell.update(outer_cost_usd=o_cost, inner_cost_usd=i_cost)
+
+
+def test_crewai_multi_provider_shared_finops_budget(monkeypatch):
+    """Two-provider crew on one FinOps workflow budget: one reservation per LLM call, then a deny receipt."""
+    import crewai
+
+    from kazenai import BudgetExceeded
+    from kazenai.integrations.crewai import bind_crew_llm_client, wrap_crew
+
+    cfg = _finops_cfg()
+    _finops_mode(monkeypatch, cfg)
+    _crewai_env(monkeypatch)
+    okey, akey = _key("OPENAI_API_KEY"), _key("ANTHROPIC_API_KEY")
+    workflow_id = f"wf-crew-{uuid.uuid4().hex[:8]}"
+    limit_usd = float(os.getenv("KAZENAI_LIVE_CREW_LIMIT_USD", "0.01"))
+    _create_limit(cfg, dimension="workflow", dimension_id=workflow_id, limit_usd=limit_usd)
+    with _Cell("crewai.multi_provider.shared_finops_budget", models=[_openai_model(), _anthropic_model()],
+               framework="crewai", workflow_id=workflow_id, workflow_limit_usd=limit_usd) as cell:
+        attribution = {"org_id": cfg["org"], "workspace_id": cfg["ws"], "workflow_id": workflow_id}
+        llms: List[Any] = []
+        runs, denied = 0, False
+        for attempt in range(15):
+            o_llm, a_llm = _crew_llm("openai", okey), _crew_llm("anthropic", akey)
+            llms += [o_llm, a_llm]
+            researcher, writer = _crew_agent(o_llm, "researcher"), _crew_agent(a_llm, "writer")
+            crew = crewai.Crew(agents=[researcher, writer], tasks=[
+                crewai.Task(description=f"Give fact number {attempt + 1} about Jupiter.", expected_output="One fact.", agent=researcher),
+                crewai.Task(description="Rewrite the fact as one friendly sentence.", expected_output="One sentence.", agent=writer),
+            ])
+            g_o = bind_crew_llm_client(researcher, _crew_raw("openai", okey), feature_id="research", **attribution)
+            g_a = bind_crew_llm_client(writer, _crew_raw("anthropic", akey), feature_id="write", **attribution)
+            try:
+                wrap_crew(crew, capability="control", guarded_clients=[g_o, g_a],
+                          org_id=cfg["org"], workspace_id=cfg["ws"]).kickoff()
+                runs += 1
+            except BudgetExceeded:
+                denied = True
+                break
+        assert runs >= 1, "at least one full two-provider run should fit the budget"
+        assert denied, "the shared workflow budget should eventually deny a call"
+        requests = sum(llm.get_token_usage_summary().successful_requests for llm in llms)
+        rows = _ledger(cfg, "workflow_id = %s", (workflow_id,))
+        assert len(rows) == requests, f"one reservation per LLM call ({len(rows)} rows, {requests} calls)"
+        assert all(r["state"] == "settled" for r in rows), [r["state"] for r in rows]
+        settled_micros = sum(int(r["actual_usd_micros"] or 0) for r in rows)
+        assert settled_micros <= _micros(limit_usd)
+        expected = sum(_price(_openai_model() if i % 2 == 0 else _anthropic_model(),
+                              llm.get_token_usage_summary().prompt_tokens,
+                              llm.get_token_usage_summary().completion_tokens) for i, llm in enumerate(llms))
+        assert abs(settled_micros - expected * 1_000_000) <= requests + 1
+        receipts = _receipts(cfg, workflow_id=workflow_id)
+        denies = [r for r in receipts if r["decision"] == "deny"]
+        assert denies, "the denied call must leave a deny receipt"
+        cell.update(full_runs=runs, llm_calls=requests, reservations=len(rows), settled_usd=settled_micros / 1_000_000,
+                    receipts={"allow": sum(1 for r in receipts if r["decision"] == "allow"), "deny": len(denies)},
+                    deny_reason=denies[-1]["reason_code"])

@@ -160,6 +160,25 @@ class StreamAttempt:
     # Model-attempt span that outlives stream object return.
     _otel_span: Any = field(default=None, repr=False)
     _otel_token: Any = field(default=None, repr=False)
+    pricing_call: Any = None
+
+    def __post_init__(self) -> None:
+        if self.pricing_call is None:
+            try:
+                from ..pricing_context import current_pricing
+
+                self.pricing_call = current_pricing()
+            except Exception:
+                self.pricing_call = None
+
+    def _tier_hold_usd(self) -> Optional[float]:
+        pricing = self.pricing_call
+        if pricing is None or not getattr(pricing, "hold_for_reconciliation", False):
+            return None
+        held = getattr(pricing, "held_exposure_usd", None)
+        if held is None:
+            held = getattr(pricing, "reserved_usd", 0) or 0
+        return float(held)
 
     def begin_otel_span(
         self,
@@ -282,7 +301,15 @@ class StreamAttempt:
             confidence = "exact"
             settle_cost = 0.0
             authoritative_usage = False
-            if outcome in (StreamOutcome.COMPLETE,) and auth and cost_usd is not None:
+            hold_usd = self._tier_hold_usd()
+            if hold_usd is not None and outcome == StreamOutcome.COMPLETE and auth:
+                # Known unexpected or unknown reported tier: outcome_unknown event
+                # (pending callback, no actual), state pending_reconciliation.
+                settle_cost = float(hold_usd)
+                confidence = "pending_reconciliation"
+                pending = True
+                authoritative_usage = False
+            elif outcome in (StreamOutcome.COMPLETE,) and auth and cost_usd is not None:
                 settle_cost = float(cost_usd)
                 confidence = "exact"
                 pending = False
@@ -364,7 +391,7 @@ class StreamAttempt:
             # Exact provider usage is valid for the local counter even when the
             # shared settlement delivery remains pending. Unknown usage never
             # becomes an exact local zero.
-            recorded = settle_cost if confidence.startswith("exact") else 0.0
+            recorded = settle_cost if confidence == "pending_reconciliation" or confidence.startswith("exact") else 0.0
             try:
                 self.enforcement.record_call(
                     cost_usd=recorded,
@@ -427,7 +454,15 @@ class StreamAttempt:
             confidence = "exact"
             settle_cost = 0.0
             authoritative_usage = False
-            if outcome in (StreamOutcome.COMPLETE,) and auth and cost_usd is not None:
+            hold_usd = self._tier_hold_usd()
+            if hold_usd is not None and outcome == StreamOutcome.COMPLETE and auth:
+                # Known unexpected or unknown reported tier: outcome_unknown event
+                # (pending callback, no actual), state pending_reconciliation.
+                settle_cost = float(hold_usd)
+                confidence = "pending_reconciliation"
+                pending = True
+                authoritative_usage = False
+            elif outcome in (StreamOutcome.COMPLETE,) and auth and cost_usd is not None:
                 settle_cost = float(cost_usd)
                 confidence = "exact"
                 pending = False
@@ -487,7 +522,7 @@ class StreamAttempt:
             self.cost_confidence = conf
             # Match sync finalize: exact provider usage stays on the local counter
             # even when remote settlement acknowledgment is still pending.
-            recorded = settle_cost if conf.startswith("exact") else 0.0
+            recorded = settle_cost if conf == "pending_reconciliation" or conf.startswith("exact") else 0.0
             try:
                 self.enforcement.record_call(
                     cost_usd=recorded,
