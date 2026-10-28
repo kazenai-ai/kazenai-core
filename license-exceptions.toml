@@ -1,0 +1,9 @@
+# Reviewed licence exceptions (read by scripts/license_policy.py).
+#
+# Use only when package metadata is missing, wrong or contradictory. An entry
+# replaces the declared expression with the verified one; it cannot make a
+# prohibited licence acceptable. Expired entries fail the gate.
+#
+#
+
+# No exceptions needed for this repository (2026-10-17).

@@ -1,0 +1,148 @@
+# KazenAI licence policy (read by scripts/license_policy.py). Same file in every repo.
+#
+# Decisions by category:
+#   permissive        allow
+#   weak_copyleft     conditional: allowed unmodified; notices must give the source
+#                     location (MPL-2.0 §3.2). Modified MPL files stay MPL.
+#   lgpl, gpl         deny in application packages (pkg:pypi, pkg:npm, ...).
+#                     OS packages (pkg:deb / pkg:apk / binary) in HOSTED-ONLY images:
+#                     conditional, recorded as self-hosted gate items (corresponding
+#                     source + notices before any image is given to a customer).
+#   agpl              deny everywhere unless a reviewed exception exists.
+#   source_available  deny (SSPL, RSAL, BUSL, Elastic, Commons Clause, non-commercial).
+#   proprietary       deny, except first-party components listed below and verified
+#                     by name + lock digest (or local workspace link). There is no
+#                     generic proprietary exception.
+#   unknown           deny for application packages unless license-exceptions.toml
+#                     has a reviewed entry; conditional for OS packages in hosted images.
+#
+# The first-party table mirrors SOURCE_INVENTORY in the kazenai-legal repository
+# (the master copy). Keep both in step.
+
+linking_exceptions = [
+  "GCC-exception-2.0", "GCC-exception-3.1", "Classpath-exception-2.0", "LLVM-exception",
+  "Autoconf-exception-2.0", "Autoconf-exception-3.0", "Bison-exception-2.2", "Font-exception-2.0",
+  "OpenSSL-exception", "Libtool-exception", "Linux-syscall-note", "u-boot-exception-2.0",
+]
+
+[categories]
+permissive = [
+  "0BSD", "AFL-2.1", "AFL-3.0", "Apache-1.1", "Apache-2.0", "Artistic-2.0", "BlueOak-1.0.0",
+  "BSD-1-Clause", "BSD-2-Clause", "BSD-2-Clause-Patent", "BSD-3-Clause", "BSD-3-Clause-Clear",
+  "BSD-4-Clause", "BSD-Source-Code", "BSL-1.0", "CC-BY-3.0", "CC-BY-4.0", "CC0-1.0", "curl",
+  "FSFAP", "FSFUL", "FSFULLR", "HPND", "HPND-sell-variant", "ICU", "IJG", "ISC", "Libpng",
+  "libpng-2.0", "MIT", "MIT-0", "MIT-CMU", "MIT-Modern-Variant", "MPL-2.0-no-copyleft-exception",
+  "NCSA", "OFL-1.1", "OpenSSL", "PostgreSQL", "PSF-2.0", "Python-2.0", "Python-2.0.1", "SSLeay",
+  "Ruby", "TCL", "Unicode-3.0", "Unicode-DFS-2015", "Unicode-DFS-2016", "Unlicense", "UPL-1.0",
+  "W3C", "WTFPL", "X11", "Zlib", "zlib-acknowledgement", "LicenseRef-BSD-unspecified",
+  "LicenseRef-Public-Domain", "LicenseRef-PSF", "bzip2-1.0.6", "Beerware", "blessing", "Info-ZIP",
+  "NTP", "Spencer-94", "Spencer-99", "TCP-wrappers", "X11-distribute-modifications-variant",
+  "MIT-open-group", "Sendmail", "CC-PDDC", "OLDAP-2.8", "Xfig", "BSD-3-Clause-Attribution",
+]
+weak_copyleft = ["MPL-1.1", "MPL-2.0", "EPL-1.0", "EPL-2.0", "CDDL-1.0", "CDDL-1.1", "MS-RL", "CPL-1.0"]
+lgpl = [
+  "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later", "LGPL-3.0-only",
+  "LGPL-3.0-or-later", "LGPL-2.0", "LGPL-2.0+", "LGPL-2.1", "LGPL-2.1+", "LGPL-3.0", "LGPL-3.0+",
+]
+gpl = [
+  "GPL-1.0-only", "GPL-1.0-or-later", "GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only",
+  "GPL-3.0-or-later", "GPL-1.0", "GPL-1.0+", "GPL-2.0", "GPL-2.0+", "GPL-3.0", "GPL-3.0+",
+]
+agpl = ["AGPL-1.0", "AGPL-1.0-only", "AGPL-1.0-or-later", "AGPL-3.0", "AGPL-3.0-only", "AGPL-3.0-or-later"]
+source_available = [
+  "SSPL-1.0", "BUSL-1.1", "Elastic-2.0", "LicenseRef-RSAL-2.0", "LicenseRef-Commons-Clause",
+  "CC-BY-NC-4.0", "CC-BY-NC-SA-4.0", "CC-BY-NC-ND-4.0", "PolyForm-Noncommercial-1.0.0",
+  "PolyForm-Small-Business-1.0.0", "LicenseRef-BerriAI-Enterprise",
+]
+proprietary = ["LicenseRef-Proprietary", "LicenseRef-KazenAI-Proprietary", "UNLICENSED"]
+unknown = []
+
+# Free-text licence names seen in package metadata -> SPDX.
+[aliases]
+"MIT License" = "MIT"
+"MIT license" = "MIT"
+"The MIT License" = "MIT"
+"Apache Software License" = "Apache-2.0"
+"Apache License 2.0" = "Apache-2.0"
+"Apache License, Version 2.0" = "Apache-2.0"
+"Apache 2.0" = "Apache-2.0"
+"Apache-2" = "Apache-2.0"
+"Apache 2" = "Apache-2.0"
+"BSD License" = "LicenseRef-BSD-unspecified"
+"BSD" = "LicenseRef-BSD-unspecified"
+"new BSD" = "BSD-3-Clause"
+"New BSD License" = "BSD-3-Clause"
+"3-Clause BSD License" = "BSD-3-Clause"
+"Python Software Foundation License" = "LicenseRef-PSF"
+"PSF" = "LicenseRef-PSF"
+"ISC License (ISCL)" = "ISC"
+"Mozilla Public License 2.0 (MPL 2.0)" = "MPL-2.0"
+"Public Domain" = "LicenseRef-Public-Domain"
+"public-domain" = "LicenseRef-Public-Domain"
+"GNU Library or Lesser General Public License (LGPL)" = "LGPL-2.0-or-later"
+"LGPL with exceptions" = "LGPL-3.0-or-later"
+"GNU General Public License (GPL)" = "GPL-2.0-or-later"
+"GNU Affero General Public License v3" = "AGPL-3.0-only"
+"Server Side Public License" = "SSPL-1.0"
+"Business Source License 1.1" = "BUSL-1.1"
+"Redis Source Available License 2.0" = "LicenseRef-RSAL-2.0"
+"Proprietary" = "LicenseRef-Proprietary"
+"Other/Proprietary License" = "LicenseRef-Proprietary"
+
+# First-party KazenAI components (mirror of SOURCE_INVENTORY). A match needs the
+# name AND a verified digest from the lock (sha256) or a local workspace link.
+[[first_party]]
+name = "kazenai-contracts"
+ecosystem = "pypi"
+repository = "github.com/kazenai-ai/kazenai-contracts (private)"
+sha256 = "1c263b73162f2659e52d7f4912fb4d4a8a8beb5e1eb10e486f7abdabb5f5bae1"  # vendor/kazenai_contracts-0.1.3-py3-none-any.whl
+owner = "Dhavan Shah, trading as KazenAI"
+
+[[first_party]]
+name = "kazenai-platform"
+ecosystem = "npm"
+repository = "github.com/kazenai-ai/kazenai-platform (private)"
+local_link = true  # the lockfile root project
+owner = "Dhavan Shah, trading as KazenAI"
+
+[[first_party]]
+name = "kazenai-auth"
+ecosystem = "npm"
+repository = "github.com/kazenai-ai/kazenai-auth (private)"
+local_link = true  # the lockfile root project
+owner = "Dhavan Shah, trading as KazenAI"
+
+[[first_party]]
+name = "kazenai-agent-finops"
+ecosystem = "npm"
+repository = "github.com/kazenai-ai/kazenai-agent-finops (private)"
+local_link = true  # the lockfile root project
+owner = "Dhavan Shah, trading as KazenAI"
+
+[[first_party]]
+name = "kazenai-agent-lens-frontend"
+ecosystem = "npm"
+repository = "github.com/kazenai-ai/kazenai-agent-lens (private)"
+local_link = true  # the lockfile root project
+owner = "Dhavan Shah, trading as KazenAI"
+
+[[first_party]]
+name = "kazenai-contracts"
+ecosystem = "npm"
+repository = "github.com/kazenai-ai/kazenai-contracts (private)"
+local_link = true  # the lockfile root project
+owner = "Dhavan Shah, trading as KazenAI"
+
+[[first_party]]
+name = "kazenai-news"
+ecosystem = "npm"
+repository = "github.com/kazenai-ai/kazenai-news (private)"
+local_link = true  # the lockfile root project
+owner = "Dhavan Shah, trading as KazenAI"
+
+[[first_party]]
+name = "kazenai-site"
+ecosystem = "npm"
+repository = "github.com/kazenai-ai/kazenai-site (private)"
+local_link = true  # the lockfile root project
+owner = "Dhavan Shah, trading as KazenAI"
