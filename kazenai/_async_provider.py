@@ -9,10 +9,11 @@ from __future__ import annotations
 import importlib
 import logging
 import time
-from contextlib import ExitStack, asynccontextmanager
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from contextlib import ExitStack, asynccontextmanager, nullcontext
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .context import RunContext, get_current_context, use_context
+from ._dispatch_gate import install_dispatch_gate
 from .enforcement import Enforcement, LoopDetected, UnsupportedModeError
 from .schema import KazenEvent, new_id, now_ms
 
@@ -29,11 +30,48 @@ def _monitor_mod():
     return importlib.import_module("kazenai.monitor")
 
 
+async def _priced_projection(
+    m,
+    call_kwargs,
+    usd_per_1k_tokens,
+    *,
+    provider: str,
+    surface: str,
+    client,
+    org_id: str,
+    observe_unbounded=(),
+):
+    """Arm the price scope, count long context, then reuse the sync projection."""
+    m._arm_price_scope(
+        provider=provider,
+        surface=surface,
+        client=client,
+        org_id=org_id,
+        observe_unbounded=tuple(observe_unbounded or ()),
+        kwargs=call_kwargs,
+    )
+    from .request_pricing import prepare_provider_call_async
+
+    await prepare_provider_call_async(
+        call_kwargs,
+        provider=provider,
+        surface=surface,
+        client=client,
+        org_id=org_id,
+        observe_unbounded=tuple(observe_unbounded or ()),
+    )
+    return m._precall_projection_usd(call_kwargs, usd_per_1k_tokens)
+
+
+
+
 @asynccontextmanager
-async def _helper_inner_create_bypass_async(token_var):
+async def _helper_inner_create_bypass_async(token_var, gate_scope=nullcontext):
     token = token_var.set(True)
     try:
-        yield
+        # The stream helper dispatches during __aenter__, after it reserved.
+        with gate_scope():
+            yield
     finally:
         token_var.reset(token)
 
@@ -65,6 +103,8 @@ def patch_openai_async(
     endpoint_url: Optional[str] = None,
     endpoint_headers: Optional[Dict[str, str]] = None,
     certified_surface: bool = True,
+    allow_unmetered: Sequence[str] = (),
+    observe_unbounded: Sequence[str] = (),
 ) -> Callable[[], None]:
     m = _monitor_mod()
     from .attribution import use_attribution
@@ -80,6 +120,7 @@ def patch_openai_async(
         log = _log
     loop_detector = loop_detector or LoopDetector()
     dbg = DebugPrinter(enabled=debug)
+    del dbg  # parity with the sync path's optional pre-call printer
     attr_defaults = dict(
         business_subject_ref=business_subject_ref,
         feature_id=feature_id or feature,
@@ -94,11 +135,22 @@ def patch_openai_async(
         agent_id=agent_id,
     )
     patches: List[Tuple[Any, str, Any]] = []
+    # Backstop for references taken before monitor(): see _dispatch_gate.
+    gate = install_dispatch_gate(client, patches, allow_unmetered=allow_unmetered, is_async=True)
+    gate_scope = gate.authorized if gate is not None else nullcontext
 
     def _wrap(fn: Callable[..., Any], *, method: str) -> Callable[..., Any]:
+        is_responses = method.startswith("openai.responses")
+        stream_surface = (
+            m.SUPPORTED_OPENAI_RESPONSES_STREAM_METHOD if is_responses else m.SUPPORTED_OPENAI_STREAM_METHOD
+        )
+
         async def wrapped(*args: Any, **kwargs: Any) -> Any:
             if m._HELPER_INNER_CREATE_BYPASS.get():
                 return await fn(*args, **kwargs)
+            if is_responses:
+                # Requests whose cost cannot be bounded before dispatch fail here.
+                m._validate_responses_request(kwargs)
             ctx = m._call_context(ctx0)
             step_ctx = ctx.child_step()
             with ExitStack() as stack:
@@ -127,7 +179,7 @@ def patch_openai_async(
                     loop_scores = None
 
                 m._reject_streaming_if_unsupported(kwargs)
-                m._apply_output_token_bound(kwargs)
+                m._apply_output_token_bound(kwargs, responses=is_responses)
                 call_kwargs = dict(kwargs)
                 is_stream = bool(call_kwargs.get("stream"))
                 if is_stream:
@@ -136,8 +188,12 @@ def patch_openai_async(
                         merge_stream_options,
                         wrap_openai_async_stream,
                     )
+                    from .streaming.openai_responses import wrap_responses_async_stream
 
-                    call_kwargs = merge_stream_options(call_kwargs)
+                    # Responses report usage on the terminal event; they reject
+                    # stream_options.include_usage.
+                    if not is_responses:
+                        call_kwargs = merge_stream_options(call_kwargs)
 
                 model_name = str(call_kwargs.get("model") or "")
                 cutoff = stream_cutoff_usd
@@ -155,7 +211,16 @@ def patch_openai_async(
                             error_code="stream_cutoff_pricing_unavailable",
                         )
 
-                projected = m._precall_projection_usd(call_kwargs, usd_per_1k_tokens)
+                projected = await _priced_projection(
+                    m,
+                    call_kwargs,
+                    usd_per_1k_tokens,
+                    provider='openai',
+                    surface="responses" if is_responses else "chat",
+                    client=client,
+                    org_id=step_ctx.org_id,
+                    observe_unbounded=observe_unbounded,
+                )
                 held_projection, reserved_cost_usd = await m._reserve_with_local_hold_async(
                     enforcement=enforcement,
                     projected_cost_usd=projected,
@@ -207,13 +272,13 @@ def patch_openai_async(
                         )
 
                     attempt = StreamAttempt(
-                        surface=m.SUPPORTED_OPENAI_STREAM_METHOD,
+                        surface=stream_surface,
                         step_ctx=step_ctx,
                         enforcement=enforcement,
                         held_projection=held_projection,
                         reserved_cost_usd=reserved_cost_usd,
                         model=model_name,
-                        method=m.SUPPORTED_OPENAI_STREAM_METHOD,
+                        method=stream_surface,
                         usd_per_1k_tokens=output_rate,
                         settle_usd_per_1k_tokens=usd_per_1k_tokens,
                         capture_mode=capture_mode,
@@ -223,7 +288,7 @@ def patch_openai_async(
                         stream_cutoff_usd=cutoff,
                         reconcile_async_fn=m._try_settle_stream_budget_async,
                         pending_async_fn=m._try_mark_stream_pending_async,
-                        postcall_cost_fn=m._postcall_cost_usd,
+                        postcall_cost_fn=m._bound_postcall(),
                         reservation_payload_fn=m._reservation_payload_fields,
                         emit_event_fn=_emit,
                         attribution=attr_defaults,
@@ -258,7 +323,7 @@ def patch_openai_async(
                             reservation_id=getattr(reserved_cost_usd, "reservation_id", None),
                             decision_id=getattr(reserved_cost_usd, "decision_id", None),
                         ),
-                    ):
+                    ), gate_scope():
                         resp = await fn(*args, **call_kwargs)
                 except Exception as exc:
                     rejected = m._definitive_provider_rejection(exc)
@@ -307,7 +372,11 @@ def patch_openai_async(
 
                 if is_stream:
                     assert attempt is not None
-                    return m._wrap_stream_result(resp, attempt, wrap_openai_async_stream)
+                    return m._wrap_stream_result(
+                        resp,
+                        attempt,
+                        wrap_responses_async_stream if is_responses else wrap_openai_async_stream,
+                    )
 
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
                 tokens_used, usage = m._extract_usage(resp)
@@ -318,7 +387,7 @@ def patch_openai_async(
                     usd_per_1k_tokens=usd_per_1k_tokens,
                 )
                 if reserved_cost_usd is not None:
-                    if cost_usd is None:
+                    if cost_usd is None or m._pricing_holds_reconciliation():
                         await m._try_mark_stream_pending_async(
                             org_id=step_ctx.org_id,
                             workspace_id=step_ctx.workspace_id,
@@ -430,8 +499,11 @@ def patch_openai_async(
             (client.chat.completions, "create", m.SUPPORTED_OPENAI_METHOD)
         )
     targets.extend(m._openai_parse_targets(client))
+    targets.extend(m._openai_responses_targets(client))
     if not targets:
-        raise TypeError("Unsupported async client: expected `.chat.completions.create`")
+        raise TypeError(
+            "Unsupported async client: expected `.chat.completions.create` and/or `.responses.create`"
+        )
 
     for obj, name, event_type in targets:
         orig = getattr(obj, name)
@@ -443,148 +515,161 @@ def patch_openai_async(
             pass
         setattr(obj, name, wrapped_fn)
 
-    # Async stream helper manager.
-    try:
-        completions = client.chat.completions
-        if hasattr(completions, "stream") and callable(completions.stream):
-            orig_stream = completions.stream
+    # Async stream helper managers (``chat.completions.stream`` and ``responses.stream``).
+    def _make_stream_manager(orig_stream: Callable[..., Any], *, responses: bool) -> Callable[..., Any]:
+        surface = (
+            m.SUPPORTED_OPENAI_RESPONSES_STREAM_MANAGER if responses else m.SUPPORTED_OPENAI_STREAM_MANAGER
+        )
 
-            def _stream_manager(*s_args: Any, **s_kwargs: Any) -> Any:
-                from .streaming.lifecycle import StreamAttempt
-                from .streaming.openai import (
-                    merge_stream_options,
-                    wrap_openai_async_manager,
-                )
+        def _stream_manager(*s_args: Any, **s_kwargs: Any) -> Any:
+            from .streaming.lifecycle import StreamAttempt
+            from .streaming.openai import (
+                merge_stream_options,
+                wrap_openai_async_manager,
+            )
+            from .streaming.openai_responses import wrap_responses_async_manager
 
-                m._reject_streaming_if_unsupported({"stream": True})
-                ctx = m._call_context(ctx0)
-                step_ctx = ctx.child_step()
-                call_kwargs = dict(s_kwargs)
-                m._apply_output_token_bound(call_kwargs)
+            m._reject_streaming_if_unsupported({"stream": True})
+            ctx = m._call_context(ctx0)
+            step_ctx = ctx.child_step()
+            call_kwargs = dict(s_kwargs)
+            if responses:
+                m._validate_responses_request(call_kwargs, stream_helper=True)
+            m._apply_output_token_bound(call_kwargs, responses=responses)
+            if not responses:
                 call_kwargs = merge_stream_options(call_kwargs)
-                call_kwargs.pop("stream", None)
-                model_name = str(call_kwargs.get("model") or "")
-                output_rate = m._stream_output_rate_usd_per_1k(
-                    model_name, usd_per_1k_tokens
+            call_kwargs.pop("stream", None)
+            model_name = str(call_kwargs.get("model") or "")
+            output_rate = m._stream_output_rate_usd_per_1k(
+                model_name, usd_per_1k_tokens
+            )
+            cutoff = stream_cutoff_usd
+            if cutoff is None and stream_enforcement and output_rate > 0:
+                cutoff = max(0.01, output_rate * 0.05)
+            if cutoff is not None and output_rate <= 0:
+                raise UnsupportedModeError(
+                    "stream_cutoff_usd requires known model pricing or an explicit "
+                    "usd_per_1k_tokens rate",
+                    error_code="stream_cutoff_pricing_unavailable",
                 )
-                cutoff = stream_cutoff_usd
-                if cutoff is None and stream_enforcement and output_rate > 0:
-                    cutoff = max(0.01, output_rate * 0.05)
-                if cutoff is not None and output_rate <= 0:
-                    raise UnsupportedModeError(
-                        "stream_cutoff_usd requires known model pricing or an explicit "
-                        "usd_per_1k_tokens rate",
-                        error_code="stream_cutoff_pricing_unavailable",
+            manager = orig_stream(*s_args, **call_kwargs)
+
+            async def _attempt_factory() -> StreamAttempt:
+                projected = await _priced_projection(
+                    m,
+                    call_kwargs,
+                    usd_per_1k_tokens,
+                    provider="openai",
+                    surface="responses" if responses else "chat",
+                    client=client,
+                    org_id=step_ctx.org_id,
+                    observe_unbounded=observe_unbounded,
+                )
+                with ExitStack() as stack:
+                    stack.enter_context(use_context(step_ctx))
+                    stack.enter_context(claim_enforcement_owner())
+                    stack.enter_context(use_attribution(**attr_defaults))
+                    held_projection, reserved_cost_usd = await m._reserve_with_local_hold_async(
+                        enforcement=enforcement,
+                        projected_cost_usd=projected,
+                        reserve_kwargs={
+                            "org_id": step_ctx.org_id,
+                            "workspace_id": step_ctx.workspace_id,
+                            "run_id": step_ctx.run_id,
+                            "call_id": str(getattr(step_ctx, "step_id", None) or "")
+                            or None,
+                            "estimated_cost_usd": projected,
+                            "business_subject_ref": attr_defaults.get(
+                                "business_subject_ref"
+                            ),
+                            "feature_id": attr_defaults.get("feature_id"),
+                            "workflow_id": attr_defaults.get("workflow_id"),
+                            "operation_id": attr_defaults.get("operation_id"),
+                            "attempt_id": attr_defaults.get("attempt_id"),
+                            "model": model_name,
+                            "input_tokens": m._estimate_input_tokens(call_kwargs),
+                        },
                     )
-                projected = m._precall_projection_usd(call_kwargs, usd_per_1k_tokens)
-                manager = orig_stream(*s_args, **call_kwargs)
-
-                async def _attempt_factory() -> StreamAttempt:
-                    with ExitStack() as stack:
-                        stack.enter_context(use_context(step_ctx))
-                        stack.enter_context(claim_enforcement_owner())
-                        stack.enter_context(use_attribution(**attr_defaults))
-                        held_projection, reserved_cost_usd = await m._reserve_with_local_hold_async(
-                            enforcement=enforcement,
-                            projected_cost_usd=projected,
-                            reserve_kwargs={
-                                "org_id": step_ctx.org_id,
-                                "workspace_id": step_ctx.workspace_id,
-                                "run_id": step_ctx.run_id,
-                                "call_id": str(getattr(step_ctx, "step_id", None) or "")
-                                or None,
-                                "estimated_cost_usd": projected,
-                                "business_subject_ref": attr_defaults.get(
-                                    "business_subject_ref"
-                                ),
-                                "feature_id": attr_defaults.get("feature_id"),
-                                "workflow_id": attr_defaults.get("workflow_id"),
-                                "operation_id": attr_defaults.get("operation_id"),
-                                "attempt_id": attr_defaults.get("attempt_id"),
-                                "model": model_name,
-                                "input_tokens": m._estimate_input_tokens(call_kwargs),
-                            },
-                        )
-                        await m._mark_stream_started_or_release_async(
-                            enforcement=enforcement,
-                            held_projection=held_projection,
-                            org_id=step_ctx.org_id,
-                            workspace_id=step_ctx.workspace_id,
-                            run_id=step_ctx.run_id,
-                            reserved_cost_usd=reserved_cost_usd,
-                        )
-
-                    def _emit(attempt, settle_cost, tokens_used, error):
-                        m._emit_stream_model_call(
-                            attempt,
-                            settle_cost=settle_cost,
-                            tokens_used=tokens_used,
-                            error=error,
-                            org_id=step_ctx.org_id,
-                            project_id=step_ctx.project_id,
-                            workspace_id=step_ctx.workspace_id,
-                            agent_id=step_ctx.agent_id,
-                            agent_role=agent_role,
-                            capture_mode=capture_mode,
-                            event_sink=event_sink,
-                            finops=finops,
-                            endpoint_url=endpoint_url,
-                            endpoint_headers=endpoint_headers,
-                            log=log,
-                        )
-
-                    return StreamAttempt(
-                        surface=m.SUPPORTED_OPENAI_STREAM_MANAGER,
-                        step_ctx=step_ctx,
+                    await m._mark_stream_started_or_release_async(
                         enforcement=enforcement,
                         held_projection=held_projection,
+                        org_id=step_ctx.org_id,
+                        workspace_id=step_ctx.workspace_id,
+                        run_id=step_ctx.run_id,
                         reserved_cost_usd=reserved_cost_usd,
-                        model=model_name,
-                        method=m.SUPPORTED_OPENAI_STREAM_MANAGER,
-                        usd_per_1k_tokens=output_rate,
-                        settle_usd_per_1k_tokens=usd_per_1k_tokens,
-                        capture_mode=capture_mode,
-                        agent_role=agent_role,
-                        event_sink=event_sink,
-                        finops=finops,
-                        stream_cutoff_usd=cutoff,
-                        reconcile_async_fn=m._try_settle_stream_budget_async,
-                        pending_async_fn=m._try_mark_stream_pending_async,
-                        postcall_cost_fn=m._postcall_cost_usd,
-                        reservation_payload_fn=m._reservation_payload_fields,
-                        emit_event_fn=_emit,
-                        attribution=attr_defaults,
-                        started_perf=time.perf_counter(),
                     )
 
-                return wrap_openai_async_manager(
-                    manager,
-                    attempt_factory=_attempt_factory,
-                    enter_scope=lambda: _helper_inner_create_bypass_async(
-                        m._HELPER_INNER_CREATE_BYPASS
-                    ),
+                def _emit(attempt, settle_cost, tokens_used, error):
+                    m._emit_stream_model_call(
+                        attempt,
+                        settle_cost=settle_cost,
+                        tokens_used=tokens_used,
+                        error=error,
+                        org_id=step_ctx.org_id,
+                        project_id=step_ctx.project_id,
+                        workspace_id=step_ctx.workspace_id,
+                        agent_id=step_ctx.agent_id,
+                        agent_role=agent_role,
+                        capture_mode=capture_mode,
+                        event_sink=event_sink,
+                        finops=finops,
+                        endpoint_url=endpoint_url,
+                        endpoint_headers=endpoint_headers,
+                        log=log,
+                    )
+
+                return StreamAttempt(
+                    surface=surface,
+                    step_ctx=step_ctx,
+                    enforcement=enforcement,
+                    held_projection=held_projection,
+                    reserved_cost_usd=reserved_cost_usd,
+                    model=model_name,
+                    method=surface,
+                    usd_per_1k_tokens=output_rate,
+                    settle_usd_per_1k_tokens=usd_per_1k_tokens,
+                    capture_mode=capture_mode,
+                    agent_role=agent_role,
+                    event_sink=event_sink,
+                    finops=finops,
+                    stream_cutoff_usd=cutoff,
+                    reconcile_async_fn=m._try_settle_stream_budget_async,
+                    pending_async_fn=m._try_mark_stream_pending_async,
+                    postcall_cost_fn=m._bound_postcall(),
+                    reservation_payload_fn=m._reservation_payload_fields,
+                    emit_event_fn=_emit,
+                    attribution=attr_defaults,
+                    started_perf=time.perf_counter(),
                 )
 
-            patches.append((completions, "stream", orig_stream))
-            setattr(completions, "stream", _stream_manager)
-    except Exception:
-        pass
+            wrap_manager = wrap_responses_async_manager if responses else wrap_openai_async_manager
+            return wrap_manager(
+                manager,
+                attempt_factory=_attempt_factory,
+                enter_scope=lambda: _helper_inner_create_bypass_async(
+                    m._HELPER_INNER_CREATE_BYPASS, gate_scope
+                ),
+            )
 
-    if certified_surface:
+        return _stream_manager
+
+    for resource, is_responses in (
+        (getattr(getattr(client, "chat", None), "completions", None), False),
+        (getattr(client, "responses", None), True),
+    ):
         try:
-            if hasattr(client, "responses") and hasattr(client.responses, "create"):
-                orig_resp = client.responses.create
-                patches.append((client.responses, "create", orig_resp))
-                setattr(
-                    client.responses,
-                    "create",
-                    m._unsupported_mode_stub(
-                        "OpenAI Responses API is unsupported on the certified Control path; "
-                        "use async chat.completions.create"
-                    ),
-                )
+            orig_stream = getattr(resource, "stream", None) if resource is not None else None
+            if callable(orig_stream):
+                patches.append((resource, "stream", orig_stream))
+                setattr(resource, "stream", _make_stream_manager(orig_stream, responses=is_responses))
         except Exception:
             pass
+
+    # No unmetered spend path may stay reachable on a monitored client.
+    m._block_unsupported_openai_surfaces(
+        client, patches, keep={(id(obj), name) for obj, name, _ in patches}
+    )
+    m._reset_sdk_response_wrappers(obj for obj, _, _ in patches)
 
     def undo() -> None:
         for obj, name, orig in patches:
@@ -592,6 +677,7 @@ def patch_openai_async(
                 setattr(obj, name, orig)
             except Exception:
                 log.exception("kazenai.patch_undo_failed", target=str(obj), name=name)
+        m._reset_sdk_response_wrappers(obj for obj, _, _ in patches)
 
     return undo
 
@@ -622,6 +708,8 @@ def patch_anthropic_async(
     endpoint_url: Optional[str] = None,
     endpoint_headers: Optional[Dict[str, str]] = None,
     certified_surface: bool = True,
+    allow_unmetered: Sequence[str] = (),
+    observe_unbounded: Sequence[str] = (),
 ) -> Callable[[], None]:
     m = _monitor_mod()
     from .attribution import use_attribution
@@ -629,7 +717,7 @@ def patch_anthropic_async(
     from .debug import DebugPrinter
     from .enforcement_owner import claim_configured_enforcement_owner as claim_enforcement_owner
     from .finops import FinOpsController
-    from .loop_detector import LoopDetector, LoopScores
+    from .loop_detector import LoopDetector
 
     if structlog is not None:
         log = structlog.get_logger(__name__)
@@ -652,6 +740,9 @@ def patch_anthropic_async(
         agent_id=agent_id,
     )
     patches: List[Tuple[Any, str, Any]] = []
+    # Backstop for references taken before monitor(): see _dispatch_gate.
+    gate = install_dispatch_gate(client, patches, allow_unmetered=allow_unmetered, is_async=True)
+    gate_scope = gate.authorized if gate is not None else nullcontext
 
     def _wrap(fn: Callable[..., Any], *, method: str) -> Callable[..., Any]:
         async def wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -685,7 +776,16 @@ def patch_anthropic_async(
                             error_code="stream_cutoff_pricing_unavailable",
                         )
 
-                projected = m._precall_projection_usd(call_kwargs, usd_per_1k_tokens)
+                projected = await _priced_projection(
+                    m,
+                    call_kwargs,
+                    usd_per_1k_tokens,
+                    provider='anthropic',
+                    surface="messages",
+                    client=client,
+                    org_id=step_ctx.org_id,
+                    observe_unbounded=observe_unbounded,
+                )
                 held_projection, reserved_cost_usd = await m._reserve_with_local_hold_async(
                     enforcement=enforcement,
                     projected_cost_usd=projected,
@@ -751,7 +851,7 @@ def patch_anthropic_async(
                         stream_cutoff_usd=cutoff,
                         reconcile_async_fn=m._try_settle_stream_budget_async,
                         pending_async_fn=m._try_mark_stream_pending_async,
-                        postcall_cost_fn=m._postcall_cost_usd,
+                        postcall_cost_fn=m._bound_postcall(),
                         reservation_payload_fn=m._reservation_payload_fields,
                         emit_event_fn=_emit,
                         attribution=attr_defaults,
@@ -785,7 +885,7 @@ def patch_anthropic_async(
                             reservation_id=getattr(reserved_cost_usd, "reservation_id", None),
                             decision_id=getattr(reserved_cost_usd, "decision_id", None),
                         ),
-                    ):
+                    ), gate_scope():
                         resp = await fn(*args, **call_kwargs)
                 except Exception as exc:
                     rejected = m._definitive_provider_rejection(exc)
@@ -843,7 +943,7 @@ def patch_anthropic_async(
                     usd_per_1k_tokens=usd_per_1k_tokens,
                 )
                 if reserved_cost_usd is not None:
-                    if cost_usd is None:
+                    if cost_usd is None or m._pricing_holds_reconciliation():
                         await m._try_mark_stream_pending_async(
                             org_id=step_ctx.org_id,
                             workspace_id=step_ctx.workspace_id,
@@ -981,10 +1081,19 @@ def patch_anthropic_async(
                         "usd_per_1k_tokens rate",
                         error_code="stream_cutoff_pricing_unavailable",
                     )
-                projected = m._precall_projection_usd(call_kwargs, usd_per_1k_tokens)
                 manager = orig_stream(*s_args, **call_kwargs)
 
                 async def _attempt_factory() -> StreamAttempt:
+                    projected = await _priced_projection(
+                        m,
+                        call_kwargs,
+                        usd_per_1k_tokens,
+                        provider="anthropic",
+                        surface="messages",
+                        client=client,
+                        org_id=step_ctx.org_id,
+                        observe_unbounded=observe_unbounded,
+                    )
                     with ExitStack() as stack:
                         stack.enter_context(use_context(step_ctx))
                         stack.enter_context(claim_enforcement_owner())
@@ -1055,7 +1164,7 @@ def patch_anthropic_async(
                         stream_cutoff_usd=cutoff,
                         reconcile_async_fn=m._try_settle_stream_budget_async,
                         pending_async_fn=m._try_mark_stream_pending_async,
-                        postcall_cost_fn=m._postcall_cost_usd,
+                        postcall_cost_fn=m._bound_postcall(),
                         reservation_payload_fn=m._reservation_payload_fields,
                         emit_event_fn=_emit,
                         attribution=attr_defaults,
@@ -1066,7 +1175,7 @@ def patch_anthropic_async(
                     manager,
                     attempt_factory=_attempt_factory,
                     enter_scope=lambda: _helper_inner_create_bypass_async(
-                        m._HELPER_INNER_CREATE_BYPASS
+                        m._HELPER_INNER_CREATE_BYPASS, gate_scope
                     ),
                 )
 
@@ -1075,11 +1184,14 @@ def patch_anthropic_async(
     except Exception:
         pass
 
+    m._reset_sdk_response_wrappers(obj for obj, _, _ in patches)
+
     def undo() -> None:
         for obj, name, orig in patches:
             try:
                 setattr(obj, name, orig)
             except Exception:
                 log.exception("kazenai.patch_undo_failed", target=str(obj), name=name)
+        m._reset_sdk_response_wrappers(obj for obj, _, _ in patches)
 
     return undo

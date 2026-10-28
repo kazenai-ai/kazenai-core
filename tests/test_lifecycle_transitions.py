@@ -23,6 +23,7 @@ from kazenai.spine import guard as guard_mod
 from kazenai.spine.guard import (
     ReservationHandle,
     reconcile_budget,
+    reserve_budget,
     reserve_budget_async,
     signal_reservation_event,
 )
@@ -176,9 +177,10 @@ def test_reconcile_budget_returns_bool_synchronously(monkeypatch):
         attempt=1,
         lifecycle=True,
         finops_base_url="http://finops:8090",
+        settlement_capability="kzcap1.test." + "A" * 43,
     )
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", return_value=_ack_resp()):
+    with patch("kazenai.spine.transport.urlopen", return_value=_ack_resp()):
         ok = reconcile_budget(
             org_id="o",
             workspace_id="w",
@@ -191,7 +193,7 @@ def test_reconcile_budget_returns_bool_synchronously(monkeypatch):
     def boom(*_a, **_k):
         raise TimeoutError("down")
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=boom):
+    with patch("kazenai.spine.transport.urlopen", side_effect=boom):
         ok = reconcile_budget(
             org_id="o",
             workspace_id="w",
@@ -232,6 +234,7 @@ def test_reserve_budget_async_uses_httpx_not_to_thread(monkeypatch):
                 "call_id": "call-async",
                 "attempt": 1,
                 "reserved_usd_micros": 1_000_000,
+                "settlement_capability": "kzcap1.test." + "A" * 43,
             },
         )
 
@@ -385,8 +388,9 @@ def test_signal_uses_shared_settle_payload(monkeypatch):
         attempt=3,
         lifecycle=True,
         finops_base_url="http://finops:8090",
+        settlement_capability="kzcap1.test." + "A" * 43,
     )
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
+    with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
         assert signal_reservation_event(
             org_id="o",
             run_id="r",
@@ -396,3 +400,115 @@ def test_signal_uses_shared_settle_payload(monkeypatch):
         )
     assert requests[0]["idempotency_key"] == "settle:res_sig:started"
     assert requests[0]["attempt"] == 3
+    assert requests[0]["settlement_capability"] == "kzcap1.test." + "A" * 43
+
+
+class _CatalogDecision:
+    reserved_micro_usd = 12_345
+
+    def reserve_body_fields(self):
+        return {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "pricing": {
+                "canonical_model_id": "gpt-4o",
+                "catalog_version": "cat-a",
+                "request_tier": "standard",
+                "context_band": "short",
+                "basis": "rate_card",
+            },
+        }
+
+
+class _CatalogPricing:
+    decision = _CatalogDecision()
+
+
+def test_sync_and_async_reserve_bodies_carry_the_catalog_decision(monkeypatch):
+    from kazenai.pricing_context import set_current_pricing
+
+    monkeypatch.setenv("KAZENAI_FINOPS_URL", "http://finops.test")
+    monkeypatch.setenv("KAZENAI_FINOPS_CONTROL_PROFILE", "control")
+    monkeypatch.setenv("KAZENAI_FINOPS_API_KEY", "k")
+    monkeypatch.setenv("KAZENAI_ENFORCEMENT_MODE", "fail_open")
+    monkeypatch.setenv("KAZENAI_FINOPS_RESERVATION_MODE", "fail_open")
+    set_current_pricing(_CatalogPricing())
+    try:
+        body, _identities, micros = guard_mod._build_lifecycle_reserve_body(
+            org_id="o",
+            workspace_id="w",
+            run_id="r",
+            model="gpt-4o",
+            input_tokens=10,
+            estimated_cost_usd=0.01,
+            feature=None,
+            call_id="call-cat",
+            attempt=1,
+            idempotency_key="idem-cat",
+            business_subject_ref=None,
+            feature_id=None,
+            workflow_id=None,
+            operation_id=None,
+            attempt_id=None,
+        )
+        assert micros == 12_345
+        assert body["estimated_usd_micros"] == 12_345
+        assert body["pricing"]["catalog_version"] == "cat-a"
+        assert body["provider"] == "openai"
+        assert body["pricing"]["canonical_model_id"] == "gpt-4o"
+        assert "catalog_version" not in body
+        assert "canonical_model_id" not in body
+
+        captured: list[dict] = []
+
+        class _Resp:
+            def read(self):
+                return json.dumps(
+                    {
+                        "reservation_id": "rsv-cat",
+                        "call_id": "call-cat",
+                        "attempt": 1,
+                        "reserved_usd_micros": 12_345,
+                        "settlement_capability": "kzcap1.test." + "A" * 43,
+                    }
+                ).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def _urlopen(req, timeout=0):  # noqa: ARG001
+            url = str(getattr(req, "full_url", "") or "")
+            if "/lifecycle" in url:
+                ok = _Resp()
+                ok.read = lambda: json.dumps(  # type: ignore[method-assign]
+                    {
+                        "ok": True,
+                        "effective_lifecycle": {
+                            "profile": "control",
+                            "lifecycle_version": "reservation.lifecycle.v1",
+                        },
+                        "capabilities": {"reservation_settlement": True},
+                    }
+                ).encode()
+                return ok
+            captured.append(json.loads(req.data.decode("utf-8")))
+            return _Resp()
+
+        with patch("kazenai.spine.transport.urlopen", side_effect=_urlopen):
+            handle = reserve_budget(
+                org_id="o",
+                workspace_id="w",
+                run_id="r",
+                call_id="call-cat",
+                estimated_cost_usd=0.01,
+            )
+        assert isinstance(handle, ReservationHandle)
+        assert captured[0]["estimated_usd_micros"] == 12_345
+        assert captured[0]["pricing"]["catalog_version"] == "cat-a"
+        assert captured[0]["pricing"]["canonical_model_id"] == "gpt-4o"
+        assert "catalog_version" not in captured[0]
+    finally:
+        set_current_pricing(None)

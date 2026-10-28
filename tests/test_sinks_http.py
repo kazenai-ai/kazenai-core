@@ -34,7 +34,7 @@ def test_http_sink_posts_batch(tmp_path):
         offline_queue_path=str(tmp_path / "offline.jsonl"),
     )
     sink = HttpSink(cfg)
-    with patch("urllib.request.urlopen") as urlopen:
+    with patch("kazenai.outbound_http.urlopen") as urlopen:
         resp = MagicMock()
         resp.read.return_value = b"{}"
         urlopen.return_value.__enter__.return_value = resp
@@ -54,7 +54,7 @@ def test_http_sink_offline_fallback(tmp_path):
     )
     sink = HttpSink(cfg)
     sink.emit(_event())
-    with patch("urllib.request.urlopen", side_effect=OSError("down")):
+    with patch("kazenai.outbound_http.urlopen", side_effect=OSError("down")):
         time.sleep(0.12)
         sink.close()
     offline = tmp_path / "offline.jsonl"

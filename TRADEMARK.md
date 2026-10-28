@@ -1,7 +1,7 @@
 # Trademark Policy
 
-This repository and the `kazenai` package may reference the marks "KazenAI",
-"Agent FinOps", and "AgentLens" (the "Marks").
+This repository and the `kazenai` package may reference the marks "KazenAI"
+and "Agent FinOps" (the "Marks"). "AgentLens" is not claimed as a mark.
 
 - You may use the Software under the terms of the LICENSE file.
 - You may not use the Marks (including confusingly similar names) to market,

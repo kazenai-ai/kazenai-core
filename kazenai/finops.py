@@ -121,6 +121,9 @@ class FinOpsController:
             event_id=new_id(),
             org_id=event.org_id,
             project_id=event.project_id,
+            # Same tenant scope as the triggering event; without it the derived
+            # event defaults to workspace "default" and ingest rejects the batch.
+            workspace_id=event.workspace_id,
             surface=event.surface,
             agent_id=event.agent_id,
             agent_role=event.agent_role,
@@ -172,6 +175,7 @@ class FinOpsController:
                 event_id=new_id(),
                 org_id=event.org_id,
                 project_id=event.project_id,
+                workspace_id=event.workspace_id,
                 surface=event.surface,
                 agent_id=event.agent_id,
                 agent_role=event.agent_role,
@@ -209,6 +213,7 @@ class FinOpsController:
                 event_id=new_id(),
                 org_id=event.org_id,
                 project_id=event.project_id,
+                workspace_id=event.workspace_id,
                 surface=event.surface,
                 agent_id=event.agent_id,
                 agent_role=event.agent_role,

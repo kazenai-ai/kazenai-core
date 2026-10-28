@@ -104,8 +104,13 @@ def new_operation(
 
 @contextlib.contextmanager
 def enter_operation(op: FrameworkOperation) -> Iterator[FrameworkOperation]:
-    """Bind framework operation + RunContext + AttributionContext; restore on exit."""
-    from ..attribution import use_attribution
+    """Bind framework operation + RunContext + AttributionContext; restore on exit.
+
+    An operation with ``metadata["parent_operation_id"]`` is a child run started
+    inside another operation; it gets its own operation id instead of conflicting
+    with the parent's.
+    """
+    from ..attribution import use_attribution, use_child_operation
 
     token = _OP.set(op)
     ctx = RunContext.new(
@@ -124,7 +129,11 @@ def enter_operation(op: FrameworkOperation) -> Iterator[FrameworkOperation]:
     )
     try:
         with use_context(ctx):
-            with use_attribution(operation_id=op.operation_id, attempt_id=op.attempt_id or None):
+            if op.metadata.get("parent_operation_id"):
+                scope = use_child_operation(op.operation_id, op.attempt_id or None)
+            else:
+                scope = use_attribution(operation_id=op.operation_id, attempt_id=op.attempt_id or None)
+            with scope:
                 yield op
     finally:
         _OP.reset(token)
@@ -280,13 +289,18 @@ def require_control_client(client: Any, *, label: str = "provider client") -> No
 
 
 def reject_openai_responses_api(model_or_client: Any) -> None:
-    """This release's Control envelope is Chat Completions / Anthropic Messages only."""
+    """Framework adapters bind Chat Completions / Anthropic Messages only.
+
+    ``monitor()`` guards the OpenAI Responses API on a raw client since 1.2.0, but
+    framework Responses routing (e.g. ``ChatOpenAI(use_responses_api=True)``) is
+    not certified yet.
+    """
     name = type(model_or_client).__name__
     module = type(model_or_client).__module__ or ""
     text = f"{module}.{name}".lower()
     if "responses" in text and "openai" in text:
         raise UnsupportedFrameworkPath(
-            "OpenAI Responses API is not Control-supported in this release; use Chat Completions",
+            "OpenAI Responses API routing is not Control-supported for framework adapters; use Chat Completions",
             code="unsupported_provider_api",
         )
     # langchain-openai 1.7+ may infer Responses routing on ChatOpenAI; reject explicit opt-in.

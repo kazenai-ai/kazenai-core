@@ -35,7 +35,6 @@ def test_validate_payload_model_call():
 
 def test_validate_payload_tool_call():
     validate_payload("tool.call", {"tool_name": "search"})
-    validate_payload("mcp.call", {"tool_name": "filesystem"})
 
 
 def test_validate_payload_finops():

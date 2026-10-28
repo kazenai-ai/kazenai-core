@@ -1,0 +1,289 @@
+{
+  "schema": "kazenai.live-evidence-summary.v1",
+  "note": "Summary of paid live runs against the provider APIs. Raw run records are kept privately; sha256 identifies each one. No keys or prompts are recorded. Every run of the day is listed; failed runs show only their outcome.",
+  "source_tree": "kazenai 1.2.0",
+  "claim": "OpenAI Responses API (create, parse, stream, stream() helper; sync and async) on a monitored client: real output, recorded cost equals the published price for the reported tokens, and an exhausted budget is refused before dispatch.",
+  "command": "KAZENAI_LIVE_PROVIDER_SMOKE=1 KAZENAI_LIVE_OPENAI_MODEL=<model> pytest -m live tests/test_live_responses_smoke.py",
+  "runs": [
+    {
+      "artifact": "live-responses-smoke-20261013T155921Z.json",
+      "sha256": "17512e6fad08c7244583eed102d825eb8eaefe71fb1077f8a2f413248eca370d",
+      "recorded_at_utc": "20261013T155921Z",
+      "versions": {
+        "kazenai": "1.2.0",
+        "openai": "2.54.0"
+      },
+      "all_passed": true,
+      "cells": [
+        {
+          "cell": "openai.responses.background_refused.sync",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "recorded_cost_usd": 0.0
+        },
+        {
+          "cell": "openai.responses.create.async",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 30,
+          "recorded_cost_usd": 1.67e-05,
+          "expected_cost_usd": 1.67e-05,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.create.sync",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 26,
+          "recorded_cost_usd": 1.4700000000000002e-05,
+          "expected_cost_usd": 1.47e-05,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.create_stream.async",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 26,
+          "recorded_cost_usd": 1.4700000000000002e-05,
+          "expected_cost_usd": 1.47e-05,
+          "output_nonempty": true,
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.create_stream.sync",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 5,
+          "recorded_cost_usd": 4.2000000000000004e-06,
+          "expected_cost_usd": 4.2000000000000004e-06,
+          "output_nonempty": true,
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.parse.async",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 46,
+          "output_tokens": 41,
+          "recorded_cost_usd": 2.51e-05,
+          "expected_cost_usd": 2.51e-05,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.parse.sync",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 46,
+          "output_tokens": 42,
+          "recorded_cost_usd": 2.5600000000000002e-05,
+          "expected_cost_usd": 2.56e-05,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.stream_helper.async",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 5,
+          "recorded_cost_usd": 4.2000000000000004e-06,
+          "expected_cost_usd": 4.2000000000000004e-06,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.stream_helper.sync",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 29,
+          "recorded_cost_usd": 1.62e-05,
+          "expected_cost_usd": 1.62e-05,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        }
+      ],
+      "total_recorded_cost_usd": {
+        "gpt-6-luna": 0.0001214
+      }
+    },
+    {
+      "artifact": "live-responses-smoke-20261013T160036Z.json",
+      "sha256": "25e5bd756ef99b674c2cdd423e19204925514a3524849ef9282f630b97263921",
+      "recorded_at_utc": "20261013T160036Z",
+      "versions": {
+        "kazenai": "1.2.0",
+        "openai": "1.109.1"
+      },
+      "all_passed": true,
+      "cells": [
+        {
+          "cell": "openai.responses.background_refused.sync",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "recorded_cost_usd": 0.0
+        },
+        {
+          "cell": "openai.responses.create.async",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 29,
+          "recorded_cost_usd": 1.62e-05,
+          "expected_cost_usd": 1.62e-05,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.create.sync",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 5,
+          "recorded_cost_usd": 4.2000000000000004e-06,
+          "expected_cost_usd": 4.2000000000000004e-06,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.create_stream.async",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 23,
+          "recorded_cost_usd": 1.32e-05,
+          "expected_cost_usd": 1.32e-05,
+          "output_nonempty": true,
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.create_stream.sync",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 30,
+          "recorded_cost_usd": 1.67e-05,
+          "expected_cost_usd": 1.67e-05,
+          "output_nonempty": true,
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.parse.async",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 46,
+          "output_tokens": 40,
+          "recorded_cost_usd": 2.46e-05,
+          "expected_cost_usd": 2.46e-05,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.parse.sync",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 46,
+          "output_tokens": 40,
+          "recorded_cost_usd": 2.46e-05,
+          "expected_cost_usd": 2.46e-05,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.stream_helper.async",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 25,
+          "recorded_cost_usd": 1.4200000000000001e-05,
+          "expected_cost_usd": 1.4200000000000001e-05,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.stream_helper.sync",
+          "model": "gpt-6-luna",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 28,
+          "recorded_cost_usd": 1.57e-05,
+          "expected_cost_usd": 1.57e-05,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        }
+      ],
+      "total_recorded_cost_usd": {
+        "gpt-6-luna": 0.0001294
+      }
+    },
+    {
+      "artifact": "live-responses-smoke-20261013T160059Z.json",
+      "sha256": "44bae383b1455f45fff7197b28f4df988500f568bb2831915208021ea5cf8384",
+      "recorded_at_utc": "20261013T160059Z",
+      "versions": {
+        "kazenai": "1.2.0",
+        "openai": "2.54.0"
+      },
+      "all_passed": true,
+      "cells": [
+        {
+          "cell": "openai.responses.create_stream.sync",
+          "model": "gpt-6.1-sol",
+          "passed": true,
+          "input_tokens": 17,
+          "output_tokens": 5,
+          "recorded_cost_usd": 8.400000000000001e-05,
+          "expected_cost_usd": 8.400000000000001e-05,
+          "output_nonempty": true,
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.parse.async",
+          "model": "gpt-6.1-sol",
+          "passed": true,
+          "input_tokens": 46,
+          "output_tokens": 38,
+          "recorded_cost_usd": 0.000472,
+          "expected_cost_usd": 0.00047200000000000003,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        },
+        {
+          "cell": "openai.responses.parse.sync",
+          "model": "gpt-6.1-sol",
+          "passed": true,
+          "input_tokens": 46,
+          "output_tokens": 26,
+          "recorded_cost_usd": 0.000352,
+          "expected_cost_usd": 0.000352,
+          "output_nonempty": true,
+          "status": "completed",
+          "denied_before_dispatch": true
+        }
+      ],
+      "total_recorded_cost_usd": {
+        "gpt-6.1-sol": 0.000908
+      }
+    }
+  ]
+}

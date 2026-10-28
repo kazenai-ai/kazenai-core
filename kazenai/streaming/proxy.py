@@ -449,8 +449,14 @@ class AsyncStreamManagerProxy:
             raise RuntimeError("stream manager is closed")
         if self._attempt is None:
             assert self._attempt_factory is not None
-            produced = self._attempt_factory()
-            self._attempt = await _maybe_await(produced)
+            try:
+                produced = self._attempt_factory()
+                self._attempt = await _maybe_await(produced)
+            except BaseException:
+                # Denied before dispatch: dispose of the request coroutine the SDK
+                # created eagerly, so it is neither sent nor left un-awaited.
+                self.close()
+                raise
         try:
             scope = self._enter_scope() if self._enter_scope is not None else nullcontext()
             if hasattr(scope, "__aenter__"):

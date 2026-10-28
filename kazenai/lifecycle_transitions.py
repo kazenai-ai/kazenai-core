@@ -94,6 +94,8 @@ def build_settle_payload(
     actual_usd_micros: Optional[int] = None,
     lifecycle_version: str = LIFECYCLE_VERSION,
     idempotency_key: Optional[str] = None,
+    settlement_capability: Optional[str] = None,
+    usage_evidence: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Canonical settle request body shared by sync/async clients."""
     payload: dict[str, Any] = {
@@ -105,10 +107,14 @@ def build_settle_payload(
         "event": event,
         "org_id": org_id,
     }
+    if settlement_capability:
+        payload["settlement_capability"] = settlement_capability
     if event == "usage_known":
         if actual_usd_micros is None:
             raise ValueError("actual_usd_micros is required for usage_known")
         payload["actual_usd_micros"] = int(actual_usd_micros)
+        if usage_evidence:
+            payload["usage_evidence"] = dict(usage_evidence)
     return payload
 
 

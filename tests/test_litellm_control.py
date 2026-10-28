@@ -37,10 +37,6 @@ from kazenai.spine.guard import ReservationHandle, reserve_budget
 # Core's suite does not depend on a sibling checkout.
 from fake_upstream import serve as serve_fake_upstream  # noqa: E402
 
-# The gateway callback lives in kazenai-examples; tests that load it skip when
-# that repository is not checked out beside kazenai-core.
-EXAMPLES = Path(__file__).resolve().parents[2] / "kazenai-examples" / "litellm-otel-control"
-
 
 ARTIFACTS = Path(__file__).resolve().parents[2] / "artifacts"
 RESULTS: list[dict[str, Any]] = []
@@ -109,6 +105,10 @@ class FakeFinOps:
                     "reservation_id": rid,
                     "decision_id": f"dec_{uuid.uuid4().hex[:8]}",
                     "lifecycle_version": "reservation.lifecycle.v1",
+                    "call_id": body.get("call_id"),
+                    "attempt": body.get("attempt") or 1,
+                    "reserved_usd_micros": est,
+                    "settlement_capability": "kzcap1.test." + "A" * 43,
                 }
             if path.endswith("/settle"):
                 # Mirror real FinOps contract: event names + ``result`` field.
@@ -308,19 +308,15 @@ async def test_gateway_owned_retry_fixture_two_attempts(monkeypatch):
         pass
 
     cl.CustomLogger = CustomLogger
-    sys.modules["litellm"] = stub
-    sys.modules["litellm.integrations"] = integ
-    sys.modules["litellm.integrations.custom_logger"] = cl
+    monkeypatch.setitem(sys.modules, "litellm", stub)
+    monkeypatch.setitem(sys.modules, "litellm.integrations", integ)
+    monkeypatch.setitem(sys.modules, "litellm.integrations.custom_logger", cl)
 
     import importlib
 
-    # Reload callback against stub.
-    if not (EXAMPLES / "kazenai_litellm_callback.py").is_file():
-        pytest.skip("kazenai-examples/litellm-otel-control not checked out beside kazenai-core")
-    if str(EXAMPLES) not in sys.path:
-        sys.path.insert(0, str(EXAMPLES))
-    sys.modules.pop("kazenai_litellm_callback", None)
-    cb_mod = importlib.import_module("kazenai_litellm_callback")
+    # Load the packaged gateway callback against the stub.
+    monkeypatch.delitem(sys.modules, "kazenai.integrations.litellm_gateway", raising=False)
+    cb_mod = importlib.import_module("kazenai.integrations.litellm_gateway")
 
     fake = FakeFinOps(capacity_micros=10_000_000)
     server = _serve_finops(fake)

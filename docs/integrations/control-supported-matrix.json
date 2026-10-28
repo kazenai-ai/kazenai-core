@@ -25,8 +25,8 @@
     "adapter": "OpenAI Chat Completions + Anthropic Messages via kazenai.monitor (sync and async; non-streaming and streaming)",
     "package": "from kazenai import monitor (distribution kazenai)",
     "demo_mode": "fake/local transport + real local Control services",
-    "live_provider": "Live-verified 2026-10-12 for OpenAI Chat Completions + Anthropic Messages via monitor() (gpt-6-luna, claude-sonnet-5-5); opt-in paid smoke, not default CI",
-    "topology": "additive Control compose; Brain/Builder/Copilot/Home absent",
+    "live_provider": "Live-verified 2026-10-12 for OpenAI Chat Completions + Anthropic Messages via monitor() (gpt-6-luna, claude-sonnet-5-5) and 2026-10-13 for the OpenAI Responses API (gpt-6-luna, gpt-6.1-sol); opt-in paid smoke, not default CI",
+    "topology": "Control services only: Agent FinOps with run receipts, Platform and Auth",
     "sdk_pins_ci": "openai>=1.40,<3 ; anthropic>=0.39,<1 (tested: openai 1.109.1 and 2.48.0, anthropic 0.125.0)"
   },
   "cells": [
@@ -87,9 +87,9 @@
         "Live provider run, 2026-10-12"
       ],
       "tests": [
-        "kazenai-core/tests/test_train_b_streaming.py",
-        "kazenai-core/tests/test_train_b_streaming_hardening.py",
-        "kazenai-core/tests/test_train_b_official_sdks.py",
+        "kazenai-core/tests/test_streaming_contract.py",
+        "kazenai-core/tests/test_streaming_hardening.py",
+        "kazenai-core/tests/test_official_sdk_contract.py",
         "kazenai-core/tests/test_live_provider_smoke.py"
       ],
       "notes": "Live-verified 2026-10-12 against paid OpenAI (gpt-6-luna, openai 2.54.0) and Anthropic (claude-sonnet-5-5, anthropic 0.125.0) APIs through monitor(): real response, recorded cost equal to the pricing table on the provider-reported input/output usage (streamed and non-streamed), and pre-dispatch BudgetExceeded. Opt-in test; not run in default CI."
@@ -121,9 +121,9 @@
         "Live provider run, 2026-10-12"
       ],
       "tests": [
-        "kazenai-core/tests/test_train_b_streaming.py",
-        "kazenai-core/tests/test_train_b_streaming_hardening.py",
-        "kazenai-core/tests/test_train_b_official_sdks.py",
+        "kazenai-core/tests/test_streaming_contract.py",
+        "kazenai-core/tests/test_streaming_hardening.py",
+        "kazenai-core/tests/test_official_sdk_contract.py",
         "kazenai-core/tests/test_live_provider_smoke.py"
       ],
       "notes": "Live-verified 2026-10-12 against paid OpenAI (gpt-6-luna, openai 2.54.0) and Anthropic (claude-sonnet-5-5, anthropic 0.125.0) APIs through monitor(): real response, recorded cost equal to the pricing table on the provider-reported input/output usage (streamed and non-streamed), and pre-dispatch BudgetExceeded. Opt-in test; not run in default CI."
@@ -132,12 +132,31 @@
       "id": "provider.openai.responses",
       "category": "provider",
       "name": "OpenAI Responses API",
+      "status": "live-verified",
+      "detail": "responses.create / responses.parse / responses.stream, sync and async, streaming and non-streaming, function tools; max_output_tokens injected or clamped; usage settled from the terminal stream event",
+      "evidence": [
+        "Verification run, 2026-10-13",
+        "Live provider run, 2026-10-13: kazenai-core/docs/verification/live/2026-10-13-openai-responses.json"
+      ],
+      "tests": [
+        "kazenai-core/tests/test_live_responses_smoke.py",
+        "kazenai-core/tests/test_responses_official_sdk.py",
+        "kazenai-core/tests/test_responses_bypass_regression.py",
+        "kazenai-core/tests/test_provider_contract.py::test_monitor_guards_openai_responses_api"
+      ],
+      "notes": "Added in kazenai 1.2.0. Live-verified 2026-10-13 against the paid OpenAI API through monitor(): responses.parse (text_format), responses.create and create(stream=True), and the responses.stream() helper, sync and async, on gpt-6-luna (openai 2.54.0 and 1.109.1) and parse/stream on gpt-6.1-sol (openai 2.54.0): real response, recorded cost equal to the pricing table on the provider-reported input/output tokens, and pre-dispatch BudgetExceeded. Opt-in test; not run in default CI. Refused before dispatch with UnsupportedModeError: background=True, previous_response_id / conversation / stored prompt (server-side input cannot be priced first), built-in tools (billed outside token usage), and resuming a stream by response_id. responses.compact and responses.connect stay blocked. LangChain/LangGraph Responses binding stays unsupported."
+    },
+    {
+      "id": "provider.openai.unguarded_surfaces",
+      "category": "provider",
+      "name": "OpenAI endpoints outside Control (Realtime, legacy Completions, Responses compact/connect, embeddings, images, audio, batches, fine-tuning)",
       "status": "unsupported",
       "evidence": [],
       "tests": [
-        "kazenai-core/tests/test_provider_contract.py::test_p32_monitor_rejects_openai_responses_api"
+        "kazenai-core/tests/test_responses_bypass_regression.py",
+        "kazenai-core/tests/test_dispatch_gate.py"
       ],
-      "notes": "monitor() stubs responses.create with UnsupportedModeError"
+      "notes": "Refused before dispatch with UnsupportedModeError on a monitored client since 1.2.0: client.realtime.connect, client.beta.realtime.connect, client.completions.create, responses.compact, responses.connect, and every other paid request sent through the monitored client without its budget check: a provider method, with_raw_response wrapper or client.request saved before monitor(), client.post(), a request triggered while another monitored client dispatches (authorization is per client), embeddings, images, audio, batches, fine-tuning, vector stores. The check runs at client.request() and again at the client's own view of its httpx client; a refusal at the second layer surfaces as APIConnectionError caused by UnsupportedModeError. Reads, deletes and free endpoints (files, uploads, moderations, token counting, cancel) still work. monitor(..., allow_unmetered=(\"/embeddings\",)) sends named endpoints without a budget check; that spend is not counted. A client that was never passed to monitor() is not affected, even when it shares the same httpx client. Boundary: code that holds the provider key and builds another client, sends raw HTTP, or keeps the SDK's private _client from before monitor() is outside Control."
     },
     {
       "id": "mode.async_clients",
@@ -154,7 +173,7 @@
         "kazenai-core/tests/test_async_providers_retries.py",
         "kazenai-core/tests/test_live_provider_smoke.py"
       ],
-      "notes": "Runtime fixture cells pass; OpenAI Responses remains unsupported. The dedicated Core CI gate runs three maintained behavioral suites and passes locally at 69% module coverage versus a 35% floor, requiring both pytest and coverage success. Live-verified 2026-10-12 against paid OpenAI (gpt-6-luna, openai 2.54.0) and Anthropic (claude-sonnet-5-5, anthropic 0.125.0) APIs through monitor(): real response, recorded cost equal to the pricing table on the provider-reported input/output usage (streamed and non-streamed), and pre-dispatch BudgetExceeded. Opt-in test; not run in default CI."
+      "notes": "Runtime fixture cells pass; async OpenAI Responses is fixture-verified (see provider.openai.responses). The dedicated Core CI gate runs three maintained behavioral suites and passes locally at 69% module coverage versus a 35% floor, requiring both pytest and coverage success. Live-verified 2026-10-12 against paid OpenAI (gpt-6-luna, openai 2.54.0) and Anthropic (claude-sonnet-5-5, anthropic 0.125.0) APIs through monitor(): real response, recorded cost equal to the pricing table on the provider-reported input/output usage (streamed and non-streamed), and pre-dispatch BudgetExceeded. Opt-in test; not run in default CI."
     },
     {
       "id": "mode.streaming.control",
@@ -167,10 +186,10 @@
         "Live provider run, 2026-10-12"
       ],
       "tests": [
-        "kazenai-core/tests/test_train_b_streaming.py",
-        "kazenai-core/tests/test_train_b_streaming_hardening.py",
-        "kazenai-core/tests/test_train_b_official_sdks.py",
-        "kazenai-core/tests/test_provider_contract.py::test_p32_control_streaming_allowed_with_finalize_lifecycle",
+        "kazenai-core/tests/test_streaming_contract.py",
+        "kazenai-core/tests/test_streaming_hardening.py",
+        "kazenai-core/tests/test_official_sdk_contract.py",
+        "kazenai-core/tests/test_provider_contract.py::test_control_streaming_allowed_with_finalize_lifecycle",
         "kazenai-core/tests/test_live_provider_smoke.py"
       ],
       "notes": "Live-verified 2026-10-12 against paid OpenAI (gpt-6-luna, openai 2.54.0) and Anthropic (claude-sonnet-5-5, anthropic 0.125.0) APIs through monitor(): real response, recorded cost equal to the pricing table on the provider-reported input/output usage (streamed and non-streamed), and pre-dispatch BudgetExceeded. Opt-in test; not run in default CI."
@@ -259,8 +278,8 @@
     {
       "id": "telemetry.finops_lens_multisink",
       "category": "telemetry",
-      "name": "Control FinOps\u2194Lens MultiSink fan-out",
-      "detail": "FinOps settle-only; Lens metadata mirror",
+      "name": "Agent FinOps and run receipts MultiSink fan-out",
+      "detail": "Agent FinOps settles; run receipts receive a metadata copy",
       "status": "fixture-verified",
       "evidence": [
         "Verification run, 2026-09-16",
@@ -301,7 +320,7 @@
       "id": "deployment.control_compose",
       "category": "deployment_auth",
       "name": "Additive docker-compose.control.yml",
-      "detail": "postgres+redis+finops+lens+platform+auth; no Brain",
+      "detail": "Postgres, Valkey, Agent FinOps, run receipts, Platform and Auth",
       "status": "implemented-unverified",
       "evidence": [
         "Reference deployment configuration"
@@ -361,7 +380,7 @@
       "id": "example.control_loop_and_failure",
       "category": "example",
       "name": "Plain Python Control reference (loop/deny/tool/corrected)",
-      "detail": "kazenai-examples/control-loop-and-failure; fake OpenAI client; zero paid I/O",
+      "detail": "Control loop and failure reference example; fake OpenAI client; zero paid I/O",
       "status": "fixture-verified",
       "evidence": [
         "Verification run, 2026-09-17",
@@ -370,7 +389,7 @@
       "tests": [
         "Reference example tests"
       ],
-      "notes": "Lens browser assertion and live FinOps reserve/settle are verified in integration runs, not in standalone CI"
+      "notes": "The run-receipts browser check and live Agent FinOps reserve/settle are verified in integration runs, not in standalone CI"
     },
     {
       "id": "lens.incident_inbox",
@@ -379,10 +398,10 @@
       "detail": "Deterministic visibility-partitioned grouping, idempotent occurrences, keyset pagination and bounded evidence",
       "status": "integration-verified",
       "evidence": [
-        "Agent Lens integration run, 2026-09-23"
+        "Run receipts integration run, 2026-09-23"
       ],
       "tests": [
-        "Agent Lens test suite",
+        "Run receipts test suite",
         "Browser end-to-end tests"
       ],
       "notes": "Local synthetic Control only; source access is rechecked on every derived read"
@@ -394,10 +413,10 @@
       "detail": "Verified actor, eligible owner, optimistic revision, idempotent mutation and append-only reason/history",
       "status": "integration-verified",
       "evidence": [
-        "Agent Lens integration run, 2026-09-23"
+        "Run receipts integration run, 2026-09-23"
       ],
       "tests": [
-        "Agent Lens test suite",
+        "Run receipts test suite",
         "Browser end-to-end tests"
       ],
       "notes": "Reviews never rewrite source evidence or grant source access"
@@ -409,10 +428,10 @@
       "detail": "Versioned sanitized readiness-labelled JSON; allowlisted zero-I/O adapter; expiry/source reauthorization",
       "status": "integration-verified",
       "evidence": [
-        "Agent Lens integration run, 2026-09-23"
+        "Run receipts integration run, 2026-09-23"
       ],
       "tests": [
-        "Agent Lens test suite",
+        "Run receipts test suite",
         "Reference example tests"
       ],
       "notes": "Only offline_fixture_ready is runnable; schema validation is not customer-agent reproduction"
@@ -424,13 +443,13 @@
       "detail": "Same-task/cohort/insufficient labels, explicit conditions and honest deltas without replay",
       "status": "integration-verified",
       "evidence": [
-        "Agent Lens integration run, 2026-09-23"
+        "Run receipts integration run, 2026-09-23"
       ],
       "tests": [
-        "Agent Lens test suite",
+        "Run receipts test suite",
         "Browser end-to-end tests"
       ],
-      "notes": "A corrected example does not establish causality, population effect, savings or ROI"
+      "notes": "A corrected example does not establish causality, population effect, savings or ROI. Since 2026-10-14 a run summary is 'complete' only with a terminal run event, no sequence gap and no truncated query (otherwise 'partial', and runs are not compared); cost is 'settled' only from a FinOps settlement event as received through Lens's authenticated ingest (Lens cannot yet prove which producer sent it: an authenticated projection, not ledger authority), otherwise 'reported'; runtime and business outcome are separate, and business outcome needs an app.outcome event with an evaluator version."
     },
     {
       "id": "lens.incident_digest_local_capture",
@@ -439,10 +458,10 @@
       "detail": "Timezone/window preview, suppression/caps, deduped outbox, dispatch reauthorization, pause, retry/dead-letter/uncertainty and tenant retention",
       "status": "integration-verified",
       "evidence": [
-        "Agent Lens integration run, 2026-09-23"
+        "Run receipts integration run, 2026-09-23"
       ],
       "tests": [
-        "Agent Lens test suite",
+        "Run receipts test suite",
         "Browser end-to-end tests"
       ],
       "notes": "Provider-incapable local_capture only; sent means local acceptance, not delivered/read; external transport is not included"
@@ -479,18 +498,21 @@
       "id": "framework.crewai",
       "category": "framework",
       "name": "CrewAI adapter",
-      "status": "implemented-unverified",
+      "status": "live-verified",
       "evidence": [
-        "Verification run",
-        "Reference example"
+        "Verification run, 2026-10-13",
+        "Live framework run, 2026-10-13: kazenai-core/docs/verification/live/2026-10-13-crewai.json"
       ],
       "tests": [
+        "kazenai-core/tests/test_crewai_control_certification.py",
+        "kazenai-core/tests/test_crewai_event_ownership.py",
+        "kazenai-core/tests/test_structured_output_and_crewai_bind.py",
         "kazenai-core/tests/test_framework_adapters.py",
         "kazenai-core/tests/test_framework_control_cells.py",
-        "kazenai-core/tests/test_crewai_event_ownership.py"
+        "kazenai-core/tests/test_live_framework_smoke.py"
       ],
-      "notes": "HookAborted no-dispatch passes. 1.1.2 routes CrewAI 1.15.26 LLM/task/tool events via a crew ownership registry plus kickoff scope, tested on the real 1.15.26 event bus (two crews, source types, detach). Cancellation, nested runs, and native akickoff Observe cells are not yet verified, so the status stays implemented-unverified and CrewAI is not advertised. Thread-backed kickoff_async is not Control-certified.",
-      "detail": "wrap_crew / kickoff + native akickoff; Control requires guarded client; pin crewai 1.15.26",
+      "notes": "Certified in kazenai 1.2.0. Fixture cells (real CrewAI 1.15.26 objects over simulated providers): kickoff and akickoff on OpenAI and Anthropic with exact cost; denial before dispatch that CrewAI does not retry (raised as BudgetExceeded and HookAborted); OpenAI output_pydantic; LLM(stream=True); a two-provider crew on one SharedBudget; akickoff cancellation (no workflow.end, scope cleaned, an in-flight call settles exactly once); max_execution_time timeout; nested crews (child operation with parent_operation_id); concurrent kickoffs of two crews sharing one LLM; two adapters on one crew; kickoff_for_each; kickoff_async. Live-verified 2026-10-13 against the paid APIs (gpt-6-luna, claude-haiku-4-5): kickoff/akickoff on both providers, a two-provider crew on one SharedBudget, akickoff cancel, nested crews, and a two-provider crew on one Agent FinOps workflow budget (one reservation per LLM call, all settled, deny receipt): recorded cost equal to the pricing table on provider-reported tokens, and denial before dispatch. Refused under Control (UnsupportedFrameworkPath): any unbound agent/manager/planning/function-calling LLM, hierarchical crews without a bound manager, memory, knowledge and embedders, Crew(stream=True), llm_overlay, and non-native CrewAI LLM classes (Gemini, Azure, Bedrock, LiteLLM-routed). Not supported: Anthropic structured output (uses client.beta.messages, refused before dispatch), Responses auto_chain / built-in tools. Cancelling native akickoff stops the crew and emits workflow.error (terminal: cancelled), never workflow.end; CrewAI 1.15 runs agent LLM calls on worker threads, so a call already sent completes and is charged. kickoff_async runs kickoff on a worker thread: cancelling the awaiter does not stop it, so the crew finishes, its spend is checked and settled, and it emits workflow.end.",
+      "detail": "wrap_crew kickoff / native akickoff / kickoff_async; bind_crew_llm_client on native OpenAI and Anthropic LLMs (one budget for sync and async); every LLM the crew can call must be bound (guarded_clients=[...]); pin crewai 1.15.26",
       "versions": {
         "crewai": "1.15.26",
         "capability": "observe+control",
@@ -531,7 +553,7 @@
       "status": "unsupported",
       "evidence": [],
       "tests": [],
-      "notes": "docs/integrations/* in other repositories describe Brain/MCP paths, not Control"
+      "notes": "Not part of Control"
     },
     {
       "id": "finops.business_attribution.v1",
@@ -574,7 +596,7 @@
         "Verification run, 2026-09-28"
       ],
       "tests": [
-        "Agent Lens test suite"
+        "Run receipts test suite"
       ]
     },
     {
@@ -642,12 +664,14 @@
       "name": "Live provider operation",
       "status": "live-verified",
       "evidence": [
-        "Live provider run, 2026-10-12"
+        "Live provider run, 2026-10-12",
+        "Live provider run, 2026-10-13"
       ],
       "tests": [
-        "kazenai-core/tests/test_live_provider_smoke.py"
+        "kazenai-core/tests/test_live_provider_smoke.py",
+        "kazenai-core/tests/test_live_responses_smoke.py"
       ],
-      "notes": "Scoped to OpenAI Chat Completions and Anthropic Messages via monitor(), sync/async, streaming/non-streaming, on 2026-10-12 (gpt-6-luna, claude-sonnet-5-5). Other providers, Responses/Realtime, Bedrock/Vertex and framework adapters are not live-verified."
+      "notes": "Scoped to OpenAI Chat Completions and Anthropic Messages via monitor(), sync/async, streaming/non-streaming, on 2026-10-12 (gpt-6-luna, claude-sonnet-5-5), and the OpenAI Responses API (create/parse/stream, sync/async) on 2026-10-13 (gpt-6-luna, gpt-6.1-sol). Other providers, Realtime, Bedrock/Vertex and framework adapters are not live-verified here; framework cells carry their own evidence."
     },
     {
       "id": "gateway.litellm.app_owned",
@@ -743,7 +767,7 @@
       "tests": [
         "kazenai-core/tests/test_principal_contract.py"
       ],
-      "notes": "Live-verified 2026-10-12: every SDK and LiteLLM-gateway call ran on an ordinary key. Requires kazenai-contracts 0.1.1."
+      "notes": "Live-verified 2026-10-12: every SDK and LiteLLM-gateway call ran on an ordinary key. Requires the matching Agent FinOps release."
     },
     {
       "id": "provider.anthropic.beta_messages",
@@ -784,6 +808,18 @@
       "3.12"
     ]
   },
-  "updated_at": "2026-10-13",
-  "update_note": "kazenai 1.1.2 / kazenai-finops 1.1.2 / kazen-event-schema 0.6.4: OpenAI Chat Completions and Anthropic Messages (sync/async, streaming/non-streaming), LangChain, LangGraph, checkpoint resume, LiteLLM application- and gateway-owned accounting, multi-model workflow budgets, provider-rejection release and ordinary API keys are live-verified (2026-10-12). Streamed calls settle at input/output split pricing; unpriced models are blocked by default. kazenai 1.1.3: documentation and packaging only."
+  "updated_at": "2026-10-14",
+  "update_note": "kazenai 1.2.0 / kazenai-finops 1.2.0 / kazen-event-schema 0.6.6 (not yet released: PyPI has 1.1.3 / 0.6.5). Configuring Agent FinOps selects the Control lifecycle by default (reserve before dispatch, settle after, fail closed); the legacy check/reconcile path is opt-in, deprecated, and refused by hosted Agent FinOps. Control requires KAZENAI_TIER_MISMATCH_MULTIPLIER and provider clients with max_retries=0. OpenAI Responses API create/parse/stream, live-verified 2026-10-13 (gpt-6-luna, gpt-6.1-sol). CrewAI 1.15.26 certified (live-verified 2026-10-13). Security: every release from 1.0.1 to 1.1.3 lets some OpenAI calls on a monitored client skip the budget check (responses.parse, cached with_raw_response wrappers, legacy completions, Realtime, methods saved before monitor()); 1.2.0 guards or refuses them and refuses paid requests that skip the guarded methods (embeddings, images, batches...) unless allow_unmetered names them. Earlier evidence (kazenai 1.1.2, 2026-10-12): OpenAI Chat Completions and Anthropic Messages (sync/async, streaming/non-streaming), LangChain, LangGraph, checkpoint resume, LiteLLM application- and gateway-owned accounting, multi-model workflow budgets, provider-rejection release and ordinary API keys are live-verified.",
+  "release": {
+    "kazenai": "1.2.0",
+    "kazenai-finops": "1.2.0",
+    "kazen-event-schema": "0.6.6",
+    "state": "unreleased",
+    "pypi_current": {
+      "kazenai": "1.1.3",
+      "kazenai-finops": "1.1.3",
+      "kazen-event-schema": "0.6.5"
+    },
+    "note": "Set state to 'published' only after the packages are on PyPI; tests refuse 'on PyPI' wording before that."
+  }
 }

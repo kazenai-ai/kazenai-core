@@ -12,13 +12,40 @@ from kazenai.lifecycle_config import (
 )
 
 
-def test_unset_defaults_to_legacy_fail_open() -> None:
+def test_unset_legacy_reports_what_runtime_enforces() -> None:
+    # Legacy fail_open applies only under KAZENAI_ENV=dev; elsewhere the
+    # runtime fails closed and the snapshot says so.
     cfg = resolve_effective_lifecycle({})
     assert cfg.profile == "legacy"
     assert cfg.accounting_mode == "legacy_check_reconcile"
-    assert cfg.failure_policy == "fail_open"
+    assert cfg.failure_policy == "fail_closed"
+    assert any(d.startswith("fail_open_ignored") for d in cfg.diagnostics)
     assert cfg.source == "unset"
     assert not cfg.uses_reservation_settlement
+    dev = resolve_effective_lifecycle({"KAZENAI_ENV": "dev"})
+    assert dev.failure_policy == "fail_open"
+
+
+def test_runtime_policy_matches_the_snapshot(monkeypatch) -> None:
+    from kazenai.deployment import enforcement_fail_closed, finops_reservation_fail_closed
+
+    for key in ("KAZENAI_ENV", "KAZENAI_DEPLOYMENT_MODE", "KAZENAI_FINOPS_ENV", "KAZENAI_ENFORCEMENT_MODE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("KAZENAI_ENFORCEMENT_MODE", "fail_open")
+    monkeypatch.setenv("KAZENAI_DEPLOYMENT_MODE", "development")
+    assert resolve_effective_lifecycle().failure_policy == "fail_closed"
+    assert enforcement_fail_closed() is True and finops_reservation_fail_closed() is True
+    monkeypatch.setenv("KAZENAI_ENV", "dev")
+    assert resolve_effective_lifecycle().failure_policy == "fail_open"
+    assert enforcement_fail_closed() is False
+
+
+def test_conflicting_deployment_modes_raise_at_resolution() -> None:
+    with pytest.raises(LifecycleConfigError) as excinfo:
+        resolve_effective_lifecycle({"KAZENAI_DEPLOYMENT_MODE": "production", "KAZENAI_FINOPS_ENV": "development"})
+    assert "deployment_mode_conflict" in str(excinfo.value)
+    # Aliases of the same mode are not a conflict.
+    resolve_effective_lifecycle({"KAZENAI_DEPLOYMENT_MODE": "production", "KAZENAI_ENV": "saas"})
 
 
 def test_control_via_finops_control_profile() -> None:
@@ -30,6 +57,53 @@ def test_control_via_finops_control_profile() -> None:
     assert cfg.config_version == "control-config.v1"
     assert cfg.accounting_owner == "sdk"
     assert lifecycle_budget_enabled({"KAZENAI_FINOPS_CONTROL_PROFILE": "1"})
+
+
+def test_finops_url_defaults_to_control_without_profile_variable() -> None:
+    cfg = resolve_effective_lifecycle(
+        {
+            "KAZENAI_FINOPS_URL": "https://finops.example.test",
+            "KAZENAI_FINOPS_API_KEY": "sdk-key",
+        }
+    )
+    assert cfg.profile == "control"
+    assert cfg.uses_reservation_settlement
+    assert cfg.failure_policy == "fail_closed"
+    assert cfg.source == "default_finops_configured"
+    assert cfg.sources["KAZENAI_FINOPS_URL"] == "configured"
+
+
+def test_ingest_url_alone_also_defaults_to_control() -> None:
+    # The guard reserves against KAZENAI_FINOPS_INGEST_URL when it is the only
+    # FinOps URL, so lifecycle resolution must select Control for it too.
+    cfg = resolve_effective_lifecycle(
+        {
+            "KAZENAI_FINOPS_INGEST_URL": "https://finops.example.test",
+            "KAZENAI_FINOPS_API_KEY": "sdk-key",
+        }
+    )
+    assert cfg.profile == "control"
+    assert cfg.source == "default_finops_configured"
+    assert cfg.sources["KAZENAI_FINOPS_INGEST_URL"] == "configured"
+
+
+def test_no_finops_url_keeps_the_unset_default() -> None:
+    cfg = resolve_effective_lifecycle({"KAZENAI_FINOPS_API_KEY": "sdk-key"})
+    assert cfg.profile == "legacy"
+    assert cfg.source == "unset"
+
+
+def test_explicit_legacy_overrides_finops_default_and_is_deprecated() -> None:
+    cfg = resolve_effective_lifecycle(
+        {
+            "KAZENAI_FINOPS_URL": "https://finops.example.test",
+            "KAZENAI_FINOPS_API_KEY": "sdk-key",
+            "KAZENAI_PROFILE": "legacy",
+        }
+    )
+    assert cfg.profile == "legacy"
+    assert cfg.source == "KAZENAI_PROFILE"
+    assert any("explicit legacy lifecycle is deprecated" in item for item in cfg.deprecations)
 
 
 def test_alias_precedence_and_conflicts() -> None:

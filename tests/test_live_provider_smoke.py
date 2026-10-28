@@ -9,7 +9,9 @@ Each cell checks that:
    provider-reported input/output usage (streaming and non-streaming), and
 3. a budget too small for the call raises ``BudgetExceeded`` before dispatch
    (proved with an invalid key: had the call reached the provider it would
-   fail authentication instead).
+   fail authentication instead). An Anthropic model with a long-context price
+   band uses the real key for this check, because pricing it first calls the
+   free ``messages.count_tokens``; a generated answer would still fail it.
 
 Enable explicitly (keys stay outside the repo):
 
@@ -267,13 +269,24 @@ def _anthropic_denied_before_dispatch(use_async: bool) -> bool:
     from kazenai import BudgetExceeded
 
     kwargs = {"model": _anthropic_model(), "messages": _PROMPT, "max_tokens": _MAX_TOKENS}
+    # A model with a long-context price band is priced from Anthropic's exact input
+    # count (messages.count_tokens, free, generates nothing). With an invalid key that
+    # call fails before the budget check, so use the real key: BudgetExceeded must still
+    # come before any generation, and a generated answer would fail pytest.raises.
+    from kazenai.price_catalog import model_declares_long_band
+
+    key = (
+        _key("ANTHROPIC_API_KEY")
+        if model_declares_long_band("anthropic", _anthropic_model())
+        else "sk-ant-invalid-never-dispatched"
+    )
     if not use_async:
-        client = _monitored(anthropic.Anthropic(api_key="sk-ant-invalid-never-dispatched", max_retries=0), "anthropic", budget=1e-9)
+        client = _monitored(anthropic.Anthropic(api_key=key, max_retries=0), "anthropic", budget=1e-9)
         with pytest.raises(BudgetExceeded):
             client.messages.create(**kwargs)
         return True
     client = _monitored(
-        anthropic.AsyncAnthropic(api_key="sk-ant-invalid-never-dispatched", max_retries=0), "anthropic", budget=1e-9
+        anthropic.AsyncAnthropic(api_key=key, max_retries=0), "anthropic", budget=1e-9
     )
 
     async def _go():

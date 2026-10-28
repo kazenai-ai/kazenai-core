@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 
 import asyncio
@@ -11,7 +11,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:
     import aiohttp  # type: ignore
@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover
 from .context import RunContext, get_current_context, use_context
 from .provider_errors import is_definitive_provider_rejection as _definitive_provider_rejection
 from .debug import DebugPrinter
+from ._dispatch_gate import install_dispatch_gate
 from .enforcement import BudgetExceeded, BudgetUnavailable, Enforcement, LoopDetected, RateLimitExceeded, StreamCutoffError, UnsupportedModeError
 from .capture_policy import CaptureMode, build_content_ref, capture_disclosure, event_log_fields, resolve_capture_mode
 from .loop_detector import LoopDetector, LoopScores
@@ -95,6 +96,10 @@ SUPPORTED_OPENAI_STREAM_METHOD = "openai.chat.completions.create.stream"
 SUPPORTED_OPENAI_STREAM_MANAGER = "openai.chat.completions.stream"
 SUPPORTED_ANTHROPIC_STREAM_METHOD = "anthropic.messages.create.stream"
 SUPPORTED_ANTHROPIC_STREAM_MANAGER = "anthropic.messages.stream"
+SUPPORTED_OPENAI_RESPONSES_METHOD = "openai.responses.create"
+SUPPORTED_OPENAI_RESPONSES_PARSE_METHOD = "openai.responses.parse"
+SUPPORTED_OPENAI_RESPONSES_STREAM_METHOD = "openai.responses.create.stream"
+SUPPORTED_OPENAI_RESPONSES_STREAM_MANAGER = "openai.responses.stream"
 
 _HELPER_INNER_CREATE_BYPASS: ContextVar[bool] = ContextVar(
     "kazenai_helper_inner_create_bypass", default=False
@@ -235,11 +240,12 @@ def _unsupported_mode_stub(message: str) -> Callable[..., Any]:
     return _stub
 
 
-def _apply_output_token_bound(kwargs: Dict[str, Any]) -> None:
+def _apply_output_token_bound(kwargs: Dict[str, Any], *, responses: bool = False) -> None:
     """Inject/clamp the output limit using model_pricing.default_max_output_tokens.
 
-    Injects ``max_completion_tokens`` for OpenAI reasoning families (which
-    reject ``max_tokens``) and ``max_tokens`` otherwise.
+    Chat Completions: injects ``max_completion_tokens`` for OpenAI reasoning
+    families (which reject ``max_tokens``) and ``max_tokens`` otherwise.
+    Responses: ``max_output_tokens``, which also bounds reasoning tokens.
     """
     try:
         from .model_pricing import default_max_output_tokens, output_limit_param
@@ -250,6 +256,17 @@ def _apply_output_token_bound(kwargs: Dict[str, Any]) -> None:
         return
     bound = default_max_output_tokens(model)
     if bound is None:
+        return
+    if responses:
+        requested = kwargs.get("max_output_tokens")
+        if requested is None:
+            kwargs["max_output_tokens"] = int(bound)
+            return
+        try:
+            if int(requested) > int(bound):
+                kwargs["max_output_tokens"] = int(bound)
+        except (TypeError, ValueError):
+            return
         return
     for key in ("max_tokens", "max_completion_tokens"):
         if key in kwargs and kwargs[key] is not None:
@@ -295,6 +312,7 @@ def _estimate_input_tokens(kwargs: Mapping[str, Any]) -> int:
         "stream_options",
         "max_tokens",
         "max_completion_tokens",
+        "max_output_tokens",
     }
 
     def _size(value: Any, *, depth: int = 0) -> int:
@@ -329,7 +347,7 @@ def _estimate_input_tokens(kwargs: Mapping[str, Any]) -> int:
 
 
 def _max_output_tokens(kwargs: Mapping[str, Any]) -> int:
-    for key in ("max_completion_tokens", "max_tokens"):
+    for key in ("max_output_tokens", "max_completion_tokens", "max_tokens"):
         value = (kwargs or {}).get(key)
         if value is None:
             continue
@@ -366,6 +384,7 @@ def _postcall_cost_usd(
     usage: Any,
     tokens_used: Optional[int],
     usd_per_1k_tokens: Optional[float],
+    pricing: Any = None,
 ) -> Optional[float]:
     """Actual call cost using the same price table as pre-call projection when possible."""
     if tokens_used is not None and usd_per_1k_tokens:
@@ -395,12 +414,75 @@ def _postcall_cost_usd(
         if in_tok == 0 and out_tok == 0 and tokens_used:
             # Fall back to splitting total when only total is known.
             in_tok = int(tokens_used)
-        cost = _COST_ENGINE.cost_usd(model=model_name, input_tokens=in_tok, output_tokens=out_tok)
+        from .pricing_context import current_pricing, scope_org
+        from .request_pricing import reported_service_tier, settle_usage
+
+        bound = pricing if pricing is not None else current_pricing()
+        if bound is not None and usage is not None:
+            micros = settle_usage(
+                bound,
+                usage,
+                reported_tier=reported_service_tier(usage),
+                org_id=scope_org(),
+            )
+            from .price_catalog import micro_usd_to_decimal
+
+            cost = float(micro_usd_to_decimal(micros))
+            return cost
+        _in, _out, cost = _COST_ENGINE.from_usage(model=model_name, usage=usage)
         if cost and cost > 0:
             return float(cost)
-    except Exception as exc:  # pragma: no cover
-        _log_fail_open("postcall_cost", exc)
+    except Exception as exc:
+        # The provider call already happened and was paid for. Never raise here:
+        # an unpriceable result returns None and the caller holds the
+        # reservation for reconciliation instead of discarding the response.
+        logging.getLogger("kazenai.monitor").warning(
+            "post-call cost unavailable (%s); settlement held for reconciliation",
+            type(exc).__name__,
+        )
     return None
+
+
+def _bound_postcall():
+    """Capture this call's frozen basis for a later stream finalize."""
+    from .pricing_context import current_pricing
+
+    bound = current_pricing()
+
+    def _fn(**kw: Any) -> Optional[float]:
+        return _postcall_cost_usd(**kw, pricing=bound)
+
+    return _fn
+
+
+def _arm_price_scope(
+    *,
+    provider: str,
+    surface: str,
+    client: Any,
+    org_id: str,
+    observe_unbounded: tuple = (),
+    kwargs: Any = None,
+) -> None:
+    """Clear the previous call's basis and install this call's scope for ``kwargs``."""
+    from .pricing_context import bind_call, set_current_pricing
+
+    set_current_pricing(None)
+    bind_call(
+        provider=provider,
+        surface=surface,
+        client=client,
+        org_id=org_id,
+        observe_unbounded=tuple(observe_unbounded or ()),
+        kwargs=kwargs,
+    )
+
+
+def _pricing_holds_reconciliation() -> bool:
+    from .pricing_context import current_pricing
+
+    pricing = current_pricing()
+    return bool(pricing is not None and getattr(pricing, "hold_for_reconciliation", False))
 
 
 def _precall_projection_usd(kwargs: Mapping[str, Any], usd_per_1k_tokens: Optional[float]) -> float:
@@ -414,6 +496,42 @@ def _precall_projection_usd(kwargs: Mapping[str, Any], usd_per_1k_tokens: Option
     model = str((kwargs or {}).get("model") or "").strip()
     input_tokens = _estimate_input_tokens(kwargs)
     output_tokens = _max_output_tokens(kwargs)
+    from .pricing_context import (
+        current_pricing,
+        pricing_scope_active,
+        scope_client,
+        scope_observe_unbounded,
+        scope_org,
+        scope_provider,
+        scope_surface,
+    )
+
+    # The armed scope applies only to the request it was armed for.
+    scoped = isinstance(kwargs, dict) and pricing_scope_active(kwargs)
+    existing = current_pricing() if scoped else None
+    if scoped and existing is None:
+        from .request_pricing import prepare_provider_call
+
+        try:
+            existing = prepare_provider_call(
+                kwargs,
+                provider=scope_provider(),
+                surface=scope_surface(),
+                client=scope_client(),
+                org_id=scope_org(),
+                observe_unbounded=scope_observe_unbounded(),
+            )
+        except UnknownModelError:
+            # Only an unpriced model may fall through to a caller-supplied rate.
+            # Shape refusals (tools, n, tier, images) always propagate.
+            if not usd_per_1k_tokens:
+                raise
+            existing = None
+    # The certified catalog is the ceiling: a known model is never re-priced by a
+    # caller-supplied flat rate (that could under-reserve). The rate below applies
+    # only to a model the catalog does not price.
+    if existing is not None and existing.reserved_usd > 0:
+        return float(existing.reserved_usd)
     try:
         if model:
             global _COST_ENGINE
@@ -466,6 +584,11 @@ def _reservation_payload_fields(reserved) -> dict:
         }
         if reserved.reserved_usd_micros:
             out["actual_usd_micros"] = None  # filled after usage when known
+        pricing = getattr(reserved, "pricing_call", None)
+        if pricing is not None:
+            from .request_pricing import pricing_evidence
+
+            out.update(pricing_evidence(pricing))
         return {k: v for k, v in out.items() if v is not None}
     try:
         return {"reserved_cost_usd": float(reserved)}
@@ -565,6 +688,10 @@ def _reserve_with_local_hold(
     except Exception:
         enforcement.release_projection(held_projection)
         raise
+    from .pricing_context import current_pricing
+    from .request_pricing import attach_pricing
+
+    attach_pricing(reserved, current_pricing())
     return held_projection, reserved
 
 
@@ -616,6 +743,10 @@ async def _reserve_with_local_hold_async(
     except Exception:
         enforcement.release_projection(held_projection)
         raise
+    from .pricing_context import current_pricing
+    from .request_pricing import attach_pricing
+
+    attach_pricing(reserved, current_pricing())
     return held_projection, reserved
 
 
@@ -854,7 +985,11 @@ def _extract_openai_input(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> A
     if "messages" in kwargs:
         return {"messages": kwargs.get("messages"), "model": kwargs.get("model")}
     if "input" in kwargs:
-        return {"input": kwargs.get("input"), "model": kwargs.get("model")}
+        return {
+            "input": kwargs.get("input"),
+            "instructions": kwargs.get("instructions"),
+            "model": kwargs.get("model"),
+        }
     if args:
         return {"args": args, "model": kwargs.get("model")}
     return {"model": kwargs.get("model")}
@@ -869,7 +1004,8 @@ def _extract_tool_names(kwargs: Mapping[str, Any]) -> Optional[List[str]]:
         for t in tools:
             if isinstance(t, dict):
                 fn = t.get("function") or {}
-                name = fn.get("name") if isinstance(fn, dict) else None
+                # Chat nests the name under ``function``; Responses tools are flat.
+                name = (fn.get("name") if isinstance(fn, dict) else None) or t.get("name")
                 if name:
                     out.append(str(name))
             else:
@@ -892,11 +1028,37 @@ def _extract_input_text(payload: Any) -> str:
                         parts.append(c)
             return "\n".join(parts)
         if isinstance(payload, dict) and "input" in payload:
-            return str(payload["input"])
+            return _responses_input_text(payload.get("instructions"), payload["input"])
         return str(payload)
     except Exception as exc:
         _log_fail_open("extract_input_text", exc)
         return ""
+
+
+def _responses_input_text(instructions: Any, items: Any) -> str:
+    """Flatten Responses ``instructions`` + ``input`` (string or item list) to text."""
+    parts: list[str] = []
+    if isinstance(instructions, str) and instructions:
+        parts.append(instructions)
+    if isinstance(items, str):
+        parts.append(items)
+    elif isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                for piece in content:
+                    if isinstance(piece, dict) and isinstance(piece.get("text"), str):
+                        parts.append(piece["text"])
+            for key in ("output", "arguments"):
+                if isinstance(item.get(key), str):
+                    parts.append(item[key])
+    elif items is not None:
+        parts.append(str(items))
+    return "\n".join(parts)
 
 
 def _unwrap_raw_response(resp: Any) -> Any:
@@ -1237,12 +1399,16 @@ def patch_openai(
     feature: Optional[str] = None,
     operation_id: Optional[str] = None,
     attempt_id: Optional[str] = None,
+    allow_unmetered: Sequence[str] = (),
+    observe_unbounded: Sequence[str] = (),
 ) -> Callable[[], None]:
     """
     Monkey-patch an OpenAI-style client to enforce budgets/loops *before* each LLM call.
 
-    When ``certified_surface=True`` (public ``monitor()`` path), only Chat Completions
-    is enforced; ``responses.create`` is stubbed to ``UnsupportedModeError``.
+    Guards Chat Completions (``create`` / ``parse`` / ``stream``) and Responses
+    (``create`` / ``parse`` / ``stream``). Unmetered spend methods (Realtime, legacy
+    Completions, Responses ``compact`` / ``connect``) are stubbed to raise
+    ``UnsupportedModeError``.
 
     Returns an `undo()` function that restores the original methods.
     """
@@ -1276,11 +1442,28 @@ def patch_openai(
         )
 
     patches: List[Tuple[Any, str, Any]] = []
+    # Backstop for references taken before monitor(): see _dispatch_gate.
+    gate = install_dispatch_gate(client, patches, allow_unmetered=allow_unmetered)
+    gate_scope = gate.authorized if gate is not None else nullcontext
+
+    @contextmanager
+    def _helper_scope():
+        # A stream helper dispatches through the SDK during __enter__, after it reserved.
+        with _helper_inner_create_bypass(), gate_scope():
+            yield
 
     def _wrap(fn: Callable[..., Any], *, method: str) -> Callable[..., Any]:
+        is_responses = method.startswith("openai.responses")
+        stream_surface = (
+            SUPPORTED_OPENAI_RESPONSES_STREAM_METHOD if is_responses else SUPPORTED_OPENAI_STREAM_METHOD
+        )
+
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             if _HELPER_INNER_CREATE_BYPASS.get():
                 return fn(*args, **kwargs)
+            if is_responses:
+                # Requests whose cost cannot be bounded before dispatch fail here.
+                _validate_responses_request(kwargs)
             ctx = _call_context(ctx0)
             step_ctx = ctx.child_step()
             with ExitStack() as stack:
@@ -1319,15 +1502,19 @@ def patch_openai(
                 # Reject streaming before any network/provider work.
                 _reject_streaming_if_unsupported(kwargs)
                 # Enforceable output token bound before dispatch.
-                _apply_output_token_bound(kwargs)
+                _apply_output_token_bound(kwargs, responses=is_responses)
 
                 call_kwargs = dict(kwargs)
                 is_stream = bool(call_kwargs.get("stream"))
                 if is_stream:
                     from .streaming.lifecycle import StreamAttempt, StreamOutcome
                     from .streaming.openai import merge_stream_options, wrap_openai_stream
+                    from .streaming.openai_responses import wrap_responses_stream
 
-                    call_kwargs = merge_stream_options(call_kwargs)
+                    # Responses report usage on the terminal event; they reject
+                    # stream_options.include_usage.
+                    if not is_responses:
+                        call_kwargs = merge_stream_options(call_kwargs)
 
                 model_name = str(call_kwargs.get("model") or "")
                 cutoff = stream_cutoff_usd
@@ -1356,6 +1543,14 @@ def patch_openai(
                         )
 
                 # Local cap first (fail closed), then shared FinOps reserve.
+                _arm_price_scope(
+                    provider="openai",
+                    surface="responses" if is_responses else "chat",
+                    client=client,
+                    org_id=step_ctx.org_id,
+                    observe_unbounded=observe_unbounded,
+                    kwargs=call_kwargs,
+                )
                 projected = _precall_projection_usd(call_kwargs, usd_per_1k_tokens)
                 held_projection, reserved_cost_usd = _reserve_with_local_hold(
                     enforcement=enforcement,
@@ -1408,13 +1603,13 @@ def patch_openai(
                         )
 
                     attempt = StreamAttempt(
-                        surface=SUPPORTED_OPENAI_STREAM_METHOD,
+                        surface=stream_surface,
                         step_ctx=step_ctx,
                         enforcement=enforcement,
                         held_projection=held_projection,
                         reserved_cost_usd=reserved_cost_usd,
                         model=model_name,
-                        method=SUPPORTED_OPENAI_STREAM_METHOD,
+                        method=stream_surface,
                         usd_per_1k_tokens=output_rate,
                         settle_usd_per_1k_tokens=usd_per_1k_tokens,
                         capture_mode=capture_mode,
@@ -1424,7 +1619,7 @@ def patch_openai(
                         stream_cutoff_usd=cutoff,
                         reconcile_fn=_try_settle_stream_budget,
                         pending_fn=_try_mark_stream_pending,
-                        postcall_cost_fn=_postcall_cost_usd,
+                        postcall_cost_fn=_bound_postcall(),
                         reservation_payload_fn=_reservation_payload_fields,
                         emit_event_fn=_emit,
                         attribution=attr_defaults,
@@ -1461,7 +1656,7 @@ def patch_openai(
                             reservation_id=getattr(reserved_cost_usd, "reservation_id", None),
                             decision_id=getattr(reserved_cost_usd, "decision_id", None),
                         ),
-                    ):
+                    ), gate_scope():
                         resp = fn(*args, **call_kwargs)
                 except Exception as exc:
                     rejected = _definitive_provider_rejection(exc)
@@ -1489,7 +1684,9 @@ def patch_openai(
 
                 if is_stream:
                     assert attempt is not None
-                    return _wrap_stream_result(resp, attempt, wrap_openai_stream)
+                    return _wrap_stream_result(
+                        resp, attempt, wrap_responses_stream if is_responses else wrap_openai_stream
+                    )
 
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
 
@@ -1504,7 +1701,7 @@ def patch_openai(
                 # Missing usage/pricing → pending; false settle ack → pending
                 # with exact known amount (never discard financial delivery failure).
                 if reserved_cost_usd is not None:
-                    if cost_usd is None:
+                    if cost_usd is None or _pricing_holds_reconciliation():
                         _try_mark_stream_pending(
                             org_id=step_ctx.org_id,
                             workspace_id=step_ctx.workspace_id,
@@ -1632,17 +1829,11 @@ def patch_openai(
     except Exception:
         pass
     targets.extend(_openai_parse_targets(client))
-    if not certified_surface:
-        try:
-            if hasattr(client, "responses") and hasattr(client.responses, "create"):
-                targets.append((client.responses, "create", "openai.responses.create"))
-        except Exception:
-            pass
+    targets.extend(_openai_responses_targets(client))
 
     if not targets:
         raise TypeError(
-            "Unsupported client: expected `.chat.completions.create`"
-            + ("" if certified_surface else " and/or `.responses.create`")
+            "Unsupported client: expected `.chat.completions.create` and/or `.responses.create`"
         )
 
     for obj, name, event_type in targets:
@@ -1657,148 +1848,157 @@ def patch_openai(
             pass
         setattr(obj, name, wrapped_fn)
 
-    # The official SDK exposes a lazy ChatCompletionStreamManager on
-    # ``chat.completions.stream``. It bypasses ``create``, so guard it directly.
-    try:
-        completions = client.chat.completions
-        if hasattr(completions, "stream"):
-            orig_stream = completions.stream
-            if callable(orig_stream):
+    # The official SDK exposes lazy stream managers on ``chat.completions.stream``
+    # and ``responses.stream``. They reserve on ``__enter__``; the helper's inner
+    # ``create(stream=True)`` runs under the bypass so it is not reserved twice.
+    def _make_stream_manager(orig_stream: Callable[..., Any], *, responses: bool) -> Callable[..., Any]:
+        surface = SUPPORTED_OPENAI_RESPONSES_STREAM_MANAGER if responses else SUPPORTED_OPENAI_STREAM_MANAGER
 
-                def _stream_manager(*s_args: Any, **s_kwargs: Any) -> Any:
-                    from .streaming.lifecycle import StreamAttempt
-                    from .streaming.openai import merge_stream_options, wrap_openai_manager
+        def _stream_manager(*s_args: Any, **s_kwargs: Any) -> Any:
+            from .streaming.lifecycle import StreamAttempt
+            from .streaming.openai import merge_stream_options, wrap_openai_manager
+            from .streaming.openai_responses import wrap_responses_manager
 
-                    _reject_streaming_if_unsupported({"stream": True})
-                    ctx = _call_context(ctx0)
-                    step_ctx = ctx.child_step()
-                    call_kwargs = dict(s_kwargs)
-                    _apply_output_token_bound(call_kwargs)
-                    call_kwargs = merge_stream_options(call_kwargs)
-                    # The helper itself sets stream=True and does not accept a
-                    # public ``stream`` keyword.
-                    call_kwargs.pop("stream", None)
-                    model_name = str(call_kwargs.get("model") or "")
-                    output_rate = _stream_output_rate_usd_per_1k(
-                        model_name,
-                        usd_per_1k_tokens,
-                    )
-                    cutoff = stream_cutoff_usd
-                    if cutoff is None and stream_enforcement and output_rate > 0:
-                        cutoff = max(0.01, output_rate * 0.05)
-                    if cutoff is not None and output_rate <= 0:
-                        raise UnsupportedModeError(
-                            "stream_cutoff_usd requires known model pricing or an explicit "
-                            "usd_per_1k_tokens rate",
-                            error_code="stream_cutoff_pricing_unavailable",
-                        )
-                    projected = _precall_projection_usd(call_kwargs, usd_per_1k_tokens)
-                    # Construction is lazy; reserve only when __enter__ is called.
-                    manager = orig_stream(*s_args, **call_kwargs)
-
-                    def _attempt_factory() -> StreamAttempt:
-                        with ExitStack() as stack:
-                            stack.enter_context(use_context(step_ctx))
-                            stack.enter_context(claim_enforcement_owner())
-                            stack.enter_context(use_attribution(**attr_defaults))
-                            held_projection, reserved_cost_usd = _reserve_with_local_hold(
-                                enforcement=enforcement,
-                                projected_cost_usd=projected,
-                                reserve_kwargs={
-                                    "org_id": step_ctx.org_id,
-                                    "workspace_id": step_ctx.workspace_id,
-                                    "run_id": step_ctx.run_id,
-                                    "call_id": str(getattr(step_ctx, "step_id", None) or "") or None,
-                                    "estimated_cost_usd": projected,
-                                    "business_subject_ref": attr_defaults.get("business_subject_ref"),
-                                    "feature_id": attr_defaults.get("feature_id"),
-                                    "workflow_id": attr_defaults.get("workflow_id"),
-                                    "operation_id": attr_defaults.get("operation_id"),
-                                    "attempt_id": attr_defaults.get("attempt_id"),
-                                    "model": model_name,
-                                    "input_tokens": _estimate_input_tokens(call_kwargs),
-                                },
-                            )
-                            _mark_stream_started_or_release(
-                                enforcement=enforcement,
-                                held_projection=held_projection,
-                                org_id=step_ctx.org_id,
-                                workspace_id=step_ctx.workspace_id,
-                                run_id=step_ctx.run_id,
-                                reserved_cost_usd=reserved_cost_usd,
-                            )
-                        started = time.perf_counter()
-
-                        def _emit(attempt, settle_cost, tokens_used, error):
-                            _emit_stream_model_call(
-                                attempt,
-                                settle_cost=settle_cost,
-                                tokens_used=tokens_used,
-                                error=error,
-                                org_id=step_ctx.org_id,
-                                project_id=step_ctx.project_id,
-                                workspace_id=step_ctx.workspace_id,
-                                agent_id=step_ctx.agent_id,
-                                agent_role=agent_role,
-                                capture_mode=capture_mode,
-                                event_sink=event_sink,
-                                finops=finops,
-                                endpoint_url=endpoint_url,
-                                endpoint_headers=endpoint_headers,
-                                log=log,
-                            )
-
-                        return StreamAttempt(
-                            surface=SUPPORTED_OPENAI_STREAM_MANAGER,
-                            step_ctx=step_ctx,
-                            enforcement=enforcement,
-                            held_projection=held_projection,
-                            reserved_cost_usd=reserved_cost_usd,
-                            model=model_name,
-                            method=SUPPORTED_OPENAI_STREAM_MANAGER,
-                            usd_per_1k_tokens=output_rate,
-                            settle_usd_per_1k_tokens=usd_per_1k_tokens,
-                            capture_mode=capture_mode,
-                            agent_role=agent_role,
-                            event_sink=event_sink,
-                            finops=finops,
-                            stream_cutoff_usd=cutoff,
-                            reconcile_fn=_try_settle_stream_budget,
-                            pending_fn=_try_mark_stream_pending,
-                            postcall_cost_fn=_postcall_cost_usd,
-                            reservation_payload_fn=_reservation_payload_fields,
-                            emit_event_fn=_emit,
-                            attribution=attr_defaults,
-                            started_perf=started,
-                        )
-
-                    return wrap_openai_manager(
-                        manager,
-                        attempt_factory=_attempt_factory,
-                        enter_scope=_helper_inner_create_bypass,
-                    )
-
-                patches.append((completions, "stream", orig_stream))
-                setattr(completions, "stream", _stream_manager)
-    except Exception:
-        pass
-
-    # Certified monitor must not silently leave Responses unguarded.
-    if certified_surface:
-        try:
-            if hasattr(client, "responses") and hasattr(client.responses, "create"):
-                orig_resp = client.responses.create
-                patches.append((client.responses, "create", orig_resp))
-                setattr(
-                    client.responses,
-                    "create",
-                    _unsupported_mode_stub(
-                        "OpenAI Responses API is unsupported on the certified Control path; "
-                        "use sync non-streaming chat.completions.create"
-                    ),
+            _reject_streaming_if_unsupported({"stream": True})
+            ctx = _call_context(ctx0)
+            step_ctx = ctx.child_step()
+            call_kwargs = dict(s_kwargs)
+            if responses:
+                _validate_responses_request(call_kwargs, stream_helper=True)
+            _apply_output_token_bound(call_kwargs, responses=responses)
+            if not responses:
+                call_kwargs = merge_stream_options(call_kwargs)
+            # The helper itself sets stream=True and does not accept a
+            # public ``stream`` keyword.
+            call_kwargs.pop("stream", None)
+            model_name = str(call_kwargs.get("model") or "")
+            output_rate = _stream_output_rate_usd_per_1k(
+                model_name,
+                usd_per_1k_tokens,
+            )
+            cutoff = stream_cutoff_usd
+            if cutoff is None and stream_enforcement and output_rate > 0:
+                cutoff = max(0.01, output_rate * 0.05)
+            if cutoff is not None and output_rate <= 0:
+                raise UnsupportedModeError(
+                    "stream_cutoff_usd requires known model pricing or an explicit "
+                    "usd_per_1k_tokens rate",
+                    error_code="stream_cutoff_pricing_unavailable",
                 )
+            _arm_price_scope(
+                provider="openai",
+                surface="responses" if responses else "chat",
+                client=client,
+                org_id=step_ctx.org_id,
+                observe_unbounded=observe_unbounded,
+                kwargs=call_kwargs,
+            )
+            projected = _precall_projection_usd(call_kwargs, usd_per_1k_tokens)
+            # Construction is lazy; reserve only when __enter__ is called.
+            manager = orig_stream(*s_args, **call_kwargs)
+
+            def _attempt_factory() -> StreamAttempt:
+                with ExitStack() as stack:
+                    stack.enter_context(use_context(step_ctx))
+                    stack.enter_context(claim_enforcement_owner())
+                    stack.enter_context(use_attribution(**attr_defaults))
+                    held_projection, reserved_cost_usd = _reserve_with_local_hold(
+                        enforcement=enforcement,
+                        projected_cost_usd=projected,
+                        reserve_kwargs={
+                            "org_id": step_ctx.org_id,
+                            "workspace_id": step_ctx.workspace_id,
+                            "run_id": step_ctx.run_id,
+                            "call_id": str(getattr(step_ctx, "step_id", None) or "") or None,
+                            "estimated_cost_usd": projected,
+                            "business_subject_ref": attr_defaults.get("business_subject_ref"),
+                            "feature_id": attr_defaults.get("feature_id"),
+                            "workflow_id": attr_defaults.get("workflow_id"),
+                            "operation_id": attr_defaults.get("operation_id"),
+                            "attempt_id": attr_defaults.get("attempt_id"),
+                            "model": model_name,
+                            "input_tokens": _estimate_input_tokens(call_kwargs),
+                        },
+                    )
+                    _mark_stream_started_or_release(
+                        enforcement=enforcement,
+                        held_projection=held_projection,
+                        org_id=step_ctx.org_id,
+                        workspace_id=step_ctx.workspace_id,
+                        run_id=step_ctx.run_id,
+                        reserved_cost_usd=reserved_cost_usd,
+                    )
+                started = time.perf_counter()
+
+                def _emit(attempt, settle_cost, tokens_used, error):
+                    _emit_stream_model_call(
+                        attempt,
+                        settle_cost=settle_cost,
+                        tokens_used=tokens_used,
+                        error=error,
+                        org_id=step_ctx.org_id,
+                        project_id=step_ctx.project_id,
+                        workspace_id=step_ctx.workspace_id,
+                        agent_id=step_ctx.agent_id,
+                        agent_role=agent_role,
+                        capture_mode=capture_mode,
+                        event_sink=event_sink,
+                        finops=finops,
+                        endpoint_url=endpoint_url,
+                        endpoint_headers=endpoint_headers,
+                        log=log,
+                    )
+
+                return StreamAttempt(
+                    surface=surface,
+                    step_ctx=step_ctx,
+                    enforcement=enforcement,
+                    held_projection=held_projection,
+                    reserved_cost_usd=reserved_cost_usd,
+                    model=model_name,
+                    method=surface,
+                    usd_per_1k_tokens=output_rate,
+                    settle_usd_per_1k_tokens=usd_per_1k_tokens,
+                    capture_mode=capture_mode,
+                    agent_role=agent_role,
+                    event_sink=event_sink,
+                    finops=finops,
+                    stream_cutoff_usd=cutoff,
+                    reconcile_fn=_try_settle_stream_budget,
+                    pending_fn=_try_mark_stream_pending,
+                    postcall_cost_fn=_bound_postcall(),
+                    reservation_payload_fn=_reservation_payload_fields,
+                    emit_event_fn=_emit,
+                    attribution=attr_defaults,
+                    started_perf=started,
+                )
+
+            wrap_manager = wrap_responses_manager if responses else wrap_openai_manager
+            return wrap_manager(
+                manager,
+                attempt_factory=_attempt_factory,
+                enter_scope=_helper_scope,
+            )
+
+        return _stream_manager
+
+    for resource, is_responses in (
+        (getattr(getattr(client, "chat", None), "completions", None), False),
+        (getattr(client, "responses", None), True),
+    ):
+        try:
+            orig_stream = getattr(resource, "stream", None) if resource is not None else None
+            if callable(orig_stream):
+                patches.append((resource, "stream", orig_stream))
+                setattr(resource, "stream", _make_stream_manager(orig_stream, responses=is_responses))
         except Exception:
             pass
+
+    # No unmetered spend path may stay reachable on a monitored client.
+    _block_unsupported_openai_surfaces(
+        client, patches, keep={(id(obj), name) for obj, name, _ in patches}
+    )
+    _reset_sdk_response_wrappers(obj for obj, _, _ in patches)
 
     def undo() -> None:
         for obj, name, orig in patches:
@@ -1806,6 +2006,7 @@ def patch_openai(
                 setattr(obj, name, orig)
             except Exception:
                 log.exception("kazenai.patch_undo_failed", target=str(obj), name=name)
+        _reset_sdk_response_wrappers(obj for obj, _, _ in patches)
 
     return undo
 
@@ -1853,6 +2054,8 @@ def patch_anthropic(
     feature: Optional[str] = None,
     operation_id: Optional[str] = None,
     attempt_id: Optional[str] = None,
+    allow_unmetered: Sequence[str] = (),
+    observe_unbounded: Sequence[str] = (),
 ) -> Callable[[], None]:
     """
     Monkey-patch an Anthropic client to emit KazenEvents on every messages.create call.
@@ -1890,6 +2093,15 @@ def patch_anthropic(
         )
 
     patches: List[Tuple[Any, str, Any]] = []
+    # Backstop for references taken before monitor(): see _dispatch_gate.
+    gate = install_dispatch_gate(client, patches, allow_unmetered=allow_unmetered)
+    gate_scope = gate.authorized if gate is not None else nullcontext
+
+    @contextmanager
+    def _helper_scope():
+        # A stream helper dispatches through the SDK during __enter__, after it reserved.
+        with _helper_inner_create_bypass(), gate_scope():
+            yield
 
     def _wrap(fn: Callable[..., Any], *, method: str) -> Callable[..., Any]:
         def wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -1941,6 +2153,14 @@ def patch_anthropic(
                         )
 
                 # Local cap first (fail closed), then shared FinOps reserve.
+                _arm_price_scope(
+                    provider="anthropic",
+                    surface="messages",
+                    client=client,
+                    org_id=step_ctx.org_id,
+                    observe_unbounded=observe_unbounded,
+                    kwargs=call_kwargs,
+                )
                 projected = _precall_projection_usd(call_kwargs, usd_per_1k_tokens)
                 held_projection, reserved_cost_usd = _reserve_with_local_hold(
                     enforcement=enforcement,
@@ -2010,7 +2230,7 @@ def patch_anthropic(
                         stream_cutoff_usd=stream_cutoff_usd,
                         reconcile_fn=_try_settle_stream_budget,
                         pending_fn=_try_mark_stream_pending,
-                        postcall_cost_fn=_postcall_cost_usd,
+                        postcall_cost_fn=_bound_postcall(),
                         reservation_payload_fn=_reservation_payload_fields,
                         emit_event_fn=_emit,
                         attribution=attr_defaults,
@@ -2044,7 +2264,7 @@ def patch_anthropic(
                             reservation_id=getattr(reserved_cost_usd, "reservation_id", None),
                             decision_id=getattr(reserved_cost_usd, "decision_id", None),
                         ),
-                    ):
+                    ), gate_scope():
                         resp = fn(*args, **call_kwargs)
                 except Exception as exc:
                     rejected = _definitive_provider_rejection(exc)
@@ -2084,7 +2304,7 @@ def patch_anthropic(
                 )
 
                 if reserved_cost_usd is not None:
-                    if cost_usd is None:
+                    if cost_usd is None or _pricing_holds_reconciliation():
                         _try_mark_stream_pending(
                             org_id=step_ctx.org_id,
                             workspace_id=step_ctx.workspace_id,
@@ -2242,6 +2462,14 @@ def patch_anthropic(
                             "usd_per_1k_tokens rate",
                             error_code="stream_cutoff_pricing_unavailable",
                         )
+                    _arm_price_scope(
+                        provider="anthropic",
+                        surface="messages",
+                        client=client,
+                        org_id=step_ctx.org_id,
+                        observe_unbounded=observe_unbounded,
+                        kwargs=call_kwargs,
+                    )
                     projected = _precall_projection_usd(call_kwargs, usd_per_1k_tokens)
                     # Anthropic's helper returns a lazy manager.  Constructing it
                     # is not provider dispatch, so do not reserve until __enter__.
@@ -2316,7 +2544,7 @@ def patch_anthropic(
                             stream_cutoff_usd=stream_cutoff_usd,
                             reconcile_fn=_try_settle_stream_budget,
                             pending_fn=_try_mark_stream_pending,
-                            postcall_cost_fn=_postcall_cost_usd,
+                            postcall_cost_fn=_bound_postcall(),
                             reservation_payload_fn=_reservation_payload_fields,
                             emit_event_fn=_emit,
                             attribution=attr_defaults,
@@ -2326,7 +2554,7 @@ def patch_anthropic(
                     return wrap_anthropic_manager(
                         manager,
                         attempt_factory=_attempt_factory,
-                        enter_scope=_helper_inner_create_bypass,
+                        enter_scope=_helper_scope,
                     )
 
                 patches.append((client.messages, "stream", orig_stream))
@@ -2334,12 +2562,15 @@ def patch_anthropic(
     except Exception:
         pass
 
+    _reset_sdk_response_wrappers(obj for obj, _, _ in patches)
+
     def undo() -> None:
         for obj, name, orig in patches:
             try:
                 setattr(obj, name, orig)
             except Exception:
                 pass
+        _reset_sdk_response_wrappers(obj for obj, _, _ in patches)
 
     return undo
 
@@ -2349,6 +2580,19 @@ _OPENAI_BETA_STREAM_UNSUPPORTED = (
     "OpenAI beta.chat.completions.stream (structured-output streaming) is not guarded by "
     "KazenAI Control. Use chat.completions.create(stream=True) or a non-streaming parse()."
 )
+
+
+def _openai_responses_targets(client: Any) -> List[Tuple[Any, str, str]]:
+    """``responses.create`` and ``responses.parse``; ``parse`` posts directly, not via create."""
+    resource = getattr(client, "responses", None)
+    if resource is None:
+        return []
+    found: List[Tuple[Any, str, str]] = []
+    if callable(getattr(resource, "create", None)):
+        found.append((resource, "create", SUPPORTED_OPENAI_RESPONSES_METHOD))
+    if callable(getattr(resource, "parse", None)):
+        found.append((resource, "parse", SUPPORTED_OPENAI_RESPONSES_PARSE_METHOD))
+    return found
 
 
 def _openai_parse_targets(client: Any) -> List[Tuple[Any, str, str]]:
@@ -2371,6 +2615,142 @@ def _openai_parse_targets(client: Any) -> List[Tuple[Any, str, str]]:
         if callable(getattr(owner, "parse", None)):
             found.append((owner, "parse", SUPPORTED_OPENAI_PARSE_METHOD))
     return found
+
+
+_OPENAI_RESPONSES_UNSUPPORTED = (
+    "This OpenAI Responses method (compact / WebSocket connect) is not guarded by "
+    "KazenAI Control: the call would skip the pre-call budget check. Use "
+    "responses.create, responses.parse or responses.stream."
+)
+_OPENAI_LEGACY_COMPLETIONS_UNSUPPORTED = (
+    "Legacy OpenAI Completions (client.completions) is not guarded by KazenAI Control: "
+    "the call would skip the pre-call budget check. Use chat.completions.create."
+)
+_OPENAI_REALTIME_UNSUPPORTED = (
+    "OpenAI Realtime is not supported by KazenAI Control: session spend cannot be "
+    "checked before dispatch."
+)
+
+# Responses tool types billed as model tokens. Built-in tools (web search, file
+# search, code interpreter, image generation, computer use, MCP, shell) are billed
+# per call or per session outside ``usage``, so their cost cannot be bounded first.
+_RESPONSES_TOKEN_BILLED_TOOLS = frozenset({"function", "custom"})
+
+
+def _validate_responses_request(kwargs: Mapping[str, Any], *, stream_helper: bool = False) -> None:
+    """Refuse Responses requests whose spend cannot be bounded before dispatch.
+
+    - ``background=True``: returns before usage exists; settlement needs polling.
+    - ``previous_response_id`` / ``conversation`` / stored ``prompt``: the input
+      lives on OpenAI's side, so the pre-call estimate would undercount it.
+    - built-in tools: billed outside token usage.
+    - ``responses.stream(response_id=...)``: resumes a background response.
+
+    Checked on the request as sent: ``extra_body`` fields count like top-level ones.
+    """
+    from .request_pricing import _effective_request
+
+    kwargs = _effective_request(kwargs)
+    if kwargs.get("background"):
+        raise UnsupportedModeError(
+            "OpenAI Responses background mode is not supported by KazenAI Control: "
+            "its cost cannot be settled when the call returns. Remove background=True.",
+            error_code="responses_background_unsupported",
+        )
+    for key in ("previous_response_id", "conversation", "prompt"):
+        if kwargs.get(key):
+            raise UnsupportedModeError(
+                f"OpenAI Responses `{key}` is not supported by KazenAI Control yet: the "
+                "input stored on OpenAI's side cannot be priced before the call. Send the "
+                "conversation as `input` items instead.",
+                error_code="responses_server_state_unsupported",
+            )
+    if stream_helper and kwargs.get("response_id"):
+        raise UnsupportedModeError(
+            "Resuming a Responses stream by response_id is not supported by KazenAI Control.",
+            error_code="responses_background_unsupported",
+        )
+    for tool in kwargs.get("tools") or ():
+        tool_type = tool.get("type") if isinstance(tool, Mapping) else getattr(tool, "type", None)
+        if tool_type not in _RESPONSES_TOKEN_BILLED_TOOLS:
+            raise UnsupportedModeError(
+                f"OpenAI Responses built-in tool {tool_type!r} is not supported by KazenAI "
+                "Control: it is billed outside token usage, so its cost cannot be checked "
+                "before the call. Use function tools.",
+                error_code="responses_builtin_tool_unsupported",
+            )
+
+
+# OpenAI spend surfaces a monitored client does not meter. Each present method is
+# replaced by a stub that raises UnsupportedModeError, so it fails loudly instead
+# of spending outside the budget.
+_OPENAI_UNSUPPORTED_SURFACES: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
+    ("responses", ("compact", "connect"), _OPENAI_RESPONSES_UNSUPPORTED),
+    ("completions", ("create",), _OPENAI_LEGACY_COMPLETIONS_UNSUPPORTED),
+    ("realtime", ("connect",), _OPENAI_REALTIME_UNSUPPORTED),
+    ("beta.realtime", ("connect",), _OPENAI_REALTIME_UNSUPPORTED),
+)
+
+# SDK resource attributes built lazily (functools.cached_property) from the bound
+# methods at first access. A copy cached before patching keeps the unpatched method.
+_SDK_RESPONSE_WRAPPER_ATTRS = ("with_raw_response", "with_streaming_response")
+
+
+def _resolve_path(root: Any, dotted: str) -> Any:
+    obj = root
+    for part in dotted.split("."):
+        obj = getattr(obj, part, None)
+        if obj is None:
+            return None
+    return obj
+
+
+def _block_unsupported_openai_surfaces(
+    client: Any,
+    patches: List[Tuple[Any, str, Any]],
+    *,
+    keep: Optional[set] = None,
+) -> None:
+    """Stub every unmetered OpenAI spend method present on ``client``.
+
+    ``keep`` holds ``(id(resource), method)`` pairs already guarded by a real
+    wrapper; those are left alone. Originals go into ``patches`` for ``undo()``.
+    """
+    keep = keep or set()
+    for path, names, message in _OPENAI_UNSUPPORTED_SURFACES:
+        resource = _resolve_path(client, path)
+        if resource is None:
+            continue
+        for name in names:
+            if (id(resource), name) in keep or not callable(getattr(resource, name, None)):
+                continue
+            try:
+                orig = getattr(resource, name)
+                setattr(resource, name, _unsupported_mode_stub(message))
+                patches.append((resource, name, orig))
+            except Exception:
+                pass
+
+
+def _reset_sdk_response_wrappers(resources: Any) -> None:
+    """Drop cached ``with_raw_response`` / ``with_streaming_response`` objects.
+
+    The SDK builds them on first access from the methods bound at that moment.
+    One cached before ``monitor()`` (or before ``undo()``) would keep calling the
+    method it captured, so the budget check is skipped. Dropping the cache makes
+    the next access rebuild it from the current methods. A reference the caller
+    stored themselves cannot be reached.
+    """
+    seen: set[int] = set()
+    for resource in resources:
+        if resource is None or id(resource) in seen:
+            continue
+        seen.add(id(resource))
+        state = getattr(resource, "__dict__", None)
+        if not isinstance(state, dict):
+            continue
+        for attr in _SDK_RESPONSE_WRAPPER_ATTRS:
+            state.pop(attr, None)
 
 
 def _block_openai_beta_chat_stream(client: Any) -> None:
@@ -2406,6 +2786,7 @@ def _block_anthropic_beta_messages(client: Any) -> None:
                 setattr(messages, name, _unsupported_mode_stub(_ANTHROPIC_BETA_UNSUPPORTED))
             except Exception:
                 pass
+    _reset_sdk_response_wrappers([messages])
 
 
 def _detect_client_kind(client: Any) -> str:
@@ -2460,6 +2841,8 @@ def monitor(
     operation_id: Optional[str] = None,
     attempt_id: Optional[str] = None,
     budget: Optional[Any] = None,
+    allow_unmetered: Sequence[str] = (),
+    observe_unbounded: Sequence[str] = (),
 ) -> Any:
     """
     High-level entrypoint for Agent FinOps on raw OpenAI-style or Anthropic clients.
@@ -2471,15 +2854,23 @@ def monitor(
     Certified Control contract:
     - Sync and async OpenAI ``chat.completions.create`` (stream=False|True) and
       ``chat.completions.stream``
+    - Sync and async OpenAI ``responses.create`` (stream=False|True), ``responses.parse``
+      and ``responses.stream``; ``background``, server-side conversation state and
+      built-in tools raise ``UnsupportedModeError`` before dispatch
     - Sync and async Anthropic ``messages.create`` (stream=False|True) and
       ``messages.stream``
     - Hard local cap raises ``BudgetExceeded`` before provider dispatch
     - Shared authority deny raises ``BudgetExceeded`` / unreachable raises ``BudgetUnavailable``
     - Loop guard raises ``LoopDetected`` before provider dispatch
     - Soft trajectory pause raises ``KazenCircuitBreaker`` after a completed call
-    - OpenAI Responses API raises ``UnsupportedModeError``
+    - OpenAI Realtime, legacy Completions and Responses ``compact`` / ``connect``
+      raise ``UnsupportedModeError``
     - Streaming records provider start before dispatch, then settles at stream end
       or remains pending on cancel/error/missing usage; never at create-return
+    - Any other paid request on the client (a method or ``with_raw_response``
+      wrapper saved before ``monitor()``, embeddings, images, audio, batches...)
+      raises ``UnsupportedModeError`` before it is sent. ``allow_unmetered=("/embeddings",)``
+      sends the named endpoints without a budget check
     - Prefer ``max_retries=0`` on direct-provider clients so SDK auto-retries cannot
       hide billable attempts (monitor does not mutate the caller's client)
 
@@ -2494,6 +2885,25 @@ def monitor(
     - optional JsonlSink when ``timeline_path`` or ``KAZENAI_TIMELINE_PATH`` is set
     - private-by-default capture (``capture_mode=metadata``); bodies require explicit opt-in
     """
+
+    from kazenai.lifecycle_config import resolve_effective_lifecycle
+
+    lifecycle = resolve_effective_lifecycle()
+    if lifecycle.is_control and not os.getenv("KAZENAI_TIER_MISMATCH_MULTIPLIER", "").strip():
+        _monitor_log().warning(
+            "KazenAI Control requires KAZENAI_TIER_MISMATCH_MULTIPLIER before "
+            "priced calls; configure it as documented at "
+            "https://docs.kazenai.com/reference/configuration"
+        )
+    if lifecycle.profile == "legacy" and lifecycle.source != "unset":
+        import warnings
+
+        warnings.warn(
+            "The explicit KazenAI legacy lifecycle is deprecated and will be removed "
+            "in KazenAI 2.0. Use the Control reserve/settle lifecycle.",
+            FutureWarning,
+            stacklevel=2,
+        )
 
     if stream_enforcement:
         import warnings
@@ -2562,6 +2972,8 @@ def monitor(
         feature=feature,
         operation_id=operation_id,
         attempt_id=attempt_id,
+        allow_unmetered=tuple(allow_unmetered or ()),
+        observe_unbounded=tuple(observe_unbounded or ()),
     )
     is_async = _client_is_async(client)
     if _detect_client_kind(client) == "anthropic":
@@ -2638,6 +3050,8 @@ def monitor(
             feature=feature,
             operation_id=operation_id,
             attempt_id=attempt_id,
+            allow_unmetered=tuple(allow_unmetered or ()),
+            observe_unbounded=tuple(observe_unbounded or ()),
         )
         clone_async = _client_is_async(clone)
         if _detect_client_kind(clone) == "anthropic":
@@ -2718,4 +3132,10 @@ def monitor(
             setattr(client, _clone_name, _make_clone_wrapper(_orig_clone))
         except Exception:
             pass
+    # Monitor a sibling provider client (for example the async twin a framework
+    # builds next to this one) on this client's budget, tenant and attribution.
+    try:
+        setattr(client, "_kazenai_monitor_sibling", _rewrap_clone)
+    except Exception:
+        pass
     return client

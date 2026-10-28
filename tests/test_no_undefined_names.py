@@ -1,9 +1,7 @@
 """F821 gate: no undefined names anywhere in this repo.
 
-This bug class produced real failures: the Brain MCP server crashed at launch
-(missing asyncio import), the orchestrator MCP server silently skipped its
-security overlay (missing rule-guard imports, NameError swallowed), and
-routing/usage.py raised NameError on its malformed-response fallback path.
+An undefined name only fails when its line runs, so it can hide in error and
+fallback paths until production reaches them. This gate finds them statically.
 Star-import re-export modules blind pyflakes ("unable to detect undefined
 names"); those warnings are excluded — converting the star imports to explicit
 __all__ re-exports is tracked separately.

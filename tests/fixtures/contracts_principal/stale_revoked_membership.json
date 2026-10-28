@@ -1,0 +1,27 @@
+{
+  "fixture_id": "stale_revoked_membership",
+  "expect": "reject",
+  "reject_reason": "membership revoked or missing",
+  "principal": {
+    "identity_kind": "human",
+    "subject_id": "user-alice",
+    "actor_id": "user-alice",
+    "org_id": "org-a",
+    "workspace_id": "ws-a",
+    "role": "developer",
+    "auth_type": "supabase",
+    "authorized_org_ids": [],
+    "delegation": { "kind": "none" }
+  },
+  "membership": {
+    "org_id": "org-a",
+    "user_id": "user-alice",
+    "role": "developer",
+    "revoked_at": "2026-01-01T00:00:00Z"
+  },
+  "request": {
+    "headers": { "X-Kazen-Org-Hint": "org-a" },
+    "body_org_id": "org-a",
+    "body_workspace_id": "ws-a"
+  }
+}

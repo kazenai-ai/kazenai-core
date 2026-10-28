@@ -1,0 +1,51 @@
+# Test-only open-components compatibility harness for the LiteLLM proxy tests.
+# NOT a certified LiteLLM Proxy deployment, and never a KazenAI dependency.
+#
+# `litellm[proxy]` would also install BerriAI's proprietary `litellm-enterprise`
+# (production use requires a BerriAI agreement). This harness lists the proxy
+# extra's requirements explicitly WITHOUT litellm-enterprise; the proxy imports
+# it optionally. Opt in with KAZENAI_LITELLM_PROXY_TESTS=1.
+#
+# Regenerate (hash-locked, installed with --require-hashes --no-deps):
+#   uv pip compile tests/litellm_proxy_harness.in --universal --python-version 3.11 \
+#     --generate-hashes -o tests/litellm_proxy_harness.lock
+litellm==1.104.2
+litellm-proxy-extras==0.4.102.post1
+# litellm 1.104.2 [proxy] extra, minus litellm-enterprise:
+gunicorn==23.0.0
+uvicorn==0.54.0
+granian==2.8.4
+uvloop==0.23.0 ; sys_platform != 'win32'
+fastapi==0.143.0
+starlette==1.7.0
+backoff==2.2.1
+pyyaml==6.0.3
+rq==2.12.0
+orjson==3.13.0
+hiredis==3.4.2
+apscheduler==3.11.3
+fastapi-sso==0.23.0
+pyjwt==2.15.1
+python-multipart==0.0.32
+cryptography==50.0.2
+pynacl==1.6.2
+websockets==15.0.1
+boto3==1.43.112
+azure-identity==1.26.0
+azure-storage-blob==12.31.0
+mcp==2.3.0
+httpx2==2.13.1
+pydantic==2.14.1
+restrictedpython==8.5
+rich==13.9.4
+inquirerpy==0.3.4
+tomlkit==0.15.1
+polars==1.44.2
+soundfile==0.14.0
+pyroscope-io==0.8.16 ; sys_platform != 'win32'
+expression==5.7.0
+# Runtime deps of the editable kazenai / kazen-event-schema installed with --no-deps:
+httpx
+structlog
+aiohttp
+pydantic-settings

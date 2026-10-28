@@ -196,7 +196,7 @@ def test_patch_openai_patches_responses_api():
     client = _FakeClient()
     sink = MemorySink()
     patch_openai(client, org_id="o", project_id="p", agent_id="a", event_sink=sink)
-    client.responses.create(input="hi")
+    client.responses.create(model="gpt-4o-mini", input="hi")
     assert any(e.event_type == "model.call" for e in sink.events)
 
 
@@ -204,11 +204,11 @@ def test_patch_openai_undo_restores():
     client = _FakeClient()
     sink = MemorySink()
     undo = patch_openai(client, org_id="o", project_id="p", agent_id="a", event_sink=sink)
-    client.chat.completions.create(messages=[])
+    client.chat.completions.create(model="gpt-4o-mini", messages=[])
     assert len(sink.events) >= 1
     undo()
     sink2 = MemorySink()
-    client.chat.completions.create(messages=[])
+    client.chat.completions.create(model="gpt-4o-mini", messages=[])
     assert len(sink2.events) == 0
 
 
@@ -229,7 +229,7 @@ def test_patch_openai_with_debug_and_endpoint_url(monkeypatch):
         debug=True,
         endpoint_url="http://127.0.0.1:9999/ingest",
     )
-    client.chat.completions.create(messages=[{"role": "user", "content": "x"}])
+    client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "x"}])
     assert sink.events
 
 
@@ -254,7 +254,7 @@ def test_monitor_entrypoint_uses_finops_ingest_env(monkeypatch):
     client = _FakeClient()
 
     monitor(client, org_id="o", project_id="p", agent_id="a", max_budget_usd=100.0)
-    client.chat.completions.create(messages=[{"role": "user", "content": "hi"}])
+    client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}])
 
 
 def test_monitor_entrypoint_wraps_client(monkeypatch):
@@ -265,7 +265,7 @@ def test_monitor_entrypoint_wraps_client(monkeypatch):
     client = _FakeClient()
 
     monitor(client, org_id="o", project_id="p", agent_id="a", max_budget_usd=100.0)
-    client.chat.completions.create(messages=[{"role": "user", "content": "hi"}])
+    client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}])
 
 
 def test_monitor_entrypoint_wraps_anthropic_client(monkeypatch, tmp_path):
@@ -305,9 +305,9 @@ def test_patch_openai_loop_detection_raises():
         loop_block_threshold=0.0,
     )
     try:
-        client.chat.completions.create(messages=[{"role": "user", "content": "repeat same text"}])
+        client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "repeat same text"}])
         with pytest.raises(LoopDetected):
-            client.chat.completions.create(messages=[{"role": "user", "content": "repeat same text"}])
+            client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "repeat same text"}])
     finally:
         undo()
 
@@ -328,4 +328,4 @@ def test_patch_openai_budget_enforcement_blocks():
         event_sink=sink,
     )
     with pytest.raises(BudgetExceeded):
-        client.chat.completions.create(messages=[])
+        client.chat.completions.create(model="gpt-4o-mini", messages=[])

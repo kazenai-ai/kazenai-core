@@ -3,9 +3,6 @@ from __future__ import annotations
 import os
 from typing import Mapping, Optional
 
-from .model_pricing import _is_version_bump
-
-
 class UnknownModelError(ValueError):
     """Raised when an unrecognized model is used under block policy."""
 
@@ -16,10 +13,9 @@ _ESTIMATE_OUTPUT_PER_1K = 0.075
 
 
 def _deployment_mode() -> str:
-    return os.getenv(
-        "KAZENAI_DEPLOYMENT_MODE",
-        os.getenv("KAZENAI_ENV", "development"),
-    ).strip().lower()
+    from kazenai.deployment import resolve_deployment_mode
+
+    return resolve_deployment_mode()
 
 
 _PRODUCTION_LIKE = {"saas", "production", "prod", "staging"}
@@ -50,34 +46,25 @@ def resolve_model_key(
 ) -> Optional[str]:
     """Single source of truth for "what pricing key does this model resolve to?".
 
-    Resolution order: exact key → alias → longest-prefix match (the query must
-    be a versioned/suffixed extension of a known base key, at a token boundary).
-    Returns the resolved pricing key, or None if the model is unknown.
+    Resolution order for prices: exact key, then an explicit alias. Nothing is
+    inherited. ``-latest`` and a dated snapshot that is not in the alias table
+    are unknown. ``default_max_output_tokens`` may still family-match; this
+    function must not.
 
     Both ``is_known_model`` and ``TokenCostEngine.price`` delegate here so that
-    "known" and "priced" can never disagree: a model is known iff it
-    resolves to a real pricing row. Substring matching is intentionally NOT used
-    — it is the loosest and most dangerous form (a proxy/gateway-prefixed name
-    like "my-gpt-4o-proxy" must be treated as unknown, not silently priced).
+    "known" and "priced" can never disagree.
     """
     key = str(model or "").strip().lower()
     if not key:
         return None
-    if key in known_keys:
+    keys = set(known_keys)
+    if key in keys:
         return key
     if aliases:
         canonical = aliases.get(key)
-        if canonical and canonical in known_keys:
+        if canonical and canonical in keys:
             return canonical
-    # Longest-prefix match in the key.startswith(k) direction only, requiring a
-    # token boundary after the prefix so "gpt-4omega" can't match "gpt-4o".
-    best = ""
-    for k in known_keys:
-        if not k or len(k) <= len(best) or not key.startswith(k):
-            continue
-        if not key[len(k)].isalnum() and not _is_version_bump(key[len(k):]):
-            best = k
-    return best or None
+    return None
 
 
 def is_known_model(

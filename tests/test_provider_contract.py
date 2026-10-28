@@ -94,18 +94,18 @@ def _standalone(monkeypatch) -> None:
     monkeypatch.setenv("KAZENAI_FINOPS_RESERVATION_MODE", "fail_open")
 
 
-def test_p32_supported_method_constants():
+def test_supported_method_constants():
     assert SUPPORTED_OPENAI_METHOD == "openai.chat.completions.create"
     assert SUPPORTED_ANTHROPIC_METHOD == "anthropic.messages.create"
 
 
-def test_p32_monitor_signature_has_no_api_key():
+def test_monitor_signature_has_no_api_key():
     sig = inspect.signature(monitor)
     assert "api_key" not in sig.parameters
     assert "max_budget_usd" in sig.parameters
 
 
-def test_p32_openai_allow_then_deny_before_provider(monkeypatch):
+def test_openai_allow_then_deny_before_provider(monkeypatch):
     _standalone(monkeypatch)
     client = FakeOpenAI()
     monitor(client, max_budget_usd=1.0)
@@ -119,7 +119,7 @@ def test_p32_openai_allow_then_deny_before_provider(monkeypatch):
     assert client2.chat.completions.calls == 0
 
 
-def test_p32_anthropic_allow_and_deny(monkeypatch):
+def test_anthropic_allow_and_deny(monkeypatch):
     _standalone(monkeypatch)
     client = FakeAnthropic()
     monitor(client, max_budget_usd=1.0)
@@ -139,17 +139,19 @@ def test_p32_anthropic_allow_and_deny(monkeypatch):
     assert client2.messages.calls == 0
 
 
-def test_p32_monitor_rejects_openai_responses_api(monkeypatch):
+def test_monitor_guards_openai_responses_api(monkeypatch):
+    """Since 1.2.0 Responses is metered, and an unboundable request fails before dispatch."""
     _standalone(monkeypatch)
     client = FakeOpenAI(with_responses=True)
     monitor(client, max_budget_usd=1.0)
+    assert getattr(client.responses.create, "__kazenai_wrapped__", False)
     with pytest.raises(UnsupportedModeError):
-        client.responses.create(input="hi")
+        client.responses.create(model="gpt-4o-mini", input="hi", background=True)
     assert client.responses.calls == 0
-    # Direct patch_openai (non-certified) may still wrap responses — covered elsewhere.
+    # Official-SDK coverage: tests/test_responses_official_sdk.py.
 
 
-def test_p32_monitor_rejects_anthropic_stream_surface(monkeypatch):
+def test_monitor_rejects_anthropic_stream_surface(monkeypatch):
     """Anthropic messages.stream is certified — manager must be callable."""
     _standalone(monkeypatch)
     client = FakeAnthropic()
@@ -165,7 +167,7 @@ def test_p32_monitor_rejects_anthropic_stream_surface(monkeypatch):
         pass
 
 
-def test_p32_control_streaming_allowed_with_finalize_lifecycle(monkeypatch):
+def test_control_streaming_allowed_with_finalize_lifecycle(monkeypatch):
     """Control profile allows sync streaming; provider is invoked."""
     _standalone(monkeypatch)
     monkeypatch.setenv("KAZENAI_CONTROL_PROFILE", "1")
@@ -203,7 +205,7 @@ def test_p32_control_streaming_allowed_with_finalize_lifecycle(monkeypatch):
     assert client.chat.completions.calls == 1
 
 
-def test_p32_async_client_accepted_on_monitor_path(monkeypatch):
+def test_async_client_accepted_on_monitor_path(monkeypatch):
     """AsyncOpenAI-shaped clients are patched, not rejected."""
     _standalone(monkeypatch)
 
@@ -225,7 +227,7 @@ def test_p32_async_client_accepted_on_monitor_path(monkeypatch):
     assert resp is not None
 
 
-def test_p32_provider_exception_releases_and_does_not_count_success(monkeypatch):
+def test_provider_exception_releases_and_does_not_count_success(monkeypatch):
     _standalone(monkeypatch)
     client = FakeOpenAI()
     client.chat.completions.raise_exc = RuntimeError("provider down")
@@ -235,7 +237,7 @@ def test_p32_provider_exception_releases_and_does_not_count_success(monkeypatch)
     assert client.chat.completions.calls == 0
 
 
-def test_p32_retry_after_deny_still_zero_provider_calls(monkeypatch):
+def test_retry_after_deny_still_zero_provider_calls(monkeypatch):
     _standalone(monkeypatch)
     client = FakeOpenAI()
     monitor(client, max_budget_usd=0.000001)
@@ -248,7 +250,7 @@ def test_p32_retry_after_deny_still_zero_provider_calls(monkeypatch):
     assert client.chat.completions.calls == 0
 
 
-def test_p32_missing_usage_still_returns_without_fabricated_cost(monkeypatch):
+def test_missing_usage_still_returns_without_fabricated_cost(monkeypatch):
     _standalone(monkeypatch)
     client = FakeOpenAI()
     client.chat.completions.usage = None
@@ -260,7 +262,7 @@ def test_p32_missing_usage_still_returns_without_fabricated_cost(monkeypatch):
     assert _postcall_cost_usd(model="gpt-4o-mini", usage=None, tokens_used=None, usd_per_1k_tokens=None) is None
 
 
-def test_p32_unknown_model_usage_fields_documented(monkeypatch):
+def test_unknown_model_usage_fields_documented(monkeypatch):
     _standalone(monkeypatch)
     client = FakeOpenAI()
     monitor(client, max_budget_usd=0.000001)
@@ -282,7 +284,7 @@ def test_p32_unknown_model_usage_fields_documented(monkeypatch):
     )
 
 
-def test_p32_output_token_bound_injected_and_clamped(monkeypatch):
+def test_output_token_bound_injected_and_clamped(monkeypatch):
     _standalone(monkeypatch)
     bound = default_max_output_tokens("gpt-4o")
     assert bound == 4096
@@ -301,7 +303,7 @@ def test_p32_output_token_bound_injected_and_clamped(monkeypatch):
     assert client2.chat.completions.last_kwargs.get("max_tokens") == bound
 
 
-def test_p32_loop_detected_before_provider(monkeypatch):
+def test_loop_detected_before_provider(monkeypatch):
     _standalone(monkeypatch)
     client = FakeOpenAI()
     monitor(client, max_budget_usd=10.0)
@@ -312,7 +314,7 @@ def test_p32_loop_detected_before_provider(monkeypatch):
     assert client.chat.completions.calls == 1
 
 
-def test_p32_circuit_breaker_is_post_call_not_budget_exceeded(monkeypatch):
+def test_circuit_breaker_is_post_call_not_budget_exceeded(monkeypatch):
     """Soft CB raises KazenCircuitBreaker after provider success — distinct from BudgetExceeded."""
     _standalone(monkeypatch)
     client = FakeOpenAI()
@@ -341,19 +343,19 @@ def test_p32_circuit_breaker_is_post_call_not_budget_exceeded(monkeypatch):
     assert not any(isinstance(r, BudgetExceeded) for r in raised)
 
 
-def test_p32_patch_openai_non_certified_still_allows_responses(monkeypatch):
+def test_patch_openai_non_certified_still_allows_responses(monkeypatch):
     _standalone(monkeypatch)
     client = FakeOpenAI()
     patch_openai(client, org_id="o", project_id="p", agent_id="a", certified_surface=False)
-    client.responses.create(input="hi")
+    client.responses.create(model="gpt-4o-mini", input="hi")
     assert client.responses.calls == 1
 
 
-def test_p32_patch_anthropic_exported():
+def test_patch_anthropic_exported():
     assert callable(patch_anthropic)
 
 
-def test_p32_apply_output_token_bound_helper():
+def test_apply_output_token_bound_helper():
     kwargs: dict[str, Any] = {"model": "gpt-4o-mini"}
     _apply_output_token_bound(kwargs)
     assert kwargs["max_tokens"] == default_max_output_tokens("gpt-4o-mini")

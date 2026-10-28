@@ -4,14 +4,23 @@ from kazenai.sinks import HttpSinkConfig
 from kazenai.spine.guard import ReservationHandle
 
 SECRET = "kz_live_SYNTHETIC_never_print_me"
+CAPABILITY = "kzcap1.test." + "A" * 43
 
 
 def test_reservation_handle_repr_hides_finops_api_key():
-    handle = ReservationHandle(reserved_cost_usd=0.01, reservation_id="r-1", finops_api_key=SECRET)
+    handle = ReservationHandle(
+        reserved_cost_usd=0.01,
+        reservation_id="r-1",
+        finops_api_key=SECRET,
+        settlement_capability=CAPABILITY,
+    )
     assert SECRET not in repr(handle)
     assert SECRET not in str(handle)
+    assert CAPABILITY not in repr(handle)
+    assert CAPABILITY not in str(handle)
     assert "r-1" in repr(handle)
     assert handle.finops_api_key == SECRET
+    assert handle.settlement_capability == CAPABILITY
 
 
 def test_http_sink_config_repr_hides_api_key():

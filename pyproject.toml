@@ -1,25 +1,27 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kazenai"  # Matches your README installation instructions
-version = "1.1.3"
-description = "KazenAI core SDK: stop AI agent overspend before the call — budget and loop enforcement for OpenAI and Anthropic (sync, async, streaming)"
+name = "kazenai"
+version = "1.2.0"
+description = "A hard spending limit for every customer's AI: the KazenAI core SDK checks each OpenAI and Anthropic call against its limit before it runs"
 readme = "README.md"
-requires-python = ">=3.10" # v4 TDD specifies 3.10+ for modern Typing/ContextVars
+requires-python = ">=3.10"
 license = "Apache-2.0"
-authors = [{ name = "KazenAI", email = "hello@kazenai.com" }]
+authors = [{ name = "Dhavan Shah", email = "founder@kazenai.com" }]
 keywords = ["llm", "agents", "observability", "finops", "langchain"]
 
 dependencies = [
-  "kazen-event-schema>=0.6.4,<0.7",
+  "kazen-event-schema>=0.6.6,<0.7",
   "httpx>=0.25",
   "pydantic>=2.6.0",
   "structlog>=24.1.0",
   "aiohttp>=3.9.0",
-  "pydantic-settings>=2.1.0", # Added: Necessary for your config.py logic
   "PyJWT>=2.8.0",
+  # Verifies the signed price catalog Agent FinOps serves (Ed25519). Without it
+  # the live catalog feed stays off. 50.0.0 is the first release with no known advisory.
+  "cryptography>=50.0.0",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +35,10 @@ otel = [
   "opentelemetry-sdk>=1.45.1,<2",
   "opentelemetry-exporter-otlp-proto-http>=1.45.1,<2",
 ]
+# KazenAI services (FinOps, Lens): Ed25519 verification of Platform tokens.
+server = ["PyJWT[crypto]>=2.15.1"]
+# Optional image metadata inspection. Never raster-decodes.
+images = ["pillow==13.0.0"]
 # Framework pins for the LangChain / LangGraph / CrewAI adapters. Import works without these.
 langchain = [
   "langchain==1.4.4",
@@ -61,6 +67,8 @@ dev = [
   "pytest-asyncio>=0.23",
   "fastapi>=0.110",
   "httpx>=0.27",
+  # Ed25519 verification in the default suite needs this beside PyJWT.
+  "cryptography>=43",
   "openai>=1.40,<3",
   "anthropic>=0.39,<1",
   "opentelemetry-api>=1.45.1,<2",
@@ -83,11 +91,11 @@ include = ["kazenai*"]
 
 [tool.coverage.run]
 omit = [
-  "kazenai/middleware/*",
   "kazenai/debug.py",
   # Framework and LiteLLM adapters are covered by the `frameworks` CI job, not
   # the default 80% package gate; adapter_contract stays measured.
   "kazenai/integrations/litellm_control.py",
+  "kazenai/integrations/litellm_gateway.py",
   "kazenai/integrations/langchain.py",
   "kazenai/integrations/langgraph.py",
   "kazenai/integrations/crewai.py",

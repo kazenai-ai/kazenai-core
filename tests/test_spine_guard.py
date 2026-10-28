@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +10,30 @@ import pytest
 from kazenai.enforcement import BudgetExceeded, BudgetUnavailable
 from kazenai.spine.guard import guarded_llm_call, reconcile_budget, reserve_budget
 from kazenai.sinks import MemorySink
+
+
+@pytest.fixture(autouse=True)
+def _control_server_capabilities(monkeypatch):
+    """A configured FinOps URL selects Control and asks for lifecycle capabilities first."""
+    payload = {
+        "effective_lifecycle": {
+            "profile": "control",
+            "lifecycle_version": "reservation.lifecycle.v1",
+        },
+        "capabilities": {"reservation_settlement": True},
+    }
+    monkeypatch.setattr(
+        "kazenai.spine.guard._fetch_server_lifecycle_capabilities",
+        lambda *args, **kwargs: payload,
+    )
+
+    async def _async(*args, **kwargs):
+        return payload
+
+    monkeypatch.setattr(
+        "kazenai.spine.guard._fetch_server_lifecycle_capabilities_async",
+        _async,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -60,7 +83,7 @@ def test_reserve_uses_configurable_timeout(monkeypatch):
         captured_timeouts.append(timeout)
         return reserve_resp
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
+    with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
         assert reserve_budget(org_id="o", workspace_id="w", run_id="r") == pytest.approx(0.01)
 
     assert captured_timeouts == [2.5]
@@ -78,7 +101,7 @@ def test_reserve_sends_explicit_estimated_cost(monkeypatch):
         captured_payloads.append(json.loads(req.data.decode("utf-8")))
         return reserve_resp
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
+    with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
         assert reserve_budget(
             org_id="o",
             workspace_id="w",
@@ -87,19 +110,12 @@ def test_reserve_sends_explicit_estimated_cost(monkeypatch):
             increment_step=False,
         ) == pytest.approx(0.25)
 
-    assert captured_payloads == [
-        {
-            "org_id": "o",
-            "workspace_id": "w",
-            "run_id": "r",
-            "reserve": True,
-            "increment_step": False,
-            "input_tokens": 1000,
-            "estimated_cost_usd": 0.25,
-            "projected_spend_usd": 0.25,
-            "attribution_state": "unattributed",
-        }
-    ]
+    body = captured_payloads[0]
+    assert body["org_id"] == "o"
+    assert body["workspace_id"] == "w"
+    assert body["run_id"] == "r"
+    assert body["lifecycle_version"] == "reservation.lifecycle.v1"
+    assert body["estimated_usd_micros"] == 250_000
 
 
 def test_reserve_forwards_feature_slug(monkeypatch):
@@ -114,7 +130,7 @@ def test_reserve_forwards_feature_slug(monkeypatch):
         captured_payloads.append(json.loads(req.data.decode("utf-8")))
         return reserve_resp
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
+    with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
         reserve_budget(
             org_id="o",
             workspace_id="prod",
@@ -138,7 +154,7 @@ def test_reserve_omits_empty_feature(monkeypatch):
         captured_payloads.append(json.loads(req.data.decode("utf-8")))
         return reserve_resp
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
+    with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
         reserve_budget(org_id="o", workspace_id="prod", run_id="r", feature="")
 
     assert "feature" not in captured_payloads[0]
@@ -146,10 +162,9 @@ def test_reserve_omits_empty_feature(monkeypatch):
 
 def test_reconcile_forwards_feature_slug(monkeypatch):
     monkeypatch.setenv("KAZENAI_FINOPS_URL", "http://finops:8090")
-    # Legacy reconcile path (Control lifecycle off).
-    monkeypatch.delenv("KAZENAI_FINOPS_CONTROL", raising=False)
-    monkeypatch.delenv("KAZENAI_CONTROL", raising=False)
-    monkeypatch.setenv("KAZENAI_ENV", "development")
+    # Explicit legacy profile. A configured FinOps URL otherwise selects Control,
+    # which refuses this reconcile call.
+    monkeypatch.setenv("KAZENAI_PROFILE", "legacy")
     captured_payloads: list[dict] = []
     reconcile_resp = MagicMock()
     reconcile_resp.__enter__ = lambda s: reconcile_resp
@@ -159,7 +174,7 @@ def test_reconcile_forwards_feature_slug(monkeypatch):
         captured_payloads.append(json.loads(req.data.decode("utf-8")))
         return reconcile_resp
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
+    with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
         ok = reconcile_budget(
             org_id="o",
             workspace_id="prod",
@@ -197,7 +212,7 @@ def test_guarded_llm_call_forwards_feature_to_finops_reserve(monkeypatch):
     resp = MagicMock()
     resp.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
+    with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
         with patch("kazenai.spine.guard._extract_usage_cost", return_value=(15, 0.002)):
             guarded_llm_call(
                 lambda: resp,
@@ -212,9 +227,9 @@ def test_guarded_llm_call_forwards_feature_to_finops_reserve(monkeypatch):
             )
 
     assert captured_payloads[0]["feature"] == "support-bot"
-    time.sleep(0.1)
-    assert len(captured_payloads) >= 2
-    assert captured_payloads[1]["feature"] == "support-bot"
+    # Control settles only with a reservation id and capability. This mock
+    # reserve body has neither, so no second reconcile call is sent.
+    assert len(captured_payloads) == 1
 
 
 def test_guarded_llm_call_feature_cap_denied_before_provider(monkeypatch):
@@ -247,7 +262,7 @@ def test_guarded_llm_call_feature_cap_denied_before_provider(monkeypatch):
 
     provider_called = []
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=fake_urlopen):
+    with patch("kazenai.spine.transport.urlopen", side_effect=fake_urlopen):
         with pytest.raises(BudgetExceeded, match="feature budget exhausted"):
             guarded_llm_call(
                 lambda: provider_called.append(True),
@@ -281,7 +296,7 @@ def test_reserve_non_402_http_error_fails_open_in_dev(monkeypatch):
         fp=MagicMock(read=MagicMock(return_value=b"{}")),
     )
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=err):
+    with patch("kazenai.spine.transport.urlopen", side_effect=err):
         assert reserve_budget(org_id="o", workspace_id="w", run_id="r") == 0.0
 
 
@@ -300,7 +315,7 @@ def test_reserve_402_with_unreadable_body_uses_default_reason(monkeypatch):
         fp=bad_fp,
     )
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=err):
+    with patch("kazenai.spine.transport.urlopen", side_effect=err):
         with pytest.raises(BudgetExceeded, match="budget exhausted"):
             reserve_budget(org_id="o", workspace_id="w", run_id="r")
 
@@ -318,7 +333,7 @@ def test_reserve_non_402_http_error_fails_closed_by_default(monkeypatch):
         fp=MagicMock(read=MagicMock(return_value=b"{}")),
     )
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=err):
+    with patch("kazenai.spine.transport.urlopen", side_effect=err):
         with pytest.raises(BudgetUnavailable, match="HTTP 503"):
             reserve_budget(org_id="o", workspace_id="w", run_id="r")
 
@@ -329,7 +344,7 @@ def test_reserve_timeout_fails_open_in_dev(monkeypatch):
     monkeypatch.setenv("KAZENAI_ENFORCEMENT_MODE", "fail_open")
     monkeypatch.setenv("KAZENAI_ENV", "dev")
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=TimeoutError("slow")):
+    with patch("kazenai.spine.transport.urlopen", side_effect=TimeoutError("slow")):
         assert reserve_budget(org_id="o", workspace_id="w", run_id="r") == 0.0
 
 
@@ -366,7 +381,7 @@ def test_guarded_llm_call_computes_cost_and_emits_events(monkeypatch):
     resp = MagicMock()
     resp.usage = MagicMock(prompt_tokens=100, completion_tokens=50, total_tokens=150)
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen") as mock_urlopen:
+    with patch("kazenai.spine.transport.urlopen") as mock_urlopen:
         reserve_resp = MagicMock()
         reserve_resp.read.return_value = json.dumps({"estimated_cost_usd": 0.01}).encode()
         reserve_resp.__enter__ = lambda s: reserve_resp
@@ -383,7 +398,7 @@ def test_guarded_llm_call_computes_cost_and_emits_events(monkeypatch):
                 org_id="org",
                 workspace_id="ws",
                 run_id="run-1",
-                agent_id="brain",
+                agent_id="support-agent",
                 surface="test",
                 feature="unit",
                 event_sink=sink,
@@ -411,7 +426,7 @@ def test_guarded_llm_call_denied_on_402(monkeypatch):
         fp=MagicMock(read=MagicMock(return_value=json.dumps({"reason": "exhausted"}).encode())),
     )
 
-    with patch("kazenai.spine.guard.urllib.request.urlopen", side_effect=err):
+    with patch("kazenai.spine.transport.urlopen", side_effect=err):
         with pytest.raises(BudgetExceeded):
             guarded_llm_call(
                 lambda: "never",

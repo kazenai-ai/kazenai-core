@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import queue
+import socket
 import threading
 import time
 import urllib.parse
@@ -17,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from . import outbound_http
 from .capture_policy import sanitize_event_dict
 from .ingest_url import ingest_post_url, normalize_ingest_base_url
 from .schema import KazenEvent
@@ -29,25 +31,70 @@ def _event_record(event: KazenEvent) -> Dict[str, Any]:
     return sanitize_event_dict(event.model_dump())
 
 
+_RESOLVE_TIMEOUT_S = 2.0
+
+
+def _not_public(addr: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    return (not addr.is_global) or addr.is_multicast
+
+
+def _resolve(host: str, port: int) -> Optional[List[str]]:
+    """Addresses for host, or None when DNS gives no answer within the timeout."""
+    found: Dict[str, Any] = {}
+
+    def lookup() -> None:
+        try:
+            found["infos"] = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except (OSError, UnicodeError):
+            pass
+
+    worker = threading.Thread(target=lookup, name="kazenai_ingest_dns", daemon=True)
+    worker.start()
+    worker.join(_RESOLVE_TIMEOUT_S)
+    infos = found.get("infos")
+    if not infos:
+        return None
+    return [str(info[4][0]).split("%", 1)[0] for info in infos]
+
+
 def _check_ingest_url_ssrf(url: str) -> None:
-    """Raise ValueError if url resolves to a private/loopback IP in production."""
-    env = os.getenv("KAZENAI_ENV", "development").lower()
-    if env not in ("production", "prod"):
+    """In staging and production, refuse an ingest URL that is not public HTTPS.
+
+    The bearer key and signed batches go to this URL, so it must use https, carry
+    no credentials, and name a public host: a literal private, loopback,
+    link-local, CGNAT or reserved address is refused, and so is a name that
+    resolves to one. The name is resolved once, here; if DNS gives no answer the
+    check passes and delivery fails later. Delivery verifies the certificate for
+    that name and never follows a redirect (``outbound_http``), so a later DNS
+    answer can't send the key anywhere else.
+    """
+    from kazenai.deployment import is_production_like
+
+    if not is_production_like():
         return
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"ingest_url must use https in production, not {parsed.scheme or 'no scheme'!r}")
+    if parsed.username or parsed.password:
+        raise ValueError("ingest_url must not carry credentials")
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        raise ValueError("ingest_url has no host")
     try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception:
-        return
-    host = parsed.hostname or ""
-    try:
-        addr = ipaddress.ip_address(host)
-        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
-            raise ValueError(
-                f"ingest_url must not point to a private/loopback address in production: {host!r}"
-            )
-    except ValueError as exc:
-        if "private" in str(exc) or "loopback" in str(exc) or "reserved" in str(exc):
-            raise
+        addresses: Optional[List[str]] = [str(ipaddress.ip_address(host))]
+    except ValueError:
+        if host == "localhost" or host.endswith(".localhost"):
+            addresses = ["127.0.0.1"]
+        else:
+            addresses = _resolve(host, parsed.port or 443)
+    bad = sorted({a for a in addresses or [] if _not_public(ipaddress.ip_address(a))})
+    if bad:
+        raise ValueError(
+            f"ingest_url must not point to a private/loopback address in production: {host!r} -> {', '.join(bad)}"
+        )
 
 
 class EventSink(ABC):
@@ -400,18 +447,33 @@ class HttpSink(EventSink):
             return True
         try:
             body = json.dumps({"events": batch}, ensure_ascii=False).encode("utf-8")
+            post_url = ingest_post_url(self._cfg.ingest_url)
             headers = {
-                "Content-Type": "application/json",
                 **({"Authorization": f"Bearer {self._cfg.api_key}"} if self._cfg.api_key else {}),
                 **dict(self._cfg.extra_headers or {}),
             }
+            if self._cfg.api_key:
+                from kazenai.ingest_signature import sign_request, signed_path, tenant_key_id
+
+                headers.update(
+                    sign_request(
+                        secret=self._cfg.api_key,
+                        method="POST",
+                        path=signed_path(post_url),
+                        key_id=tenant_key_id(self._cfg.api_key),
+                        raw_body=body,
+                    )
+                )
+            else:
+                headers.setdefault("Content-Type", "application/json")
             req = urllib.request.Request(
-                ingest_post_url(self._cfg.ingest_url),
+                post_url,
                 data=body,
                 method="POST",
                 headers=headers,
             )
-            with urllib.request.urlopen(req, timeout=float(self._cfg.timeout_s)) as resp:
+            # Never follows a redirect: the key goes only to the configured host.
+            with outbound_http.urlopen(req, timeout=float(self._cfg.timeout_s)) as resp:
                 _ = resp.read(1)
             if count_delivered:
                 with self._stats_lock:

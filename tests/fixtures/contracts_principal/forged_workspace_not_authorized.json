@@ -1,0 +1,24 @@
+{
+  "fixture_id": "forged_workspace_not_authorized",
+  "expect": "reject",
+  "reject_reason": "requested workspace not authorized",
+  "principal": {
+    "identity_kind": "human",
+    "subject_id": "user-alice",
+    "actor_id": "user-alice",
+    "org_id": "org-a",
+    "workspace_id": "ws-a",
+    "role": "developer",
+    "auth_type": "api_key",
+    "authorized_org_ids": ["org-a"],
+    "authorized_workspace_ids": ["ws-a"],
+    "delegation": { "kind": "none" }
+  },
+  "request": {
+    "headers": {
+      "X-Kazen-Workspace-Id": "ws-other"
+    },
+    "body_org_id": "org-a",
+    "body_workspace_id": "ws-other"
+  }
+}

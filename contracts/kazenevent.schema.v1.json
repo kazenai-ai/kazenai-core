@@ -3,7 +3,7 @@
   "description": "Strict KazenEvent schema v0.3.0 \u2014 used across all KazenAI services.",
   "properties": {
     "agent_id": {
-      "default": "devagent",
+      "default": "default",
       "title": "Agent Id",
       "type": "string"
     },
@@ -330,7 +330,7 @@
       "title": "Step Id"
     },
     "surface": {
-      "default": "kazenai-agent-builder",
+      "default": "unspecified",
       "title": "Surface",
       "type": "string"
     },

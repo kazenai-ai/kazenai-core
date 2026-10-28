@@ -11,7 +11,7 @@ FinOps as a shared spending authority.
 from kazenai import monitor, SharedBudget, BudgetExceeded, Enforcement
 ```
 
-`monitor()` is the entry point for OpenAI Chat Completions and Anthropic
+`monitor()` is the entry point for OpenAI Chat Completions and Responses, and Anthropic
 Messages, sync and async, streaming and non-streaming. Import from the package
 root; module layout below it is internal and may change between releases.
 
@@ -45,7 +45,7 @@ root; module layout below it is internal and may change between releases.
 | `kazenai/provider_errors.py` | Which provider errors settle at $0 and which stay pending |
 | `kazenai/spine/` | Shared reservations with Agent FinOps and the settlement journal |
 | `kazenai/attribution.py` | Customer, feature and workflow attribution |
-| `kazenai/integrations/` | LangChain, LangGraph, LiteLLM and CrewAI adapters |
+| `kazenai/integrations/` | LangChain, LangGraph, CrewAI and LiteLLM adapters |
 | `kazenai/otel.py` | Optional OpenTelemetry spans |
 
 ## Design rules

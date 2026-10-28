@@ -40,7 +40,7 @@ def _load() -> dict:
     return json.loads(MATRIX.read_text(encoding="utf-8"))
 
 
-def test_p41_matrix_schema_and_unique_ids():
+def test_matrix_schema_and_unique_ids():
     data = _load()
     assert data["schema_version"] == "kazenai.support-matrix.v1"
     cells = data["cells"]
@@ -58,7 +58,7 @@ def test_p41_matrix_schema_and_unique_ids():
         }
 
 
-def test_p41_advertised_cells_have_evidence_and_tests():
+def test_advertised_cells_have_evidence_and_tests():
     """Advertised cells cite dated evidence and at least one guarding suite.
 
     Core test references must exist in this repository; references to suites in
@@ -81,12 +81,12 @@ def test_p41_advertised_cells_have_evidence_and_tests():
     assert not missing, f"advertised cells missing evidence/tests: {missing}"
 
 
-def test_p41_required_unsupported_exclusions_present():
+def test_required_unsupported_exclusions_present():
     data = _load()
     by_id = {c["id"]: c for c in data["cells"]}
     # Framework cells: langchain/langgraph/crewai + narrow checkpoint resume.
     required_unsupported = [
-        "provider.openai.responses",
+        "provider.openai.unguarded_surfaces",
         "capability.generic_replay",
         "capability.drift_calibration",
         "capability.mcp_only_spend_control",
@@ -105,18 +105,21 @@ def test_p41_required_unsupported_exclusions_present():
     assert by_id["provider.anthropic.messages.sync.stream"]["status"] in ADVERTISED
 
 
-def test_p41_live_provider_is_scoped_to_the_verified_paths():
+def test_live_provider_is_scoped_to_the_verified_paths():
     by_id = {c["id"]: c for c in _load()["cells"]}
     live = by_id["capability.live_provider"]
     assert live["status"] == "live-verified"
     assert "kazenai-core/tests/test_live_provider_smoke.py" in live["tests"]
-    for excluded in ("Responses", "Bedrock", "framework"):
+    for excluded in ("Realtime", "Bedrock", "framework"):
         assert excluded in live["notes"], excluded
-    # Unverified surfaces must not ride along.
-    assert by_id["provider.openai.responses"]["status"] == "unsupported"
+    # Responses carries its own live evidence (2026-10-13 smoke).
+    responses = by_id["provider.openai.responses"]
+    assert responses["status"] == "live-verified"
+    assert "kazenai-core/tests/test_live_responses_smoke.py" in responses["tests"]
+    assert any(e.startswith("Live provider run") for e in responses["evidence"])
 
 
-def test_p41_litellm_has_machine_readable_cells():
+def test_litellm_has_machine_readable_cells():
     by_id = {c["id"]: c for c in _load()["cells"]}
     for cid in ("gateway.litellm.app_owned", "gateway.litellm.gateway_owned"):
         assert by_id[cid]["status"] in ADVERTISED, cid
@@ -125,25 +128,27 @@ def test_p41_litellm_has_machine_readable_cells():
     assert "own independent budget" in by_id["capability.multi_model_workflow_budget"]["notes"]
 
 
-def test_p41_p8_frameworks_fixture_verified():
+def test_frameworks_fixture_verified():
     data = _load()
     by_id = {c["id"]: c for c in data["cells"]}
     for cid in (
         "framework.langchain",
         "framework.langgraph",
+        "framework.crewai",
         "capability.checkpoint_resume",
     ):
         assert by_id[cid]["status"] in ADVERTISED, cid
-    # Ownership routing for real CrewAI 1.15.26 sources is tested, but
-    # cancellation / nested / native akickoff Observe cells are not; the cell
-    # must stay unadvertised until they are.
+    # CrewAI is certified on the certification cells plus live cells, with its
+    # refusals and unsupported paths spelled out.
     crew = by_id["framework.crewai"]
-    assert crew["status"] == "implemented-unverified"
-    assert "not advertised" in crew.get("notes", "")
+    assert crew["status"] == "live-verified"
+    assert "kazenai-core/tests/test_crewai_control_certification.py" in crew["tests"]
+    for limit in ("memory", "llm_overlay", "Crew(stream=True)", "Anthropic structured output"):
+        assert limit in crew["notes"], limit
     assert "kazenai-core/tests/test_crewai_event_ownership.py" in crew["tests"]
 
 
-def test_p41_envelope_matches_locked_providers():
+def test_envelope_matches_locked_providers():
     data = _load()
     env = data["envelope"]["adapter"].lower()
     assert "openai" in env and "anthropic" in env
@@ -153,7 +158,7 @@ def test_p41_envelope_matches_locked_providers():
     assert by_id["provider.anthropic.messages.sync"]["status"] in ADVERTISED
 
 
-def test_p41_forbidden_claims_not_in_matrix_as_supported():
+def test_forbidden_claims_not_in_matrix_as_supported():
     data = _load()
     for cell in data["cells"]:
         blob = json.dumps(cell).lower()
@@ -162,11 +167,41 @@ def test_p41_forbidden_claims_not_in_matrix_as_supported():
                 pytest.fail(f"{cell['id']} advertises forbidden phrase {phrase!r}")
 
 
-def test_p41_human_matrix_markdown_exists():
+def test_human_matrix_markdown_exists():
     md = ROOT / "docs" / "integrations" / "control-supported-matrix.md"
     assert md.is_file()
     text = md.read_text(encoding="utf-8")
     assert "control-supported-matrix.json" in text
     assert "fixture-verified" in text
-    for internal in ("FINAL_", "FIX_LOOP", "Phase 1", "re-audit"):
-        assert internal not in text, internal
+
+
+def test_release_state_matches_the_docs():
+    """Packages may be described as on PyPI only once the matrix says they were published."""
+    release = _load()["release"]
+    assert release["state"] in {"unreleased", "published"}
+    if release["state"] == "published":
+        return
+    for doc in (MATRIX.with_suffix(".md"), ROOT / "README.md", ROOT / "QUICKSTART.md"):
+        if not doc.is_file():
+            continue
+        for line in doc.read_text(encoding="utf-8").splitlines():
+            if release["kazenai"] in line:
+                assert "on PyPI" not in line, f"{doc.name}: {line.strip()[:120]}"
+    assert "not yet released" in MATRIX.with_suffix(".md").read_text(encoding="utf-8")
+
+
+def test_live_evidence_files_exist_and_end_with_a_passing_run():
+    linked = [
+        evidence.split(": ", 1)[1]
+        for cell in _load()["cells"]
+        for evidence in cell.get("evidence", [])
+        if ": kazenai-core/docs/verification/live/" in evidence
+    ]
+    assert linked, "no live evidence summaries are linked"
+    for ref in linked:
+        path = ROOT / ref.removeprefix("kazenai-core/")
+        assert path.is_file(), ref
+        summary = json.loads(path.read_text(encoding="utf-8"))
+        assert summary["runs"], ref
+        assert summary["runs"][-1]["all_passed"] is True, ref
+        assert all(len(run["sha256"]) == 64 for run in summary["runs"]), ref

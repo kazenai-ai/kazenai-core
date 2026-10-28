@@ -47,10 +47,10 @@ CMD ["python", "-m", "your_application"]
 
 ```text
 # requirements.txt
-kazenai[openai]==1.1.3
+kazenai[openai]==1.2.0
 ```
 
-Most customer integrations should pin `kazenai-finops[openai]==1.1.3` instead; that
+Most customer integrations should pin `kazenai-finops[openai]==1.2.0` instead; that
 package installs a compatible Core version transitively and bounds the
 provider SDK range.
 
@@ -61,10 +61,12 @@ repository.
 
 | Variable | Purpose |
 |---|---|
-| `KAZENAI_FINOPS_URL` / `KAZENAI_FINOPS_INGEST_URL` | Shared FinOps authority and event-ingest base URL |
+| `KAZENAI_FINOPS_URL` / `KAZENAI_FINOPS_INGEST_URL` | Shared FinOps authority and event-ingest base URL. Setting either selects the Control lifecycle (reserve before dispatch, settle after, fail closed) |
 | `KAZENAI_FINOPS_API_KEY` | Credential used for FinOps requests |
+| `KAZENAI_TIER_MISMATCH_MULTIPLIER` | Required under Control (finite, at least 1); `monitor()` refuses to start without it. Provider clients must also be built with `max_retries=0` |
 | `KAZENAI_DEPLOYMENT_MODE` | Use `production` or `staging` to require fail-closed shared reservations |
 | `KAZENAI_FINOPS_RESERVE_TIMEOUT_S` | Timeout for a shared pre-call reservation |
+| `KAZENAI_FINOPS_KEEPALIVE_S` | Seconds an idle connection to Agent FinOps is kept for reuse (default 15); `0` opens a new connection per request |
 | `KAZENAI_TIMELINE_PATH` | Optional local JSONL evidence path |
 | `KAZENAI_SDK_SETTLE_QUEUE_DIR` | Persistent directory for the settlement journal; run `python -m kazenai.spine.settle_queue flush` on a schedule (see [docs/settlement-recovery.md](docs/settlement-recovery.md)) |
 

@@ -1,4 +1,4 @@
-"""Package metadata and first-run install-contract checks for kazenai 1.1.3."""
+"""Package metadata and first-run install-contract checks for kazenai 1.2.0."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import kazenai
 
 _ROOT = Path(__file__).resolve().parents[1]
-_EXPECTED = "1.1.3"
+_EXPECTED = "1.2.0"
 # Install range covers the tested OpenAI 1.109.1 and 2.x lines.
 _OPENAI_BOUND = "openai>=1.40,<3"
 _ANTHROPIC_BOUND = "anthropic>=0.39,<1"
@@ -43,6 +43,12 @@ def test_optional_provider_extras_use_certified_bounds() -> None:
     dev = _optional_extra("dev")
     assert _OPENAI_BOUND in dev
     assert _ANTHROPIC_BOUND in dev
+
+
+def test_signed_catalog_verification_is_a_base_dependency() -> None:
+    # `pip install kazenai[openai]` must be able to verify the signed price catalog;
+    # without `cryptography` the live feed switches itself off.
+    assert "cryptography>=50.0.0" in _optional_extra("dependencies")
 
 
 def test_active_first_run_docs_prefer_bounded_extras() -> None:

@@ -33,6 +33,21 @@ class _FakeResp:
         return None
 
 
+@pytest.fixture(autouse=True)
+def _control_server_capabilities(monkeypatch):
+    payload = {
+        "effective_lifecycle": {
+            "profile": "control",
+            "lifecycle_version": "reservation.lifecycle.v1",
+        },
+        "capabilities": {"reservation_settlement": True},
+    }
+    monkeypatch.setattr(
+        "kazenai.spine.guard._fetch_server_lifecycle_capabilities",
+        lambda *args, **kwargs: payload,
+    )
+
+
 def test_nested_same_owner_single_reservation(monkeypatch):
     monkeypatch.delenv("KAZENAI_ENFORCEMENT_OWNER", raising=False)
     monkeypatch.setenv("KAZENAI_FINOPS_URL", "http://finops.test")
@@ -48,13 +63,21 @@ def test_nested_same_owner_single_reservation(monkeypatch):
     def fake_urlopen(req: Any, timeout: float = 0):  # noqa: ARG001
         body = json.loads(req.data.decode("utf-8"))
         calls.append(body)
-        return _FakeResp({"estimated_cost_usd": 0.02, "reservation_id": "res-1", "decision_id": "dec-1"})
+        return _FakeResp({
+            "estimated_cost_usd": 0.02,
+            "reserved_usd_micros": 20000,
+            "reservation_id": "res-1",
+            "decision_id": "dec-1",
+            "settlement_capability": "cap-test",
+            "allowed": True,
+        })
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("kazenai.spine.transport.urlopen", fake_urlopen)
 
     with claim_enforcement_owner("sdk"):
         first = reserve_budget(org_id="o", workspace_id="w", run_id="r1")
-        assert first == pytest.approx(0.02)
+        assert isinstance(first, ReservationHandle)
+        assert first.reserved_cost_usd == pytest.approx(0.02)
         owner = get_enforcement_owner()
         assert owner is not None
         assert owner.reservation_id == "res-1"
@@ -81,7 +104,7 @@ def test_gateway_without_reservation_blocks_sdk_reserve(monkeypatch):
     def boom(*args: Any, **kwargs: Any):  # noqa: ARG001
         raise AssertionError("must not call FinOps when gateway owns enforcement")
 
-    monkeypatch.setattr("urllib.request.urlopen", boom)
+    monkeypatch.setattr("kazenai.spine.transport.urlopen", boom)
 
     # Gateway-owned: SDK returns a noop handle and must not debit FinOps.
     with claim_enforcement_owner("gateway"):
@@ -97,7 +120,7 @@ def test_propagated_reservation_skips_second_charge(monkeypatch):
     def boom(*args: Any, **kwargs: Any):  # noqa: ARG001
         raise AssertionError("must not re-reserve")
 
-    monkeypatch.setattr("urllib.request.urlopen", boom)
+    monkeypatch.setattr("kazenai.spine.transport.urlopen", boom)
 
     with claim_enforcement_owner("gateway", reservation_id="res-gateway", call_id="c1", attempt=1):
         bind_decision_refs(decision_id="dec-g")

@@ -27,18 +27,41 @@ import hashlib
 import json
 import logging
 import os
-import stat
+import random
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from typing import Any, Iterator, Mapping, Optional
 
 _log = logging.getLogger("kazenai.spine.settle_queue")
 
+_BACKOFF_BASE_S = 1.0
+_BACKOFF_CAP_S = 300.0
+_DAEMON_LOCK = threading.Lock()
+_DAEMON: threading.Thread | None = None
+_DAEMON_PID = 0
+_DAEMON_STOP = threading.Event()
+
 # A claim whose intent has no pending record is either mid-enqueue or orphaned
 # by a crash between ack steps. Only orphans older than this may be reclaimed.
 STALE_CLAIM_S = float(os.getenv("KAZENAI_SDK_SETTLE_STALE_CLAIM_S", "300") or 300)
+
+
+# A record journaled just before its send belongs to that send. The flusher waits
+# this long before delivering it, so a live request and the flusher never send the
+# same intent at once; a record left by a sender that died is recovered afterwards.
+PRE_SEND_GRACE_S = 10.0
+
+
+def _pre_send_grace_s() -> float:
+    """At least PRE_SEND_GRACE_S, and longer than any send with the configured timeout."""
+    try:
+        timeout = float(os.getenv("KAZENAI_FINOPS_RESERVE_TIMEOUT_S", "0.8") or "0.8")
+    except ValueError:
+        timeout = 0.8
+    return max(PRE_SEND_GRACE_S, 4.0 * timeout)
 
 
 class SettleIntentConflict(ValueError):
@@ -104,9 +127,19 @@ def _default_root() -> str:
             state_home = os.path.join(home, ".local", "state")
     if state_home:
         fallback = os.path.join(state_home, "kazenai", "sdk-settle-queue")
-    else:
-        fallback = os.path.join(tempfile.gettempdir(), "kazenai-sdk-settle-queue")
-    os.makedirs(fallback, exist_ok=True)
+        os.makedirs(fallback, exist_ok=True)
+        _chmod_private_dir(fallback)
+        return fallback
+    # Shared temp dir: one folder per user, and never one another user created
+    # (it could read or replace queued settlements).
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    suffix = f"-{uid}" if uid is not None else ""
+    fallback = os.path.join(tempfile.gettempdir(), f"kazenai-sdk-settle-queue{suffix}")
+    os.makedirs(fallback, mode=0o700, exist_ok=True)
+    if uid is not None and os.stat(fallback, follow_symlinks=False).st_uid != uid:
+        raise PermissionError(
+            f"{fallback} belongs to another user; set KAZENAI_SDK_SETTLE_QUEUE_DIR to a private folder"
+        )
     _chmod_private_dir(fallback)
     return fallback
 
@@ -186,7 +219,7 @@ class DurableSettleQueue:
                     return
                 if self._claim_is_orphaned(existing, path):
                     self._remove_claim_if(path, other_fp)
-                    continue
+                    continue  # re-read: removed, or someone else's claim now stands
                 raise SettleIntentConflict(
                     "settle intent conflict: idempotency_key="
                     f"{idem!r} already journals fingerprint {other_fp[:12]}… "
@@ -210,6 +243,10 @@ class DurableSettleQueue:
             f"settle intent conflict: could not claim idempotency_key={idem!r}"
         )
 
+    def _claim_binds(self, identity: str, fingerprint: str) -> bool:
+        claim = self._read_claim(self._claim_path(identity))
+        return claim is not None and str(claim.get("fingerprint") or "") == fingerprint
+
     def _claim_is_orphaned(self, claim: Mapping[str, Any], path: str) -> bool:
         fp = str(claim.get("fingerprint") or "")
         if fp and os.path.exists(self._path_for_fingerprint(fp)):
@@ -220,28 +257,22 @@ class DurableSettleQueue:
             return False
         return (time.time() - claimed_at) >= STALE_CLAIM_S
 
-    def _remove_claim_if(self, path: str, fingerprint: str) -> None:
+    def _remove_claim_if(self, path: str, fingerprint: str) -> bool:
         """Remove the claim only if it still binds ``fingerprint``.
 
-        Rename-to-tombstone makes the check-and-remove atomic against a
-        concurrent replacement; a claim that changed underneath is restored.
+        Runs under ``_claims_lock`` so no other remover can swap the claim
+        between the check and the removal. Returns True when it was removed.
         """
-        tomb = f"{path}.{uuid.uuid4().hex}.tomb"
-        try:
-            os.rename(path, tomb)
-        except FileNotFoundError:
-            return
-        moved = self._read_claim(tomb)
-        if moved is not None and str(moved.get("fingerprint") or "") == fingerprint:
-            with contextlib.suppress(FileNotFoundError):
-                os.remove(tomb)
+        with self._claims_lock():
+            current = self._read_claim(path)
+            if current is None or str(current.get("fingerprint") or "") != fingerprint:
+                return False
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                return False
             _fsync_dir(self.claims_dir)
-            return
-        # Not ours — put it back unless another claim was published meanwhile.
-        with contextlib.suppress(FileExistsError):
-            os.link(tomb, path)
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(tomb)
+            return True
 
     def _release_claim_for(self, record: Mapping[str, Any]) -> None:
         body = record.get("body") if isinstance(record.get("body"), dict) else {}
@@ -322,6 +353,7 @@ class DurableSettleQueue:
                     and str(existing.get("org_id") or "") == org
                     and str(existing.get("base_url") or "") == base
                 ):
+                    _ensure_auto_flush()
                     return path
             except Exception:
                 pass
@@ -335,6 +367,8 @@ class DurableSettleQueue:
             "api_key": (api_key or "") if persist_api_key else "",
             "org_id": org,
             "enqueued_at": time.time(),
+            "attempts": 0,
+            "next_attempt_at": time.time() + (_pre_send_grace_s() if error == "pre_send" else 0.0),
         }
         tmp = _write_private_tmp(self.pending_dir, fingerprint[:40], payload)
         try:
@@ -343,8 +377,21 @@ class DurableSettleQueue:
             with contextlib.suppress(OSError):
                 os.remove(tmp)
             raise
+        if idem:
+            identity = claim_identity(org_id=org, base_url=base, idempotency_key=idem)
+            if not self._claim_binds(identity, fingerprint):
+                # The claim changed while this record was written: released after an
+                # ack (re-claim it), or taken over from a writer that stalled past
+                # STALE_CLAIM_S. In that case withdraw this record so only the
+                # claim holder stays journaled.
+                try:
+                    self._acquire_claim(identity, fingerprint, idem)
+                except SettleIntentConflict:
+                    self.ack(path, fingerprint=fingerprint, release_claim=False)
+                    raise
         _chmod_private_file(path)
         _fsync_dir(self.pending_dir)
+        _ensure_auto_flush()
         return path
 
     def _quarantine(self, path: str, reason: str) -> None:
@@ -386,7 +433,58 @@ class DurableSettleQueue:
             out.append(raw)
         return out
 
-    def ack(self, path: str, *, fingerprint: str | None = None) -> bool:
+    def schedule_retry(self, item: Mapping[str, Any], *, retry_after_s: float | None = None) -> None:
+        """Persist the next attempt so a restart does not retry immediately.
+
+        ``retry_after_s`` is the server's Retry-After hint. It is never longer
+        than the backoff cap, and the attempt does not run before that hint.
+        """
+        path = str(item.get("_path") or "")
+        if not path:
+            return
+        attempts = int(item.get("attempts") or 0) + 1
+        ceiling = min(_BACKOFF_CAP_S, _BACKOFF_BASE_S * (2 ** min(attempts, 16)))
+        wait = random.uniform(0, ceiling)
+        if retry_after_s is not None:
+            wait = min(_BACKOFF_CAP_S, max(wait, float(retry_after_s)))
+        payload = {k: v for k, v in item.items() if not str(k).startswith("_")}
+        payload["attempts"] = attempts
+        payload["next_attempt_at"] = time.time() + wait
+        tmp = _write_private_tmp(self.pending_dir, str(payload.get("fingerprint") or "retry")[:40], payload)
+        try:
+            os.replace(tmp, path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+            raise
+        _chmod_private_file(path)
+        _fsync_dir(self.pending_dir)
+
+    def release(self, path: str, *, fingerprint: str | None = None) -> bool:
+        """Make a record journaled before its send due now: the sender finished without an ack."""
+        try:
+            with open(path, encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (FileNotFoundError, ValueError):
+            return False
+        if not isinstance(raw, dict) or raw.get("error") != "pre_send":
+            return False
+        if fingerprint and str(raw.get("fingerprint") or "") != fingerprint:
+            return False
+        raw["error"] = "sender_unacked"
+        raw["next_attempt_at"] = time.time()
+        tmp = _write_private_tmp(self.pending_dir, str(raw.get("fingerprint") or "release")[:40], raw)
+        try:
+            os.replace(tmp, path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+            raise
+        _chmod_private_file(path)
+        _fsync_dir(self.pending_dir)
+        return True
+
+    def ack(self, path: str, *, fingerprint: str | None = None, release_claim: bool = True) -> bool:
         """Remove a pending record only when it still matches ``fingerprint``."""
         try:
             with open(path, encoding="utf-8") as fh:
@@ -404,7 +502,7 @@ class DurableSettleQueue:
         except Exception:
             return False
         _fsync_dir(self.pending_dir)
-        if isinstance(raw, dict):
+        if release_claim and isinstance(raw, dict):
             self._release_claim_for(raw)
         return True
 
@@ -459,6 +557,29 @@ class DurableSettleQueue:
             os.replace(tmp, path)
         except Exception:
             _log.debug("could not record flush outcome", exc_info=True)
+
+    @contextlib.contextmanager
+    def _claims_lock(self) -> Iterator[None]:
+        """Serialise claim removal (stale takeover and release after ack).
+
+        Publishing a claim stays lock-free (``os.link`` fails when one exists),
+        so while this lock is held a claim can appear but never be swapped for
+        another. That makes check-then-remove exact.
+        """
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - Windows: single host, single writer rule
+            yield
+            return
+        fd = os.open(os.path.join(self.claims_dir, ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     @contextlib.contextmanager
     def flush_lock(self) -> Iterator[bool]:
@@ -578,23 +699,41 @@ def _flush_locked(
     default_api_key: str | None,
     timeout_s: float,
 ) -> dict[str, int]:
-    from kazenai.spine.guard import _post_settle_sync
+    from kazenai.spine.guard import SettleRejected, SettleRetry, _post_settle_sync
 
     applied = 0
     failed = 0
+    rejected = 0
+    if _queue_dir_unsafe(q.root):
+        _log.warning("settle queue flush refused: directory is not a private directory owned by this user")
+        return {"applied": 0, "failed": 0, "rejected": 0, "refused": 1}
     for item in q.list_pending():
         body = item.get("body") if isinstance(item.get("body"), dict) else None
         path = str(item.get("_path") or "")
         fingerprint = str(item.get("fingerprint") or "")
         if not body or not path:
             continue
-        base = str(item.get("base_url") or default_base_url or "").rstrip("/")
+        due = float(item.get("next_attempt_at") or 0)
+        if due > time.time():
+            continue
+        # Destination and credential come from the process configuration.
+        # A base_url or api_key stored in the record is not authority: a
+        # tampered spool must not redirect settlement or swap the key.
+        from kazenai.spine.guard import _api_key, _finops_url
+
+        base = (default_base_url or _finops_url() or "").rstrip("/")
         org = str(item.get("org_id") or body.get("org_id") or "")
-        key = item.get("api_key")
-        if key is None or key == "":
-            key = default_api_key
+        key = default_api_key if default_api_key not in (None, "") else _api_key()
         if not base:
+            q.schedule_retry(item)
             failed += 1
+            continue
+        # A record journaled for a different FinOps is quarantined, not sent:
+        # the capability it carries belongs to the FinOps that issued it.
+        stored = str(item.get("base_url") or "")
+        if stored and _destination(stored) != _destination(base):
+            q._quarantine(path, "destination_mismatch")
+            rejected += 1
             continue
         # Recompute fingerprint — refuse to ack if the on-disk record drifted.
         expected = fingerprint or intent_fingerprint(body, org_id=org, base_url=base)
@@ -607,6 +746,7 @@ def _flush_locked(
                 api_key=str(key) if key is not None else None,
                 enqueue_on_failure=False,
                 journal_before_send=False,
+                raise_on_permanent=True,
             )
             if ok:
                 if q.ack(path, fingerprint=expected):
@@ -616,21 +756,123 @@ def _flush_locked(
                     # against the wrong intent.
                     failed += 1
             else:
+                q.schedule_retry(item)
                 failed += 1
-        except Exception:
+        except SettleRetry as exc:
+            q.schedule_retry(item, retry_after_s=exc.retry_after_s)
             failed += 1
-    return {"applied": applied, "failed": failed}
+        except SettleRejected as exc:
+            # Auth, scope, and malformed 4xx responses will not succeed on retry.
+            # The reason is the error code, never the response body.
+            q._quarantine(path, f"rejected_{exc.error_code}")
+            rejected += 1
+        except Exception:
+            q.schedule_retry(item)
+            failed += 1
+    _emit_queue_metrics(q, failed=failed)
+    return {"applied": applied, "failed": failed, "rejected": rejected}
+
+
+def _destination(url: str) -> tuple[str, str, str]:
+    """Scheme, host[:port] and path of a FinOps URL, case-folded where URLs are."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(str(url or "").strip())
+    return (parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"))
+
+
+def _queue_dir_unsafe(root: str) -> bool:
+    """True when the queue is not owned by this uid or is group/world writable."""
+    try:
+        st = os.stat(root)
+    except OSError:
+        return True
+    if st.st_uid != os.geteuid():
+        return True
+    return bool(st.st_mode & 0o022)
+
+
+def _auto_flush_enabled() -> bool:
+    raw = os.getenv("KAZENAI_SDK_SETTLE_AUTO_FLUSH")
+    if raw is None or raw.strip() == "":
+        return True
+    return raw.strip() != "0"
+
+
+def _ensure_auto_flush() -> None:
+    """Start one daemon flusher after the first pending record. Import does not call this."""
+    global _DAEMON, _DAEMON_PID
+    if not _auto_flush_enabled():
+        return
+    pid = os.getpid()
+    with _DAEMON_LOCK:
+        if _DAEMON is not None and _DAEMON.is_alive() and _DAEMON_PID == pid:
+            return
+        _DAEMON_STOP.clear()
+        _DAEMON_PID = pid
+        _DAEMON = threading.Thread(target=_daemon_loop, name="kazenai-settle-flush", daemon=True)
+        _DAEMON.start()
+
+
+def shutdown_settle_flusher(timeout_s: float = 1.0) -> None:
+    """Bounded stop. The thread is a daemon, so it cannot keep a process alive."""
+    _DAEMON_STOP.set()
+    thread = _DAEMON
+    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=timeout_s)
+
+
+def _daemon_loop() -> None:
+    while not _DAEMON_STOP.is_set():
+        try:
+            flush_pending_settlements()
+        except Exception:
+            _log.debug("auto flush failed", exc_info=True)
+        _DAEMON_STOP.wait(5.0)
+
+
+_METERS: dict[str, Any] | None = None
+
+
+def _emit_queue_metrics(q: DurableSettleQueue, *, failed: int = 0) -> None:
+    """No-op when OpenTelemetry is disabled or not installed."""
+    global _METERS
+    if os.getenv("OTEL_SDK_DISABLED", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    try:
+        from opentelemetry import metrics
+
+        if _METERS is None:
+            meter = metrics.get_meter("kazenai.settle_queue")
+            _METERS = {
+                "depth": meter.create_gauge("kazenai.settle_queue.depth"),
+                "oldest_age_s": meter.create_gauge("kazenai.settle_queue.oldest_age_s"),
+                "oldest_age_seconds": meter.create_gauge("kazenai.settle_queue.oldest_age_seconds"),
+                "failures": meter.create_counter("kazenai.settle_queue.failures"),
+                "quarantined": meter.create_gauge("kazenai.settle_queue.quarantined"),
+            }
+        snapshot = q.stats()
+        _METERS["depth"].set(snapshot["depth"])
+        age = snapshot["oldest_age_s"]
+        _METERS["oldest_age_s"].set(age)
+        _METERS["oldest_age_seconds"].set(age)
+        _METERS["quarantined"].set(snapshot["quarantined"])
+        if failed:
+            _METERS["failures"].add(failed)
+    except Exception:
+        return
 
 
 def main(argv: list[str] | None = None) -> int:
     """``python -m kazenai.spine.settle_queue {flush,stats}`` — supervised recovery entrypoint.
 
-    Exit codes: 0 ok, 1 some records failed, 3 another flusher holds the lock.
+    Exit codes: 0 ok, 1 some records failed or were quarantined as rejected,
+    3 another flusher holds the lock.
     """
     parser = argparse.ArgumentParser(prog="python -m kazenai.spine.settle_queue")
     parser.add_argument("command", choices=["flush", "stats"])
     parser.add_argument("--root", default=None, help="queue dir (default KAZENAI_SDK_SETTLE_QUEUE_DIR)")
-    parser.add_argument("--base-url", default="", help="FinOps URL for records lacking one")
+    parser.add_argument("--base-url", default="", help="configured FinOps URL; records cannot redirect the flush")
     parser.add_argument("--timeout", type=float, default=5.0)
     args = parser.parse_args(argv)
 
@@ -647,7 +889,7 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({**result, **queue_stats()}, sort_keys=True))
     if result.get("locked"):
         return 3
-    return 1 if result.get("failed") else 0
+    return 1 if result.get("failed") or result.get("rejected") or result.get("refused") else 0
 
 
 if __name__ == "__main__":

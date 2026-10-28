@@ -55,17 +55,17 @@ def _assert_no_canary(blob: str) -> None:
     assert CANARY not in blob
 
 
-def test_p33_default_mode_is_metadata():
+def test_default_mode_is_metadata():
     assert resolve_capture_mode() is CaptureMode.METADATA
 
 
-def test_p33_full_without_consent_falls_back_to_redacted(monkeypatch):
+def test_full_without_consent_falls_back_to_redacted(monkeypatch):
     monkeypatch.delenv("KAZENAI_CAPTURE_CONSENT", raising=False)
     assert resolve_capture_mode(explicit="full", consent=False) is CaptureMode.REDACTED
     assert resolve_capture_mode(explicit="full", consent=True) is CaptureMode.FULL
 
 
-def test_p33_redact_nested_and_string_canary():
+def test_redact_nested_and_string_canary():
     payload = {
         "messages": [{"role": "user", "content": f"please use {CANARY}"}],
         "api_key": CANARY,
@@ -79,7 +79,7 @@ def test_p33_redact_nested_and_string_canary():
     assert "[REDACTED]" in scrubbed["messages"][0]["content"]
 
 
-def test_p33_metadata_ref_omits_bodies():
+def test_metadata_ref_omits_bodies():
     ref = build_content_ref({"messages": [{"content": CANARY}]}, mode=CaptureMode.METADATA)
     assert ref["kind"] == "omitted"
     assert ref["present"] is False
@@ -87,7 +87,7 @@ def test_p33_metadata_ref_omits_bodies():
     assert CANARY not in json.dumps(ref)
 
 
-def test_p33_default_monitor_timeline_and_logs_have_no_canary(monkeypatch, caplog):
+def test_default_monitor_timeline_and_logs_have_no_canary(monkeypatch, caplog):
     _standalone(monkeypatch)
     client = FakeOpenAI()
     with caplog.at_level(logging.INFO):
@@ -118,7 +118,7 @@ def test_p33_default_monitor_timeline_and_logs_have_no_canary(monkeypatch, caplo
         assert model_calls[0]["payload"]["capture"]["bodies"] == "off"
 
 
-def test_p33_attribution_metadata_excludes_canary():
+def test_attribution_metadata_excludes_canary():
     """Attribution fields are metadata; canaries must not enter receipts."""
     from kazenai.attribution import AttributionContext, attribution_for_reserve_body
 
@@ -136,7 +136,7 @@ def test_p33_attribution_metadata_excludes_canary():
     assert scrubbed["api_key"] == "[REDACTED]"
 
 
-def test_p33_sqlite_spool_and_http_payload_have_no_canary(monkeypatch):
+def test_sqlite_spool_and_http_payload_have_no_canary(monkeypatch):
     _standalone(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
         db = str(Path(tmp) / "offline.sqlite3")
@@ -197,7 +197,7 @@ def test_p33_sqlite_spool_and_http_payload_have_no_canary(monkeypatch):
         assert found, "expected offline spool after failed HTTP"
 
 
-def test_p33_opt_in_redacted_scrubs_canary_but_keeps_structure(monkeypatch):
+def test_opt_in_redacted_scrubs_canary_but_keeps_structure(monkeypatch):
     _standalone(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
         timeline = str(Path(tmp) / "t.jsonl")
@@ -222,7 +222,7 @@ def test_p33_opt_in_redacted_scrubs_canary_but_keeps_structure(monkeypatch):
         assert "[REDACTED]" in json.dumps(iref["value"])
 
 
-def test_p33_event_log_fields_never_include_bodies():
+def test_event_log_fields_never_include_bodies():
     ev = KazenEvent(
         schema_version="1.0",
         ts_ms=now_ms(),
@@ -247,7 +247,7 @@ def test_p33_event_log_fields_never_include_bodies():
     assert fields["outputs_absent"] is True
 
 
-def test_p33_error_text_from_budget_exceeded_has_no_prompt(monkeypatch):
+def test_error_text_from_budget_exceeded_has_no_prompt(monkeypatch):
     _standalone(monkeypatch)
     from kazenai import BudgetExceeded
 

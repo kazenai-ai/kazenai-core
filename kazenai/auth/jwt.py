@@ -26,6 +26,7 @@ ERROR_CATEGORIES = frozenset(
         "not_yet_valid",
         "missing_claim",
         "unavailable_key",
+        "token_use",
     }
 )
 
@@ -85,7 +86,6 @@ class JwtVerifyConfig:
         secret: str | None = None,
         enforce_iss_aud: bool | None = None,
     ) -> "JwtVerifyConfig":
-        mode = os.getenv("KAZENAI_DEPLOYMENT_MODE", os.getenv("KAZENAI_ENV", "development")).lower()
         if enforce_iss_aud is None:
             # Profiles are always enforced when configured. The legacy
             # development relaxation required an explicit opt-in.
@@ -505,3 +505,149 @@ def _decode_with_clock(
 
 # Back-compat alias used by older imports/tests.
 verify_token = verify_hs256_token
+
+
+# ---------------------------------------------------------------------------
+# Platform-signed Ed25519 tokens (token-claims.v1)
+# ---------------------------------------------------------------------------
+#
+# Platform alone holds the private key. Services hold only public keys, so no
+# service can mint a token another service would accept. Two token kinds:
+# ``session`` (aud=kazenai-platform, Platform only) and ``delegation``
+# (aud=one downstream service, minted per proxied request). Requires the
+# ``cryptography`` package: ``pip install kazenai[server]``.
+
+PLATFORM_JWT_ISSUER_DEFAULT = "kazenai-platform"
+PUBLIC_KEYS_ENV = "KAZENAI_SESSION_JWT_PUBLIC_KEYS"
+
+
+@dataclass(frozen=True)
+class EdDSAProfile:
+    """One accepted (issuer, audience, token_use) with its public-key ring."""
+
+    name: str
+    issuer: str
+    audience: str
+    token_use: str
+    public_keys: tuple[tuple[str, str], ...]  # (kid, SPKI PEM)
+    leeway_seconds: int = 0
+    max_ttl_seconds: Optional[int] = None
+
+
+def load_public_keys(raw: str | None = None) -> tuple[tuple[str, str], ...]:
+    """Parse ``{"kid": "-----BEGIN PUBLIC KEY-----..."}`` from env (or ``raw``)."""
+    import json as _json
+
+    text = (raw if raw is not None else os.getenv(PUBLIC_KEYS_ENV, "")).strip()
+    if not text:
+        return ()
+    try:
+        data = _json.loads(text)
+    except ValueError as exc:
+        raise JwtVerifyError("unavailable_key", f"{PUBLIC_KEYS_ENV} is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise JwtVerifyError("unavailable_key", f"{PUBLIC_KEYS_ENV} must be an object of kid -> PEM")
+    out: list[tuple[str, str]] = []
+    for kid, pem in data.items():
+        if not isinstance(kid, str) or not kid.strip() or not isinstance(pem, str) or "PUBLIC KEY" not in pem:
+            raise JwtVerifyError("unavailable_key", "public keys must map a kid to a PEM public key")
+        # Same convention as Platform: a one-line env value may use literal \n.
+        if "\\n" in pem:
+            pem = pem.replace("\\n", "\n")
+        out.append((kid.strip(), pem))
+    return tuple(out)
+
+
+def platform_token_profile(
+    *,
+    audience: str,
+    token_use: str,
+    max_ttl_seconds: Optional[int] = None,
+    public_keys: Optional[tuple[tuple[str, str], ...]] = None,
+) -> EdDSAProfile:
+    issuer = os.getenv("KAZENAI_PLATFORM_JWT_ISSUER", PLATFORM_JWT_ISSUER_DEFAULT).strip() or PLATFORM_JWT_ISSUER_DEFAULT
+    leeway = max(0, min(int(os.getenv("KAZENAI_JWT_LEEWAY_SECONDS", "0") or "0"), 300))
+    return EdDSAProfile(
+        name=f"platform-eddsa-{token_use}",
+        issuer=issuer,
+        audience=audience,
+        token_use=token_use,
+        public_keys=public_keys if public_keys is not None else load_public_keys(),
+        leeway_seconds=leeway,
+        max_ttl_seconds=max_ttl_seconds,
+    )
+
+
+def verify_eddsa_token(token: str, profile: EdDSAProfile, *, now: int | None = None) -> dict[str, Any]:
+    """Verify a Platform-signed Ed25519 JWT against one exact profile."""
+    if not isinstance(token, str) or token.count(".") != 2:
+        raise JwtVerifyError("malformed", "invalid jwt")
+    if not profile.public_keys:
+        raise JwtVerifyError("unavailable_key", "no Platform public keys configured")
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError as exc:
+        raise JwtVerifyError("malformed", "invalid jwt header") from exc
+    if str(header.get("alg") or "") != "EdDSA":
+        raise JwtVerifyError("algorithm", "unsupported jwt alg")
+    crit = header.get("crit")
+    if crit is not None:
+        if not isinstance(crit, (list, tuple)) or any(not isinstance(c, str) for c in crit):
+            raise JwtVerifyError("malformed", "invalid crit header")
+        for name in crit:
+            if name not in {"alg", "typ", "kid"} or name not in header:
+                raise JwtVerifyError("malformed", f"unknown critical header: {name}")
+    kid = header.get("kid")
+    if not isinstance(kid, str) or not kid.strip():
+        raise JwtVerifyError("missing_claim", "missing kid")
+    pem = dict(profile.public_keys).get(kid)
+    if pem is None:
+        raise JwtVerifyError("unavailable_key", "unknown signing key")
+    try:
+        payload = dict(
+            jwt.decode(
+                token,
+                pem,
+                algorithms=["EdDSA"],
+                options={
+                    "verify_aud": False,
+                    "verify_iss": False,
+                    "verify_exp": False,
+                    "verify_nbf": False,
+                    "verify_iat": False,
+                    "verify_sub": False,
+                },
+            )
+        )
+    except jwt.PyJWTError as exc:
+        raise _map_pyjwt_error(exc) from exc
+    if str(payload.get("iss") or "") != profile.issuer:
+        raise JwtVerifyError("issuer", "jwt issuer mismatch")
+    if not _audience_matches(payload, frozenset({profile.audience})):
+        raise JwtVerifyError("audience", "audience mismatch")
+    if str(payload.get("token_use") or "") != profile.token_use:
+        raise JwtVerifyError("token_use", "token_use mismatch")
+    clock = int(now if now is not None else time.time())
+    leeway = int(profile.leeway_seconds)
+    if payload.get("exp") is None:
+        raise JwtVerifyError("missing_claim", "missing required claim")
+    exp = _as_numeric_date(payload["exp"], "exp")
+    if exp <= clock - leeway:
+        raise JwtVerifyError("expired", "token expired")
+    if payload.get("nbf") is not None and _as_numeric_date(payload["nbf"], "nbf") > clock + leeway:
+        raise JwtVerifyError("not_yet_valid", "token not yet valid")
+    iat = _as_numeric_date(payload["iat"], "iat") if payload.get("iat") is not None else None
+    if iat is not None and iat > clock + leeway:
+        raise JwtVerifyError("not_yet_valid", "token not yet valid")
+    if profile.max_ttl_seconds is not None:
+        if iat is None or exp - iat > int(profile.max_ttl_seconds):
+            raise JwtVerifyError("expired", "token lifetime exceeds this profile's maximum")
+    if "jti" in payload and not isinstance(payload.get("jti"), str):
+        raise JwtVerifyError("malformed", "invalid jti claim")
+    _assert_subject_claim(payload, require=True)
+    return payload
+
+
+def sign_eddsa_token(payload: Mapping[str, Any], *, private_key_pem: str, kid: str) -> str:
+    """Sign with Ed25519 (tests and tooling; production signing lives in Platform)."""
+    return jwt.encode(dict(payload), private_key_pem, algorithm="EdDSA", headers={"kid": kid})

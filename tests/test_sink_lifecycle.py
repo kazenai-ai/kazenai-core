@@ -33,7 +33,7 @@ def _event(*, event_id: str | None = None, org_id: str = "org-a", event_type: st
     )
 
 
-def test_p34_retry_queue_lease_ack_and_dedupe(tmp_path):
+def test_retry_queue_lease_ack_and_dedupe(tmp_path):
     q = RetryQueue(str(tmp_path / "q.sqlite3"), org_id="org-a", max_pending=100)
     ev = {"event_id": "e1", "org_id": "org-a", "event_type": "model.call"}
     assert q.enqueue(ev) == "applied"
@@ -45,7 +45,7 @@ def test_p34_retry_queue_lease_ack_and_dedupe(tmp_path):
     assert q.pending_count() == 0
 
 
-def test_p34_retry_queue_nack_poison_and_tenant(tmp_path):
+def test_retry_queue_nack_poison_and_tenant(tmp_path):
     q = RetryQueue(
         str(tmp_path / "q.sqlite3"),
         org_id="org-a",
@@ -65,7 +65,7 @@ def test_p34_retry_queue_nack_poison_and_tenant(tmp_path):
     assert q.dead_letter_count() == 1
 
 
-def test_p34_retry_queue_disk_bound(tmp_path):
+def test_retry_queue_disk_bound(tmp_path):
     q = RetryQueue(str(tmp_path / "q.sqlite3"), max_pending=2, max_disk_bytes=10**9)
     assert q.enqueue({"event_id": "a", "org_id": "o"}) == "applied"
     assert q.enqueue({"event_id": "b", "org_id": "o"}) == "applied"
@@ -73,7 +73,7 @@ def test_p34_retry_queue_disk_bound(tmp_path):
     assert q.stats["disk_full"] >= 1
 
 
-def test_p34_http_sink_burst_bounded_threads(tmp_path):
+def test_http_sink_burst_bounded_threads(tmp_path):
     cfg = HttpSinkConfig(
         ingest_url="http://127.0.0.1:8090",
         flush_interval_s=0.05,
@@ -89,7 +89,7 @@ def test_p34_http_sink_burst_bounded_threads(tmp_path):
     # One flush worker + one retry worker.
     assert after_start - before <= 3
 
-    with patch("urllib.request.urlopen") as urlopen:
+    with patch("kazenai.outbound_http.urlopen") as urlopen:
         resp = MagicMock()
         resp.read.return_value = b"{}"
         urlopen.return_value.__enter__.return_value = resp
@@ -104,7 +104,7 @@ def test_p34_http_sink_burst_bounded_threads(tmp_path):
     assert st["queue_max"] == 500
 
 
-def test_p34_http_sink_queue_backpressure_spools(tmp_path):
+def test_http_sink_queue_backpressure_spools(tmp_path):
     cfg = HttpSinkConfig(
         ingest_url="http://127.0.0.1:1",
         flush_interval_s=10.0,  # slow flush so queue fills
@@ -129,7 +129,7 @@ def test_p34_http_sink_queue_backpressure_spools(tmp_path):
     sink.close(deadline_s=1.0)
 
 
-def test_p34_offline_reconnect_ack(tmp_path):
+def test_offline_reconnect_ack(tmp_path):
     cfg = HttpSinkConfig(
         ingest_url="http://127.0.0.1:8090",
         flush_interval_s=0.05,
@@ -140,12 +140,12 @@ def test_p34_offline_reconnect_ack(tmp_path):
         org_id="org-a",
     )
     sink = HttpSink(cfg)
-    with patch("urllib.request.urlopen", side_effect=OSError("down")):
+    with patch("kazenai.outbound_http.urlopen", side_effect=OSError("down")):
         sink.emit(_event(event_id="offline-1"))
         time.sleep(0.2)
     assert sink._retry.pending_count() >= 1 or sink.stats()["spooled"] >= 1
 
-    with patch("urllib.request.urlopen") as urlopen:
+    with patch("kazenai.outbound_http.urlopen") as urlopen:
         resp = MagicMock()
         resp.read.return_value = b"{}"
         urlopen.return_value.__enter__.return_value = resp
@@ -158,7 +158,7 @@ def test_p34_offline_reconnect_ack(tmp_path):
     assert sink.stats()["delivered"] >= 1
 
 
-def test_p34_shutdown_drains_or_spools(tmp_path):
+def test_shutdown_drains_or_spools(tmp_path):
     cfg = HttpSinkConfig(
         ingest_url="http://127.0.0.1:1",
         flush_interval_s=5.0,
@@ -179,7 +179,7 @@ def test_p34_shutdown_drains_or_spools(tmp_path):
     assert pending >= 1 or (jsonl.exists() and jsonl.stat().st_size > 0) or sink.stats()["spooled"] >= 1
 
 
-def test_p34_process_crash_recovery(tmp_path):
+def test_process_crash_recovery(tmp_path):
     """Simulate crash: events on disk survive; new sink drain recovers."""
     db = tmp_path / "offline.sqlite3"
     q = RetryQueue(str(db), org_id="org-a")
@@ -196,7 +196,7 @@ def test_p34_process_crash_recovery(tmp_path):
         org_id="org-a",
     )
     sink = HttpSink(cfg)
-    with patch("urllib.request.urlopen") as urlopen:
+    with patch("kazenai.outbound_http.urlopen") as urlopen:
         resp = MagicMock()
         resp.read.return_value = b"{}"
         urlopen.return_value.__enter__.return_value = resp
@@ -208,7 +208,7 @@ def test_p34_process_crash_recovery(tmp_path):
     assert sink.stats()["delivered"] >= 1
 
 
-def test_p34_poison_event_goes_to_dlq(tmp_path):
+def test_poison_event_goes_to_dlq(tmp_path):
     q = RetryQueue(str(tmp_path / "q.sqlite3"), max_attempts=1)
     # Insert unparseable row directly.
     import sqlite3
@@ -224,7 +224,7 @@ def test_p34_poison_event_goes_to_dlq(tmp_path):
     assert q.dead_letter_count() == 1
 
 
-def test_p34_duplicate_delivery_deduped_on_spool(tmp_path):
+def test_duplicate_delivery_deduped_on_spool(tmp_path):
     cfg = HttpSinkConfig(
         ingest_url="http://127.0.0.1:1",
         flush_interval_s=0.05,
@@ -234,7 +234,7 @@ def test_p34_duplicate_delivery_deduped_on_spool(tmp_path):
         org_id="org-a",
     )
     sink = HttpSink(cfg)
-    with patch("urllib.request.urlopen", side_effect=OSError("down")):
+    with patch("kazenai.outbound_http.urlopen", side_effect=OSError("down")):
         sink.emit(_event(event_id="event-dup-1"))
         time.sleep(0.15)
         sink.emit(_event(event_id="event-dup-1"))
@@ -244,7 +244,7 @@ def test_p34_duplicate_delivery_deduped_on_spool(tmp_path):
     sink.close(deadline_s=1.0)
 
 
-def test_p34_mandatory_event_fail_closed_when_spool_impossible(tmp_path, monkeypatch):
+def test_mandatory_event_fail_closed_when_spool_impossible(tmp_path, monkeypatch):
     cfg = HttpSinkConfig(
         ingest_url="http://127.0.0.1:1",
         flush_interval_s=10.0,
@@ -263,7 +263,7 @@ def test_p34_mandatory_event_fail_closed_when_spool_impossible(tmp_path, monkeyp
     sink.close(deadline_s=0.5)
 
 
-def test_p34_default_sink_reused_across_emits(monkeypatch):
+def test_default_sink_reused_across_emits(monkeypatch):
     guard_mod.reset_default_sink()
     monkeypatch.setenv("KAZENAI_FINOPS_URL", "http://finops:8090")
     monkeypatch.setenv("KAZENAI_FINOPS_API_KEY", "k")

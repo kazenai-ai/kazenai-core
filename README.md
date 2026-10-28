@@ -1,6 +1,6 @@
 # kazenai
 
-> **Stop your AI agents from burning your budget. Catch loops before they catch you.**
+> **A hard spending limit for every customer's AI.**
 
 [![PyPI](https://img.shields.io/pypi/v/kazenai.svg)](https://pypi.org/project/kazenai/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
@@ -14,11 +14,15 @@
 
 ## What is this?
 
-`kazenai` is the core Python SDK behind KazenAI’s economic control layer for AI agents. One call — `monitor()` — wraps your OpenAI or Anthropic client and:
+Flat-priced AI has one weak spot: a few customers, or one stuck agent, can cost
+more than they pay. KazenAI checks every model call against that customer's
+limit before it runs. Over the limit, the call doesn't happen.
+
+`kazenai` is the core Python SDK. One call, `monitor()`, wraps your OpenAI or Anthropic client and:
 
 1. **Blocks overspend before the provider call** (`BudgetExceeded`)
 2. **Detects runaway loops** before another LLM request
-3. **Optionally ships evidence** to Agent FinOps / Agent Lens as canonical `KazenEvent`s
+3. **Connects to Agent FinOps** (optional) for a limit per customer across every process, with a receipt for every allow and deny
 
 Most observability tools tell you what went wrong after the bill. KazenAI can stop the call that would cause it.
 
@@ -32,21 +36,23 @@ KazenAI:            Pre-flight check → BLOCKED → LLM call never made
 ## Install
 
 ```bash
-python -m pip install "kazenai[openai]==1.1.3"
+python -m pip install "kazenai[openai]==1.2.0"
 # Most teams install the customer package instead:
-python -m pip install "kazenai-finops[openai]==1.1.3"
+python -m pip install "kazenai-finops[openai]==1.2.0"
 # Anthropic:
-# python -m pip install "kazenai-finops[anthropic]==1.1.3"
+# python -m pip install "kazenai-finops[anthropic]==1.2.0"
 # Both providers:
-# python -m pip install "kazenai-finops[providers]==1.1.3"
+# python -m pip install "kazenai-finops[providers]==1.2.0"
 ```
 
 `kazenai-finops` re-exports this SDK and is the recommended install for product integrations.
 Provider extras keep the provider SDKs within the supported ranges
-(`openai>=1.40,<3`, `anthropic>=0.39,<1`).
+(`openai>=1.40,<3`, `anthropic>=0.39,<1`). To send inline images, add the
+`images` extra (`kazenai[openai,images]`): it sizes each image before the call.
 
-KazenAI is tested on OpenAI 1.109.1 and 2.48.0 and Anthropic 0.125.0, and the
-OpenAI and Anthropic paths are verified against the live APIs. Full list:
+KazenAI is tested on OpenAI 1.109.1 and 2.48.0 (Chat Completions), OpenAI 2.54.0
+(Responses and the live runs) and Anthropic 0.125.0, and the OpenAI and Anthropic
+paths are verified against the live APIs. Full list:
 [Supported integrations](https://github.com/kazenai-ai/kazenai-core/blob/main/docs/integrations/control-supported-matrix.md).
 
 Requires Python 3.10+.
@@ -56,16 +62,11 @@ Requires Python 3.10+.
 ## Quick start
 
 ```python
-import os
 from openai import OpenAI
 from kazenai import monitor, BudgetExceeded
 
-# Optional FinOps ingest (env only — not monitor kwargs):
-#   export KAZENAI_FINOPS_API_KEY=kz_...
-#   export KAZENAI_FINOPS_INGEST_URL=https://finops.example.com
-
 client = monitor(
-    OpenAI(),
+    OpenAI(max_retries=0),
     agent_id="support-agent",
     max_budget_usd=5.00,
     debug=True,
@@ -92,6 +93,48 @@ With `debug=True` you’ll see spend as the run progresses:
 
 Illustrative debug output — not a customer bill or savings claim.
 
+This local cap needs no account. To enforce a limit per customer across every
+process, connect Agent FinOps.
+
+---
+
+## Connect to Agent FinOps (hosted limits)
+
+```bash
+export KAZENAI_FINOPS_URL=https://finops.example.com   # your Agent FinOps URL
+export KAZENAI_FINOPS_API_KEY=kz_...
+export KAZENAI_TIER_MISMATCH_MULTIPLIER=2              # required, see below
+```
+
+```python
+client = monitor(OpenAI(max_retries=0), agent_id="support-agent")
+```
+
+Setting a FinOps URL turns on the Control lifecycle (the default since 1.2.0):
+
+- every guarded call reserves against your limits in Agent FinOps **before** it
+  is sent and settles after it returns;
+- a refused reservation raises `BudgetExceeded`, and the provider is never called;
+- if Agent FinOps cannot be reached, the call is refused (fail closed), unless
+  an admin chose fail-open for the organization: then it runs with only the
+  local caps and is not charged to the organization's limits
+  ([details](https://docs.kazenai.com/reference/configuration/#when-agent-finops-is-unreachable)).
+
+Two settings are required under Control, and `monitor()` refuses to start
+without them:
+
+| Requirement | Why | If missing |
+|---|---|---|
+| `KAZENAI_TIER_MISMATCH_MULTIPLIER` (finite, at least 1) | When a provider bills a call at a service tier KazenAI has no certified price for, KazenAI holds the requested-tier price times this number against your limit and keeps the call for reconciliation. Use at least the price ratio of the most expensive tier your provider can apply. | `PricingConfigError` from `monitor()` |
+| Provider clients built with `max_retries=0` | Each retry is a new billable attempt, so KazenAI reserves for each one itself. | `UnsupportedModeError` (`unsupported_provider_retries`) |
+
+Hosted Agent FinOps also lets an admin pause an organization: new reservations
+are refused (`BudgetExceeded`) until it is resumed, and calls already admitted
+still settle.
+
+`KAZENAI_PROFILE=legacy` selects the pre-1.2 check/reconcile path. It is
+deprecated, warns, and is removed in 2.0. Hosted Agent FinOps refuses it.
+
 ---
 
 ## What you get
@@ -112,9 +155,37 @@ Illustrative debug output — not a customer bill or savings claim.
 | Anthropic `messages.create` / `.stream`, sync and async, streaming and non-streaming | Supported, verified against the live API |
 | LangChain `ChatOpenAI` / `ChatAnthropic` | Supported when bound with `bind_monitored_chat_openai` / `bind_monitored_chat_anthropic` |
 | LangGraph | Supported when the graph declares every provider client its nodes use; raw clients created inside nodes are not intercepted |
-| LiteLLM proxy | Supported with application-owned or gateway-owned accounting (gateway-owned streaming settlement not yet verified) |
-| CrewAI | Preview: `bind_crew_llm_client` works for sequential crews; not yet a supported path |
-| OpenAI Responses API / Realtime, AutoGen | Not supported |
+| LiteLLM proxy | Supported with application-owned or gateway-owned accounting (gateway-owned streaming settlement not yet verified); see [LiteLLM gateway](#litellm-gateway) |
+| OpenAI `responses.create` / `.stream` / `.parse`, sync and async, streaming and non-streaming | Supported, verified against the live API (new in 1.2.0). Refused before dispatch: `background=True`, `previous_response_id` / `conversation` / stored `prompt`, built-in tools |
+| CrewAI 1.15.26 (`kickoff`, `akickoff`, `kickoff_async`) | Supported, verified against the live API, when every LLM is bound with `bind_crew_llm_client`; memory, knowledge, `Crew(stream=True)` and `llm_overlay` are refused under Control |
+| Other OpenAI endpoints (embeddings, images, audio, batches, fine-tuning, Realtime, legacy `completions`) and any provider method saved before `monitor()` | Refused before dispatch with `UnsupportedModeError`; `monitor(..., allow_unmetered=("/embeddings",))` sends named endpoints without a budget check |
+| Bedrock/Vertex wrappers, AutoGen | Not supported |
+
+Cancelling CrewAI's native `akickoff` stops the crew; `kickoff_async` runs on a
+worker thread that cancellation does not stop, so that crew finishes and is
+charged.
+
+### LiteLLM gateway
+
+To enforce limits in a LiteLLM proxy for every application behind it, install
+`kazenai` in the proxy's environment and load its callback:
+
+```yaml
+litellm_settings:
+  callbacks: kazenai.integrations.litellm_gateway.proxy_handler_instance
+environment_variables:
+  KAZENAI_ENFORCEMENT_OWNER: gateway
+```
+
+Set the usual Agent FinOps variables in the proxy, and keep its retries off
+(`num_retries: 0`). Applications send `metadata={"kazenai_operation_id": ...}` and
+do not reserve again. `kazenai` does not depend on or bundle LiteLLM; the callback
+uses only LiteLLM's MIT-licensed `CustomLogger`.
+
+Inline images are priced before the call. Files and documents sent by reference
+are refused. `observe_unbounded=("images",)` lets image calls through without an
+exact bound and records them as `spend_bound: "none"`. Responses API paths that
+need OpenAI's exact input-token counter require an openai 2.x client.
 
 ### Streaming
 
@@ -123,7 +194,7 @@ from kazenai import StreamCutoffError, monitor
 from openai import OpenAI
 
 client = monitor(
-    OpenAI(),
+    OpenAI(max_retries=0),
     max_budget_usd=1.00,
     stream_cutoff_usd=0.01,  # optional local observable-output guard
 )
@@ -171,13 +242,15 @@ with client.chat.completions.stream(
 ## Local and shared enforcement
 
 - **Hard cap works without FinOps network** — deny even when ingest is offline
-- **Low overhead** — budget and loop checks stay on the hot path
-- **Shared policies can fail closed** — production/staging modes deny when a
-  required shared reservation cannot be obtained
+- **Low overhead** — a guarded call adds about three network round trips to
+  Agent FinOps over one kept-alive connection: a few milliseconds when your app
+  runs in the same cloud region
+- **Shared policies fail closed by default** — a call is refused when the
+  shared reservation cannot be obtained, unless the organization chose fail-open
 
-An explicitly configured development fail-open path retains only the local
-client safeguards. It does not preserve a cross-process or account-wide budget
-guarantee.
+Fail-open (an organization setting in Agent FinOps) keeps only the local client
+safeguards while Agent FinOps is unreachable. It does not preserve a
+cross-process or account-wide budget guarantee for those calls.
 
 ### Multi-model workflows
 
@@ -188,8 +261,8 @@ with one client per provider would add those caps up. Share one instead:
 from kazenai import SharedBudget, monitor
 
 budget = SharedBudget(max_usd=1.00)
-planner = monitor(OpenAI(), budget=budget)
-writer = monitor(Anthropic(), budget=budget)
+planner = monitor(OpenAI(max_retries=0), budget=budget)
+writer = monitor(Anthropic(max_retries=0), budget=budget)
 ```
 
 In LangChain, bind chat models with `bind_monitored_chat_openai` /
@@ -207,16 +280,22 @@ priced via `KAZENAI_PRICING_JSON`.
 
 ---
 
-## Optional FinOps environment variables
+## FinOps environment variables
 
 | Variable | Purpose |
 |----------|---------|
-| `KAZENAI_FINOPS_INGEST_URL` / `KAZENAI_FINOPS_URL` | FinOps base URL for shared reservations and event ingest |
+| `KAZENAI_FINOPS_URL` (or `KAZENAI_FINOPS_INGEST_URL`) | Agent FinOps base URL. Setting either selects the Control lifecycle |
 | `KAZENAI_FINOPS_API_KEY` | Credential for FinOps budget and event requests |
+| `KAZENAI_TIER_MISMATCH_MULTIPLIER` | Required under Control (finite, at least 1); see above |
+| `KAZENAI_PROFILE` | `legacy` selects the deprecated pre-1.2 path; leave unset |
 | `KAZENAI_DEPLOYMENT_MODE` | `production` / `staging` require fail-closed shared reservations |
 | `KAZENAI_FINOPS_RESERVE_TIMEOUT_S` | Timeout for a shared pre-call reservation |
+| `KAZENAI_FINOPS_KEEPALIVE_S` | Seconds an idle connection to Agent FinOps is kept for reuse (default 15); `0` opens a new connection per request |
 | `KAZENAI_TIMELINE_PATH` | Optional local JSONL evidence path |
 | `KAZENAI_SDK_SETTLE_QUEUE_DIR` | Persistent private directory for pending settlement intents |
+| `KAZENAI_PRICING_LIVE` | `0` turns off the signed live price catalog fetched from FinOps (the bundled snapshot always applies otherwise) |
+| `KAZENAI_PRICING_REFRESH_S` / `KAZENAI_PRICING_CACHE_DIR` | Live catalog refresh interval (default 900 s) and private cache directory |
+| `KAZENAI_ENDPOINT_PRICE_MULTIPLIERS` | Exact-host map (values >= 1) for proxies that bill at list price; other non-first-party hosts are priced at 1.1x |
 
 Pass `max_budget_usd` (or `budget=SharedBudget(...)`), `org_id`, `project_id`,
 `workspace_id` and attribution fields directly to `monitor()`; they are not
@@ -234,7 +313,17 @@ queue directory, but the queue does not coordinate across hosts.
 |---------|------|
 | [`kazenai`](https://pypi.org/project/kazenai/) | Core `monitor()` engine (this repo) |
 | [`kazenai-finops`](https://pypi.org/project/kazenai-finops/) | Customer-facing SDK (recommended install) |
-| [`kazen-event-schema`](https://pypi.org/project/kazen-event-schema/) | Shared event contract across FinOps / Lens / SDKs |
+| [`kazen-event-schema`](https://pypi.org/project/kazen-event-schema/) | Shared event contract between the SDKs and Agent FinOps |
+
+---
+
+## Documentation
+
+- [docs.kazenai.com](https://docs.kazenai.com/): guides and reference
+- [Supported integrations](https://github.com/kazenai-ai/kazenai-core/blob/main/docs/integrations/control-supported-matrix.md): every provider and framework path and how it is verified
+- [Price catalog](https://github.com/kazenai-ai/kazenai-core/blob/main/docs/PRICE_CATALOG.md): rates, pricing rules and their source pages
+- [Settlement recovery](https://github.com/kazenai-ai/kazenai-core/blob/main/docs/settlement-recovery.md): running the settlement flusher in production
+- [Changelog](https://github.com/kazenai-ai/kazenai-core/blob/main/CHANGELOG.md)
 
 ---
 
@@ -242,11 +331,8 @@ queue directory, but the queue does not coordinate across hosts.
 
 Issues and pull requests that improve budget and loop reliability are welcome —
 see [CONTRIBUTING.md](https://github.com/kazenai-ai/kazenai-core/blob/main/CONTRIBUTING.md).
-Maintainers release with [RELEASING.md](https://github.com/kazenai-ai/kazenai-core/blob/main/RELEASING.md).
 
 Products and design-partner enquiries: [kazenai.com](https://kazenai.com) · **founder@kazenai.com**
-
----
 
 ## License
 

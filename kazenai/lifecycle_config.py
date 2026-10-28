@@ -23,6 +23,8 @@ _PROFILE_ENV_KEYS: tuple[str, ...] = (
 )
 _STRICT_ENV_KEY = "KAZENAI_FINOPS_STRICT_BUDGET"
 _MIGRATION_ALLOW_AMBIGUOUS = "KAZENAI_LIFECYCLE_MIGRATION_ALLOW_AMBIGUOUS"
+# Same order the guard uses for its reserve endpoint (spine/guard.py _finops_url).
+_FINOPS_URL_KEYS = ("KAZENAI_FINOPS_URL", "KAZENAI_FINOPS_INGEST_URL")
 
 _CONTROL_ENABLE = frozenset({"1", "true", "yes", "control"})
 _CONTROL_DISABLE = frozenset({"0", "false", "no", "off", "legacy", "disabled"})
@@ -158,6 +160,14 @@ def resolve_effective_lifecycle(
     ``allow_ambiguous=True``).
     """
     env = _env_map(environ)
+    # 0.11: one deployment mode. Conflicting signals surface here, at monitor()
+    # or the first Control call, never at import.
+    from kazenai.deployment import PRODUCTION_LIKE_MODES, DeploymentModeConflict, resolve_deployment_mode
+
+    try:
+        resolved_mode = resolve_deployment_mode(env, strict=True)
+    except DeploymentModeConflict as exc:
+        raise LifecycleConfigError(f"deployment_mode_conflict: {exc}", category="conflict") from exc
     if allow_ambiguous is None:
         allow_ambiguous = _norm(env.get(_MIGRATION_ALLOW_AMBIGUOUS)) in {
             "1",
@@ -205,9 +215,15 @@ def resolve_effective_lifecycle(
             category="conflict",
         )
 
-    # Winning profile: first in precedence that is set.
-    profile = "legacy"
-    source = "unset"
+    # Winning profile: first in precedence that is set.  In 1.2, configuring
+    # the shared FinOps authority selects the transactional Control lifecycle
+    # by default.  Legacy remains available only through an explicit profile.
+    finops_url_key = next((key for key in _FINOPS_URL_KEYS if (env.get(key) or "").strip()), None)
+    finops_configured = finops_url_key is not None
+    profile = "control" if finops_configured else "legacy"
+    source = "default_finops_configured" if finops_configured else "unset"
+    if finops_url_key is not None:
+        sources[finops_url_key] = "configured"
     for key in _PROFILE_ENV_KEYS:
         raw = sources.get(key)
         if not raw:
@@ -215,6 +231,11 @@ def resolve_effective_lifecycle(
         profile = _classify_profile_token(raw) or "legacy"
         source = key
         break
+
+    if profile == "legacy" and classified:
+        deprecations.append(
+            "explicit legacy lifecycle is deprecated and will be removed in KazenAI 2.0"
+        )
 
     if profile == "control":
         accounting_mode = "reservation_settlement"
@@ -252,8 +273,12 @@ def resolve_effective_lifecycle(
                 source = _STRICT_ENV_KEY
         else:
             # Unset / explicit false → fail_open for legacy unless production forces closed.
-            mode = _norm(deployment_mode or env.get("KAZENAI_DEPLOYMENT_MODE") or env.get("KAZENAI_ENV"))
-            if mode in {"saas", "production", "prod", "staging"} and strict_enabled is not False:
+            mode = (
+                resolve_deployment_mode({"KAZENAI_DEPLOYMENT_MODE": deployment_mode})
+                if deployment_mode
+                else resolved_mode
+            )
+            if mode in PRODUCTION_LIKE_MODES and strict_enabled is not False:
                 failure_policy = "fail_closed"
                 diagnostics.append(
                     "production_default: legacy profile uses fail_closed in production-like modes"
@@ -267,6 +292,15 @@ def resolve_effective_lifecycle(
             failure_policy = enf
         elif res in {"fail_open", "fail_closed"}:
             failure_policy = res
+
+    # The snapshot is what the runtime executes. fail_open takes effect only
+    # under explicit local dev (KAZENAI_ENV=dev); everywhere else the runtime
+    # fails closed, so report fail_closed.
+    if failure_policy == "fail_open" and _norm(env.get("KAZENAI_ENV")) != "dev":
+        failure_policy = "fail_closed"
+        diagnostics.append(
+            "fail_open_ignored: fail_open applies only with KAZENAI_ENV=dev; effective policy is fail_closed"
+        )
 
     owner = (accounting_owner or "sdk").strip().lower() or "sdk"
     # Accept gateway as an alias for server (gateway-owned Control).

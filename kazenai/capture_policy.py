@@ -23,7 +23,7 @@ from typing import Any, Dict, Mapping, Optional, Union
 
 _log = logging.getLogger("kazenai.capture_policy")
 
-# Canary-friendly + common provider secret shapes (aligned with AgentLens store).
+# Canary-friendly + common provider secret shapes (aligned with the run-receipts store).
 _SECRET_KEY_RE = re.compile(
     r"(?i)(api[_-]?key|authorization|bearer|token|secret|password|aws_access_key_id|aws_secret_access_key)"
 )

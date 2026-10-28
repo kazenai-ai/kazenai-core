@@ -387,6 +387,7 @@ def test_u10_real_guard_admission_settlement_spans_and_traceparent(monkeypatch):
                         "call_id": req.get("call_id") or "call-1",
                         "attempt": req.get("attempt") or 1,
                         "reserved_usd_micros": req.get("estimated_usd_micros") or 1000,
+                        "settlement_capability": "kzcap1.test." + "A" * 43,
                     }
                 ).encode()
             else:

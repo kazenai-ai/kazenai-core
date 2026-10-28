@@ -1,0 +1,26 @@
+{
+  "fixture_id": "client_supplied_privileged_headers_stripped",
+  "expect": "reject",
+  "reject_reason": "client must not set privileged identity headers",
+  "principal": {
+    "identity_kind": "human",
+    "subject_id": "user-alice",
+    "actor_id": "user-alice",
+    "org_id": "org-a",
+    "workspace_id": "ws-a",
+    "role": "developer",
+    "auth_type": "supabase",
+    "authorized_org_ids": ["org-a"],
+    "delegation": { "kind": "none" }
+  },
+  "request": {
+    "headers": {
+      "X-Kazen-Act-As-Org": "org-b",
+      "X-Kazen-User-Scope": "user-victim"
+    },
+    "ingress": "browser_client",
+    "body_org_id": "org-a",
+    "body_workspace_id": "ws-a"
+  },
+  "privileged_headers_present": ["X-Kazen-Act-As-Org", "X-Kazen-User-Scope"]
+}

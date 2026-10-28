@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import uuid
@@ -332,6 +333,14 @@ async def test_langchain_gateway_async_streaming(control_env, monkeypatch):
     )
 
 
+# Real LiteLLM proxy cells are opt-in: see test_litellm_proxy_integration.py.
+_LITELLM_PROXY_OPT_IN = pytest.mark.skipif(
+    os.getenv("KAZENAI_LITELLM_PROXY_TESTS") != "1",
+    reason="LiteLLM proxy tests are opt-in (KAZENAI_LITELLM_PROXY_TESTS=1)",
+)
+
+
+@_LITELLM_PROXY_OPT_IN
 @pytest.mark.asyncio
 async def test_langchain_live_litellm_proxy_async_streaming(control_env, monkeypatch):
     """LangChain Runnable astream → real LiteLLM proxy → fake upstream SSE."""
@@ -586,6 +595,7 @@ def test_langgraph_sqlite_interrupt_restart_resume(control_env, tmp_path):
     _record("langgraph_sqlite_interrupt_resume", "pass", f"hits={len(hits)} op={op_id}")
 
 
+@_LITELLM_PROXY_OPT_IN
 @pytest.mark.asyncio
 async def test_langchain_live_litellm_proxy_async_non_streaming(control_env, monkeypatch):
     """LangChain Runnable ainvoke → real LiteLLM proxy (live helpers)."""

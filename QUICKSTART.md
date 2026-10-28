@@ -6,13 +6,13 @@ product integrations should install the customer-facing package, which
 re-exports the Core API:
 
 ```bash
-python -m pip install "kazenai-finops[openai]==1.1.3"
+python -m pip install "kazenai-finops[openai]==1.2.0"
 ```
 
 Install Core directly when you specifically want the runtime package:
 
 ```bash
-python -m pip install "kazenai[openai]==1.1.3"
+python -m pip install "kazenai[openai]==1.2.0"
 ```
 
 Python 3.10, 3.11 and 3.12 are supported.
@@ -24,7 +24,7 @@ from openai import OpenAI
 from kazenai import BudgetExceeded, monitor
 
 client = monitor(
-    OpenAI(),
+    OpenAI(max_retries=0),
     agent_id="support-agent",
     org_id="acme",
     max_budget_usd=5.00,
@@ -49,8 +49,8 @@ Anthropic step), give them one shared cap instead:
 from kazenai import SharedBudget
 
 budget = SharedBudget(max_usd=1.00)
-openai_client = monitor(OpenAI(), budget=budget)
-anthropic_client = monitor(Anthropic(), budget=budget)
+openai_client = monitor(OpenAI(max_retries=0), budget=budget)
+anthropic_client = monitor(Anthropic(max_retries=0), budget=budget)
 ```
 
 A model with no known price is blocked before dispatch (`UnknownModelError`);
@@ -62,14 +62,31 @@ sharing a budget, use the shared FinOps authority described below.
 ```bash
 export KAZENAI_FINOPS_URL="https://finops.example.com"
 export KAZENAI_FINOPS_API_KEY="kz_..."
+export KAZENAI_TIER_MISMATCH_MULTIPLIER="2"
 export KAZENAI_DEPLOYMENT_MODE="production"
 ```
 
-The same `monitor(...)` call now reserves the estimated cost before dispatch
-and reconciles authoritative usage afterward. Production and staging modes fail
-closed when a required shared reservation cannot be obtained. Explicit
-development fail-open behavior retains only the local client safeguards; it
-does not preserve the shared budget guarantee.
+Setting the FinOps URL selects the Control lifecycle (the default since 1.2.0).
+The same `monitor(...)` call now reserves the estimated cost in Agent FinOps
+before dispatch and settles authoritative usage afterward. A refused
+reservation raises `BudgetExceeded`; the provider is never called. If Agent
+FinOps cannot be reached the call is refused, except under explicit local
+development (`KAZENAI_ENV=dev` with `KAZENAI_ENFORCEMENT_MODE=fail_open`), which
+keeps only the local client safeguards.
+
+`monitor()` refuses to start under Control unless:
+
+- `KAZENAI_TIER_MISMATCH_MULTIPLIER` is a finite number of at least 1
+  (`PricingConfigError` otherwise). It is how much of the requested-tier price
+  KazenAI holds against the limit when a provider bills a call at a service
+  tier KazenAI has no certified price for; such calls wait for reconciliation.
+- the provider client is built with `max_retries=0` (`UnsupportedModeError`
+  otherwise), so each retry is reserved as its own billable attempt.
+
+An admin can pause an organization in Agent FinOps. While it is paused, new
+reservations are refused with `BudgetExceeded`; calls already admitted still
+settle. `KAZENAI_PROFILE=legacy` selects the deprecated pre-1.2 path, which
+hosted Agent FinOps refuses.
 
 ## 3. Stream with finalization-safe accounting
 
@@ -80,7 +97,7 @@ from openai import OpenAI
 from kazenai import StreamCutoffError, monitor
 
 client = monitor(
-    OpenAI(),
+    OpenAI(max_retries=0),
     max_budget_usd=1.00,
     stream_cutoff_usd=0.05,  # optional observable-output guard
 )
@@ -118,7 +135,7 @@ Anthropic's synchronous manager follows the same accounting lifecycle:
 from anthropic import Anthropic
 from kazenai import monitor
 
-client = monitor(Anthropic(), max_budget_usd=1.00)
+client = monitor(Anthropic(max_retries=0), max_budget_usd=1.00)
 
 with client.messages.stream(
     model="claude-sonnet-4-5",
@@ -179,10 +196,12 @@ provider APIs. Full details:
 | LangChain | `ChatOpenAI` via `bind_monitored_chat_openai`, `ChatAnthropic` via `bind_monitored_chat_anthropic`; multi-provider chains via `declare_langchain_control_boundary(runnable, *clients)` |
 | LangGraph | Supported with an explicit declared boundary listing every provider client the nodes use; raw clients inside arbitrary nodes are not intercepted |
 | Anthropic beta Messages (`client.beta.messages`) | Not supported; raises `UnsupportedModeError` on a monitored client |
-| OpenAI Responses API, including streaming | Not supported |
-| OpenAI Realtime/WebSocket | Not supported |
+| OpenAI `responses.create`, `.parse` and `.stream`, sync and async | Supported, non-streaming and `stream=True`, function tools (new in 1.2.0, verified against the live API) |
+| OpenAI Responses `background=True`, `previous_response_id` / `conversation` / stored `prompt`, built-in tools | Not supported; raises `UnsupportedModeError` before dispatch |
+| OpenAI Realtime/WebSocket, legacy `completions`, Responses `compact` / `connect`, embeddings, images, audio, batches, fine-tuning | Not supported; raises `UnsupportedModeError` on a monitored client (`allow_unmetered=("/embeddings",)` sends named endpoints without a budget check) |
+| A provider method or `with_raw_response` wrapper saved before `monitor()` | Raises `UnsupportedModeError`; read methods from the client after wrapping |
 | Bedrock/Vertex Anthropic wrappers | Not supported |
-| CrewAI | Preview (`bind_crew_llm_client`); not yet a supported path |
+| CrewAI 1.15.26 | `wrap_crew(...)` kickoff / `akickoff` / `kickoff_async` with every LLM bound by `bind_crew_llm_client` (two providers: `guarded_clients=[...]`); memory, knowledge, `Crew(stream=True)`, `llm_overlay` and Anthropic structured output are not supported. Cancelling `akickoff` stops the crew; cancelling `kickoff_async` does not (its thread finishes and is charged) |
 | AutoGen | Not supported |
 
 ## Next references
