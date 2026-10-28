@@ -13,7 +13,7 @@ version.
 
 - Set the version in `pyproject.toml` and `kazenai/__init__.py`, and update the
   install commands in the README and guides.
-- Add `RELEASE_NOTES_X.Y.Z.md`.
+- Add a section at the top of `CHANGELOG.md` headed `## X.Y.Z - YYYY-MM-DD` (the release date).
 - Make sure the commit contains no secrets, credentials, customer data, local
   environments or generated files.
 - Push the commit to `main`.
@@ -46,7 +46,10 @@ PyPI Trusted Publishing.
 ```bash
 git tag -a vX.Y.Z -m "kazenai X.Y.Z"
 git push origin vX.Y.Z
-gh release create vX.Y.Z --title "kazenai X.Y.Z" --notes-file RELEASE_NOTES_X.Y.Z.md --verify-tag
+# The Release body is this version's CHANGELOG.md section plus a docs and support line.
+awk '/^## /{p=0} /^## X.Y.Z /{p=1; next} p' CHANGELOG.md > /tmp/notes-X.Y.Z.md
+printf '\nDocs: https://docs.kazenai.com/ · Support: open an issue at https://github.com/kazenai-ai/kazenai-core/issues\n' >> /tmp/notes-X.Y.Z.md
+gh release create vX.Y.Z --title "kazenai X.Y.Z" --notes-file /tmp/notes-X.Y.Z.md --verify-tag
 ```
 
 ## 4. Verify from PyPI
