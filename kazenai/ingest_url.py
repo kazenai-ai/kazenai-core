@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Tuple
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 
 def normalize_ingest_base_url(url: str) -> str:
@@ -36,7 +36,9 @@ def ingest_post_url(base_or_full: str) -> str:
 def split_ingest_url(url: str) -> Tuple[str, str]:
     """Return ``(base, post_url)`` for HttpSinkConfig.ingest_url + post helper."""
     base = normalize_ingest_base_url(url)
-    return base, ingest_post_url(base) if base else ("", "")
+    if not base:
+        return "", ""
+    return base, ingest_post_url(base)
 
 
 def is_loopback_or_private_host(url: str) -> bool:

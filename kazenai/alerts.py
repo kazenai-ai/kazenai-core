@@ -5,6 +5,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from . import outbound_http
+
 
 @dataclass(frozen=True)
 class WebhookAlert:
@@ -31,7 +33,8 @@ class AlertDispatcher:
                     **({"Authorization": f"Bearer {self._webhook.bearer_token}"} if self._webhook.bearer_token else {}),
                 },
             )
-            with urllib.request.urlopen(req, timeout=float(self._webhook.timeout_s)) as resp:
+            # No redirects: the bearer token goes only to the configured webhook.
+            with outbound_http.urlopen(req, timeout=float(self._webhook.timeout_s)) as resp:
                 _ = resp.read(1)
         except Exception:
             return

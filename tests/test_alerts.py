@@ -13,7 +13,7 @@ def test_notify_no_webhook_is_noop():
 
 def test_notify_posts_webhook():
     dispatcher = AlertDispatcher(webhook=WebhookAlert(url="http://127.0.0.1:9/hook", bearer_token="tok"))
-    with patch("urllib.request.urlopen") as urlopen:
+    with patch("kazenai.outbound_http.urlopen") as urlopen:
         resp = MagicMock()
         resp.read.return_value = b"ok"
         urlopen.return_value.__enter__.return_value = resp
@@ -23,5 +23,5 @@ def test_notify_posts_webhook():
 
 def test_notify_swallows_webhook_errors():
     dispatcher = AlertDispatcher(webhook=WebhookAlert(url="http://127.0.0.1:9/hook"))
-    with patch("urllib.request.urlopen", side_effect=OSError("down")):
+    with patch("kazenai.outbound_http.urlopen", side_effect=OSError("down")):
         dispatcher.notify(kind="finops.loop.anomaly", payload={"run_id": "r1"})
