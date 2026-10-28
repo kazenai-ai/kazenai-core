@@ -1,4 +1,4 @@
-__version__ = "1.1.3"
+__version__ = "1.2.0"
 
 # Prefer the installed distribution version. Fallback is only for editable /
 # source checkouts where package metadata is unavailable.
@@ -7,7 +7,7 @@ try:
 
     __version__ = _pkg_version("kazenai")
 except PackageNotFoundError:  # pragma: no cover - source-tree only
-    __version__ = "1.1.3"
+    __version__ = "1.2.0"
 
 from .context import BackgroundTaskContext, RunContext, get_current_context, use_context
 from .attribution import (
@@ -59,7 +59,6 @@ from .finops import FinOpsController, FinOpsConfig
 from .schema import KazenEvent
 from .degraded import clear_degraded, degraded_header_value, degraded_services, mark_degraded
 from .deployment import canonical_default_org, require_canonical_default_org
-from .memory import KazenMemory
 from .validation import (
     InjectionAttemptDetected,
     PromptInjectionDetector,
@@ -69,18 +68,6 @@ from .validation import (
     enforce_json_bounds,
     get_detector,
     scan_and_raise_or_http,
-)
-from .reliability_policy import (
-    AutonomyTier,
-    FailureKind,
-    ReliabilityAction,
-    ReliabilityContext,
-    ReliabilityDecision,
-    ReliabilitySurface,
-    parse_autonomy_tier_from_headers,
-    resolve as resolve_reliability,
-    should_block,
-    should_escalate,
 )
 from .lifecycle_config import (
     ClientServerLifecycleMismatch,
@@ -95,21 +82,10 @@ from .lifecycle_config import (
 
 __all__ = [
     "SharedBudget",
-    "KazenMemory",
     "clear_degraded",
     "degraded_header_value",
     "degraded_services",
     "mark_degraded",
-    "AutonomyTier",
-    "FailureKind",
-    "ReliabilityAction",
-    "ReliabilityContext",
-    "ReliabilityDecision",
-    "ReliabilitySurface",
-    "parse_autonomy_tier_from_headers",
-    "resolve_reliability",
-    "should_block",
-    "should_escalate",
     "aguarded_llm_call",
     "BudgetExceeded",
     "BudgetUnavailable",
