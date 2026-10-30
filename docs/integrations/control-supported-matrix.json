@@ -809,16 +809,16 @@
     ]
   },
   "updated_at": "2026-10-14",
-  "update_note": "kazenai 1.2.0 / kazenai-finops 1.2.0 / kazen-event-schema 0.6.6 (not yet released: PyPI has 1.1.3 / 0.6.5). Configuring Agent FinOps selects the Control lifecycle by default (reserve before dispatch, settle after, fail closed); the legacy check/reconcile path is opt-in, deprecated, and refused by hosted Agent FinOps. Control requires KAZENAI_TIER_MISMATCH_MULTIPLIER and provider clients with max_retries=0. OpenAI Responses API create/parse/stream, live-verified 2026-10-13 (gpt-6-luna, gpt-6.1-sol). CrewAI 1.15.26 certified (live-verified 2026-10-13). Security: every release from 1.0.1 to 1.1.3 lets some OpenAI calls on a monitored client skip the budget check (responses.parse, cached with_raw_response wrappers, legacy completions, Realtime, methods saved before monitor()); 1.2.0 guards or refuses them and refuses paid requests that skip the guarded methods (embeddings, images, batches...) unless allow_unmetered names them. Earlier evidence (kazenai 1.1.2, 2026-10-12): OpenAI Chat Completions and Anthropic Messages (sync/async, streaming/non-streaming), LangChain, LangGraph, checkpoint resume, LiteLLM application- and gateway-owned accounting, multi-model workflow budgets, provider-rejection release and ordinary API keys are live-verified.",
+  "update_note": "kazenai 1.2.0 / kazenai-finops 1.2.0 / kazen-event-schema 0.6.6 (on PyPI since 2026-10-28). Configuring Agent FinOps selects the Control lifecycle by default (reserve before dispatch, settle after, fail closed); the legacy check/reconcile path is opt-in, deprecated, and refused by hosted Agent FinOps. Control requires KAZENAI_TIER_MISMATCH_MULTIPLIER and provider clients with max_retries=0. OpenAI Responses API create/parse/stream, live-verified 2026-10-13 (gpt-6-luna, gpt-6.1-sol). CrewAI 1.15.26 certified (live-verified 2026-10-13). Security: every release from 1.0.1 to 1.1.3 lets some OpenAI calls on a monitored client skip the budget check (responses.parse, cached with_raw_response wrappers, legacy completions, Realtime, methods saved before monitor()); 1.2.0 guards or refuses them and refuses paid requests that skip the guarded methods (embeddings, images, batches...) unless allow_unmetered names them. Earlier evidence (kazenai 1.1.2, 2026-10-12): OpenAI Chat Completions and Anthropic Messages (sync/async, streaming/non-streaming), LangChain, LangGraph, checkpoint resume, LiteLLM application- and gateway-owned accounting, multi-model workflow budgets, provider-rejection release and ordinary API keys are live-verified.",
   "release": {
     "kazenai": "1.2.0",
     "kazenai-finops": "1.2.0",
     "kazen-event-schema": "0.6.6",
-    "state": "unreleased",
+    "state": "published",
     "pypi_current": {
-      "kazenai": "1.1.3",
-      "kazenai-finops": "1.1.3",
-      "kazen-event-schema": "0.6.5"
+      "kazenai": "1.2.0",
+      "kazenai-finops": "1.2.0",
+      "kazen-event-schema": "0.6.6"
     },
     "note": "Set state to 'published' only after the packages are on PyPI; tests refuse 'on PyPI' wording before that."
   }
