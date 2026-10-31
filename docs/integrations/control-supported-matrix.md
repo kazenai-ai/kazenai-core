@@ -6,8 +6,7 @@ integration was verified, and the known limits. The machine-readable version is
 by the test suite, so the two stay in step.
 
 Packages: `kazenai` 1.2.0, `kazenai-finops` 1.2.0 and `kazen-event-schema` 0.6.6,
-**not yet released**. PyPI currently has `kazenai` 1.1.3, `kazenai-finops` 1.1.3
-and `kazen-event-schema` 0.6.5. Hosted Agent FinOps (limits and run receipts)
+on PyPI since 2026-10-28. Hosted Agent FinOps (limits and run receipts)
 requires `kazenai>=1.2.0`: it refuses the legacy check path that earlier releases
 use, so they fail closed against it.
 
