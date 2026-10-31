@@ -1,12 +1,12 @@
 # Supported integrations
 
-This page lists what KazenAI Control supports in `kazenai` 1.2.0, how each
+This page lists what KazenAI Control supports in `kazenai` 1.2.1, how each
 integration was verified, and the known limits. The machine-readable version is
 [`control-supported-matrix.json`](./control-supported-matrix.json); it is checked
 by the test suite, so the two stay in step.
 
-Packages: `kazenai` 1.2.0, `kazenai-finops` 1.2.0 and `kazen-event-schema` 0.6.6,
-on PyPI since 2026-10-28. Hosted Agent FinOps (limits and run receipts)
+Packages: `kazenai` 1.2.1, `kazenai-finops` 1.2.1 and `kazen-event-schema` 0.6.6,
+on PyPI since 2026-10-31 (1.2.0 since 2026-10-28). Hosted Agent FinOps (limits and run receipts)
 requires `kazenai>=1.2.0`: it refuses the legacy check path that earlier releases
 use, so they fail closed against it.
 
@@ -47,7 +47,7 @@ use, so they fail closed against it.
 | Multi-model workflow budget | live-verified | Steps on different models and providers share one budget: across processes through Agent FinOps (a `workflow_id` limit), or in one process with `SharedBudget`. The next step is refused before dispatch when the budget runs out. Without either, each `monitor()` client keeps its own independent budget |
 | Shared reserve/settle with Agent FinOps (PostgreSQL) | integration-verified | Explicit reservation lifecycle; crash and replay of a settlement is tested |
 | Provider rejection release | live-verified | A provider HTTP 4xx (except 408/409/499) settles at $0 and releases the hold; timeouts and 5xx stay pending for reconciliation |
-| Customer ID required (`monitor(..., require_customer_id=True)`) | fixture-verified | New in `kazenai` 1.2.1 (not yet released). A call that names no customer ID raises `CustomerIdRequired` before it reserves or reaches the provider, including a call made in a `ThreadPoolExecutor` worker, which does not inherit the caller's ID. Off by default |
+| Customer ID required (`monitor(..., require_customer_id=True)`) | fixture-verified | New in `kazenai` 1.2.1. A call that names no customer ID raises `CustomerIdRequired` before it reserves or reaches the provider, including a call made in a `ThreadPoolExecutor` worker, which does not inherit the caller's ID. Off by default |
 | Ordinary API keys with the SDK | live-verified | Keys created the normal way in Agent FinOps work with `monitor()` for their own organization |
 | Event ingest | fixture-verified | `kazen-event-schema` wire versions 1.0–1.2, field aliases and conflict checks |
 
