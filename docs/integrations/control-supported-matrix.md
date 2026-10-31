@@ -48,6 +48,7 @@ use, so they fail closed against it.
 | Multi-model workflow budget | live-verified | Steps on different models and providers share one budget: across processes through Agent FinOps (a `workflow_id` limit), or in one process with `SharedBudget`. The next step is refused before dispatch when the budget runs out. Without either, each `monitor()` client keeps its own independent budget |
 | Shared reserve/settle with Agent FinOps (PostgreSQL) | integration-verified | Explicit reservation lifecycle; crash and replay of a settlement is tested |
 | Provider rejection release | live-verified | A provider HTTP 4xx (except 408/409/499) settles at $0 and releases the hold; timeouts and 5xx stay pending for reconciliation |
+| Customer ID required (`monitor(..., require_customer_id=True)`) | fixture-verified | New in `kazenai` 1.2.1 (not yet released). A call that names no customer ID raises `CustomerIdRequired` before it reserves or reaches the provider, including a call made in a `ThreadPoolExecutor` worker, which does not inherit the caller's ID. Off by default |
 | Ordinary API keys with the SDK | live-verified | Keys created the normal way in Agent FinOps work with `monitor()` for their own organization |
 | Event ingest | fixture-verified | `kazen-event-schema` wire versions 1.0–1.2, field aliases and conflict checks |
 

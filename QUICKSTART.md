@@ -6,13 +6,13 @@ product integrations should install the customer-facing package, which
 re-exports the Core API:
 
 ```bash
-python -m pip install "kazenai-finops[openai]==1.2.0"
+python -m pip install "kazenai-finops[openai]==1.2.1"
 ```
 
 Install Core directly when you specifically want the runtime package:
 
 ```bash
-python -m pip install "kazenai[openai]==1.2.0"
+python -m pip install "kazenai[openai]==1.2.1"
 ```
 
 Python 3.10, 3.11 and 3.12 are supported.
@@ -66,8 +66,60 @@ export KAZENAI_TIER_MISMATCH_MULTIPLIER="2"
 export KAZENAI_DEPLOYMENT_MODE="production"
 ```
 
+```python
+client = monitor(
+    OpenAI(max_retries=0),
+    agent_id="support-agent",
+    org_id="<organization ID>",      # both IDs are on the Setup page in Agent FinOps
+    workspace_id="<workspace ID>",
+    max_budget_usd=5.00,
+)
+```
+
+An Agent FinOps API key belongs to one organization and one workspace, and
+`monitor()` must name the same two. It does not read them from the key or from
+`KAZENAI_ORG_ID`. Without them it uses `local` and `default`, Agent FinOps
+refuses each reservation with HTTP 403, and the call raises `BudgetUnavailable`.
+`guarded_llm_call()` (section 4) takes the same `org_id` and `workspace_id`.
+
+Name the customer on each call. A per-customer limit in Agent FinOps (dimension
+`business_subject`) applies only to calls that carry that customer's ID as
+`business_subject_ref`:
+
+```python
+from kazenai import use_attribution
+
+with use_attribution(business_subject_ref="cust_123"):
+    client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Summarize this ticket"}],
+    )
+```
+
+Use the same ID the limit was set for. When a client only ever serves one
+customer, `monitor(..., business_subject_ref="cust_123")` names that customer on
+every call instead. If both name a customer and the IDs differ, the call raises
+`AttributionConflict` before it reaches the provider. A call without a customer
+ID is checked against the organization and workspace limits only; no
+per-customer limit applies to it. The ID is held in a context variable: calls in
+the same thread, and in asyncio tasks started inside the `with` block, carry it.
+A thread started inside the block, such as a `ThreadPoolExecutor` worker, does not.
+To carry the ID into a worker, submit the work in a copy of the current context:
+
+```python
+import contextvars
+
+with use_attribution(business_subject_ref="cust_123"):
+    pool.submit(contextvars.copy_context().run, handle_ticket, ticket)
+```
+
+To make a call without a customer ID fail instead of skipping the customer's
+limit, pass `require_customer_id=True` to `monitor()` (kazenai 1.2.1 and later).
+Such a call then raises `CustomerIdRequired` before it reserves budget or reaches
+the provider.
+
 Setting the FinOps URL selects the Control lifecycle (the default since 1.2.0).
-The same `monitor(...)` call now reserves the estimated cost in Agent FinOps
+The `monitor(...)` call now reserves the estimated cost in Agent FinOps
 before dispatch and settles authoritative usage afterward. A refused
 reservation raises `BudgetExceeded`; the provider is never called. If Agent
 FinOps cannot be reached the call is refused, except under explicit local

@@ -22,6 +22,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from ..spine import transport as _transport
+from ..spine.guard import _denial_reason
 
 
 LIFECYCLE_VERSION = "reservation.lifecycle.v1"
@@ -500,7 +501,7 @@ class GatewayFinOpsClient:
         }
         status, payload = self._post("/v1/budget/reserve", body)
         if status == 402 or payload.get("allowed") is False:
-            reason = payload.get("reason") or payload.get("error_code") or "budget exhausted"
+            reason = _denial_reason(payload, "reason", "error_code")
             raise GatewayAdmissionDenied(f"gateway admission denied: {reason}", code="budget_denied", http_status=402)
         if status >= 400 or not payload.get("reservation_id"):
             reason = payload.get("reason") or payload.get("error_code") or f"HTTP {status}"

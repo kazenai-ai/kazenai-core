@@ -105,9 +105,10 @@ def patch_openai_async(
     certified_surface: bool = True,
     allow_unmetered: Sequence[str] = (),
     observe_unbounded: Sequence[str] = (),
+    require_customer_id: bool = False,
 ) -> Callable[[], None]:
     m = _monitor_mod()
-    from .attribution import use_attribution
+    from .attribution import assert_customer_id, use_attribution
     from .capture_policy import build_content_ref, capture_disclosure
     from .debug import DebugPrinter
     from .enforcement_owner import claim_configured_enforcement_owner as claim_enforcement_owner
@@ -157,6 +158,7 @@ def patch_openai_async(
                 stack.enter_context(use_context(step_ctx))
                 stack.enter_context(claim_enforcement_owner())
                 stack.enter_context(use_attribution(**attr_defaults))
+                assert_customer_id(require_customer_id)
                 payload = m._extract_openai_input(args, kwargs)
                 tool_names = m._extract_tool_names(kwargs)
                 loop_scores: Optional[LoopScores] = None
@@ -569,6 +571,7 @@ def patch_openai_async(
                     stack.enter_context(use_context(step_ctx))
                     stack.enter_context(claim_enforcement_owner())
                     stack.enter_context(use_attribution(**attr_defaults))
+                    assert_customer_id(require_customer_id)
                     held_projection, reserved_cost_usd = await m._reserve_with_local_hold_async(
                         enforcement=enforcement,
                         projected_cost_usd=projected,
@@ -710,9 +713,10 @@ def patch_anthropic_async(
     certified_surface: bool = True,
     allow_unmetered: Sequence[str] = (),
     observe_unbounded: Sequence[str] = (),
+    require_customer_id: bool = False,
 ) -> Callable[[], None]:
     m = _monitor_mod()
-    from .attribution import use_attribution
+    from .attribution import assert_customer_id, use_attribution
     from .capture_policy import build_content_ref, capture_disclosure
     from .debug import DebugPrinter
     from .enforcement_owner import claim_configured_enforcement_owner as claim_enforcement_owner
@@ -754,6 +758,7 @@ def patch_anthropic_async(
                 stack.enter_context(use_context(step_ctx))
                 stack.enter_context(claim_enforcement_owner())
                 stack.enter_context(use_attribution(**attr_defaults))
+                assert_customer_id(require_customer_id)
                 payload = m._extract_openai_input(args, kwargs)
                 m._reject_streaming_if_unsupported(kwargs)
                 m._apply_output_token_bound(kwargs)
@@ -1098,6 +1103,7 @@ def patch_anthropic_async(
                         stack.enter_context(use_context(step_ctx))
                         stack.enter_context(claim_enforcement_owner())
                         stack.enter_context(use_attribution(**attr_defaults))
+                        assert_customer_id(require_customer_id)
                         held_projection, reserved_cost_usd = await m._reserve_with_local_hold_async(
                             enforcement=enforcement,
                             projected_cost_usd=projected,

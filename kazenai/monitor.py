@@ -1401,6 +1401,7 @@ def patch_openai(
     attempt_id: Optional[str] = None,
     allow_unmetered: Sequence[str] = (),
     observe_unbounded: Sequence[str] = (),
+    require_customer_id: bool = False,
 ) -> Callable[[], None]:
     """
     Monkey-patch an OpenAI-style client to enforce budgets/loops *before* each LLM call.
@@ -1421,7 +1422,7 @@ def patch_openai(
     loop_detector = loop_detector or LoopDetector()
     dbg = DebugPrinter(enabled=debug)
 
-    from .attribution import use_attribution
+    from .attribution import assert_customer_id, use_attribution
     from .enforcement_owner import claim_configured_enforcement_owner as claim_enforcement_owner
 
     attr_defaults = dict(
@@ -1470,6 +1471,7 @@ def patch_openai(
                 stack.enter_context(use_context(step_ctx))
                 stack.enter_context(claim_enforcement_owner())
                 stack.enter_context(use_attribution(**attr_defaults))
+                assert_customer_id(require_customer_id)
                 payload = _extract_openai_input(args, kwargs)
                 tool_names = _extract_tool_names(kwargs)
 
@@ -1902,6 +1904,7 @@ def patch_openai(
                     stack.enter_context(use_context(step_ctx))
                     stack.enter_context(claim_enforcement_owner())
                     stack.enter_context(use_attribution(**attr_defaults))
+                    assert_customer_id(require_customer_id)
                     held_projection, reserved_cost_usd = _reserve_with_local_hold(
                         enforcement=enforcement,
                         projected_cost_usd=projected,
@@ -2056,6 +2059,7 @@ def patch_anthropic(
     attempt_id: Optional[str] = None,
     allow_unmetered: Sequence[str] = (),
     observe_unbounded: Sequence[str] = (),
+    require_customer_id: bool = False,
 ) -> Callable[[], None]:
     """
     Monkey-patch an Anthropic client to emit KazenEvents on every messages.create call.
@@ -2072,7 +2076,7 @@ def patch_anthropic(
     enforcement = enforcement or Enforcement()
     loop_detector = loop_detector or LoopDetector()
 
-    from .attribution import use_attribution
+    from .attribution import assert_customer_id, use_attribution
     from .enforcement_owner import claim_configured_enforcement_owner as claim_enforcement_owner
 
     attr_defaults = dict(
@@ -2113,6 +2117,7 @@ def patch_anthropic(
                 stack.enter_context(use_context(step_ctx))
                 stack.enter_context(claim_enforcement_owner())
                 stack.enter_context(use_attribution(**attr_defaults))
+                assert_customer_id(require_customer_id)
                 payload = _extract_openai_input(args, kwargs)  # same shape works for Anthropic
                 tool_names = _extract_tool_names(kwargs)
 
@@ -2480,6 +2485,7 @@ def patch_anthropic(
                             stack.enter_context(use_context(step_ctx))
                             stack.enter_context(claim_enforcement_owner())
                             stack.enter_context(use_attribution(**attr_defaults))
+                            assert_customer_id(require_customer_id)
                             held_projection, reserved_cost_usd = _reserve_with_local_hold(
                                 enforcement=enforcement,
                                 projected_cost_usd=projected,
@@ -2843,6 +2849,7 @@ def monitor(
     budget: Optional[Any] = None,
     allow_unmetered: Sequence[str] = (),
     observe_unbounded: Sequence[str] = (),
+    require_customer_id: bool = False,
 ) -> Any:
     """
     High-level entrypoint for Agent FinOps on raw OpenAI-style or Anthropic clients.
@@ -2875,6 +2882,11 @@ def monitor(
       hide billable attempts (monitor does not mutate the caller's client)
 
     API keys are env-only (``KAZENAI_FINOPS_API_KEY`` / ``KAZENAI_API_KEY``), not kwargs.
+
+    ``require_customer_id=True`` refuses any call that names no customer ID
+    (``business_subject_ref`` from ``use_attribution`` or this function): it raises
+    ``CustomerIdRequired`` before the call reserves or reaches the provider. Without
+    it, such a call meets only organization and workspace limits.
 
     Also enables:
     - model.call KazenEvent emission
@@ -2974,6 +2986,7 @@ def monitor(
         attempt_id=attempt_id,
         allow_unmetered=tuple(allow_unmetered or ()),
         observe_unbounded=tuple(observe_unbounded or ()),
+        require_customer_id=bool(require_customer_id),
     )
     is_async = _client_is_async(client)
     if _detect_client_kind(client) == "anthropic":
@@ -3052,6 +3065,7 @@ def monitor(
             attempt_id=attempt_id,
             allow_unmetered=tuple(allow_unmetered or ()),
             observe_unbounded=tuple(observe_unbounded or ()),
+            require_customer_id=bool(require_customer_id),
         )
         clone_async = _client_is_async(clone)
         if _detect_client_kind(clone) == "anthropic":

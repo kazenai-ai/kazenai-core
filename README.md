@@ -36,13 +36,13 @@ KazenAI:            Pre-flight check → BLOCKED → LLM call never made
 ## Install
 
 ```bash
-python -m pip install "kazenai[openai]==1.2.0"
+python -m pip install "kazenai[openai]==1.2.1"
 # Most teams install the customer package instead:
-python -m pip install "kazenai-finops[openai]==1.2.0"
+python -m pip install "kazenai-finops[openai]==1.2.1"
 # Anthropic:
-# python -m pip install "kazenai-finops[anthropic]==1.2.0"
+# python -m pip install "kazenai-finops[anthropic]==1.2.1"
 # Both providers:
-# python -m pip install "kazenai-finops[providers]==1.2.0"
+# python -m pip install "kazenai-finops[providers]==1.2.1"
 ```
 
 `kazenai-finops` re-exports this SDK and is the recommended install for product integrations.
@@ -107,8 +107,30 @@ export KAZENAI_TIER_MISMATCH_MULTIPLIER=2              # required, see below
 ```
 
 ```python
-client = monitor(OpenAI(max_retries=0), agent_id="support-agent")
+from kazenai import use_attribution
+
+client = monitor(
+    OpenAI(max_retries=0),
+    agent_id="support-agent",
+    org_id="<organization ID>",      # both IDs are on the Setup page in Agent FinOps
+    workspace_id="<workspace ID>",
+    require_customer_id=True,        # refuse a call that names no customer
+)
+
+with use_attribution(business_subject_ref="cust_123"):   # the customer's limit applies
+    client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Summarize this ticket"}],
+    )
 ```
+
+An Agent FinOps API key belongs to one organization and one workspace;
+`monitor()` must name the same two, or each reservation is refused with HTTP 403
+and the call raises `BudgetUnavailable`. A per-customer limit applies only to
+calls that carry that customer's ID (`business_subject_ref`); with
+`require_customer_id=True` a call without one raises `CustomerIdRequired` before
+it reaches the provider. Details, including worker threads:
+[QUICKSTART](QUICKSTART.md#2-connect-a-shared-finops-authority).
 
 Setting a FinOps URL turns on the Control lifecycle (the default since 1.2.0):
 
@@ -289,7 +311,7 @@ priced via `KAZENAI_PRICING_JSON`.
 | `KAZENAI_TIER_MISMATCH_MULTIPLIER` | Required under Control (finite, at least 1); see above |
 | `KAZENAI_PROFILE` | `legacy` selects the deprecated pre-1.2 path; leave unset |
 | `KAZENAI_DEPLOYMENT_MODE` | `production` / `staging` require fail-closed shared reservations |
-| `KAZENAI_FINOPS_RESERVE_TIMEOUT_S` | Timeout for a shared pre-call reservation |
+| `KAZENAI_FINOPS_RESERVE_TIMEOUT_S` | Timeout for one attempt of a shared pre-call reservation (default 2 s, including connection setup). A reservation that gets no answer is sent once more with the same idempotency key |
 | `KAZENAI_FINOPS_KEEPALIVE_S` | Seconds an idle connection to Agent FinOps is kept for reuse (default 15); `0` opens a new connection per request |
 | `KAZENAI_TIMELINE_PATH` | Optional local JSONL evidence path |
 | `KAZENAI_SDK_SETTLE_QUEUE_DIR` | Persistent private directory for pending settlement intents |
