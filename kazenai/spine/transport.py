@@ -51,7 +51,8 @@ import httpx
 DEFAULT_KEEPALIVE_S = 15.0
 
 # Failures that mean the connection broke under the request, not that the server
-# answered or took too long. Timeouts are not resent: the fail-closed bound holds.
+# answered or took too long. Timeouts are not resent here; spine/guard.py sends a
+# reservation that got no answer once more (two attempts at most, same idempotency key).
 _BROKEN_CONNECTION = (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError)
 _RESENDABLE_PATHS = ("/v1/budget/reserve", "/v1/budget/settle")
 

@@ -1,4 +1,4 @@
-"""Package metadata and first-run install-contract checks for kazenai 1.2.0."""
+"""Package metadata and first-run install-contract checks for kazenai 1.2.1."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import kazenai
 
 _ROOT = Path(__file__).resolve().parents[1]
-_EXPECTED = "1.2.0"
+_EXPECTED = "1.2.1"
 # Install range covers the tested OpenAI 1.109.1 and 2.x lines.
 _OPENAI_BOUND = "openai>=1.40,<3"
 _ANTHROPIC_BOUND = "anthropic>=0.39,<1"
@@ -68,3 +68,20 @@ def test_supported_matrix_package_line_matches_release() -> None:
     match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', _pyproject_text())
     assert match
     assert f"`kazenai` {match.group(1)}" in matrix
+
+
+_SUPPORTED_PYTHONS = ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+
+def _ci_matrix_pythons() -> list[str]:
+    text = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    matrices = re.findall(r"(?m)^\s*python-version:\s*\[([^\]]*)\]", text)
+    assert len(matrices) == 1, "expected exactly one python-version test matrix in ci.yml"
+    return re.findall(r'"(3\.\d+)"', matrices[0])
+
+
+def test_python_classifiers_match_the_ci_matrix() -> None:
+    # The package claims only the Python versions CI tests (3.13 and 3.14 since 1.2.1).
+    classifiers = re.findall(r'"Programming Language :: Python :: (3\.\d+)"', _pyproject_text())
+    assert classifiers == _ci_matrix_pythons() == _SUPPORTED_PYTHONS
+    assert re.search(r'(?m)^requires-python\s*=\s*">=3\.10"', _pyproject_text())

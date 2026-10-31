@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Contact email guard (founder@kazenai.com only)
@@ -31,8 +31,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install --upgrade pip
       # kazen-event-schema>=0.6.6 resolves from PyPI via pyproject.toml.
-      # That version is published before Core 1.2.0. Until then this install
-      # cannot succeed from PyPI.
       - run: pip install -e ".[dev]"
       - name: Lint streaming and budget modules
         run: >-
@@ -49,7 +47,9 @@ jobs:
       - run: pytest tests/ -q --cov=kazenai --cov-report=term-missing --cov-fail-under=80
       - name: Enforce async provider behavioral coverage
         run: python scripts/coverage_async_provider_gate.py
+      # CrewAI 1.15.x requires Python <3.14, so the crewai extra can't install on 3.14.
       - name: CrewAI 1.15.26 Control certification (real crews, coverage gate)
+        if: matrix.python-version != '3.14'
         env:
           CREWAI_DISABLE_TELEMETRY: "true"
           OTEL_SDK_DISABLED: "true"

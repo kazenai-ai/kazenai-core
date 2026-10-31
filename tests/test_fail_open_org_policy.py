@@ -243,6 +243,19 @@ def test_a_budget_denial_still_denies_a_fail_open_org(monkeypatch):
     finops.reserve_status, finops.reserve_body = 409, {"detail": {"error_code": "tier_breaker", "reason": "open"}}
     with pytest.raises(BudgetExceeded):
         _ask(client, f"breaker {uuid.uuid4().hex}")
+    # Over the per-minute reservation limit Agent FinOps refuses with 402, not 429:
+    # a 429 would read as an outage here and the call would run unchecked.
+    finops.reserve_status, finops.reserve_body = 402, {
+        "detail": {
+            "allowed": False,
+            "error_code": "rate_limited",
+            "scope": "org",
+            "reason": "org reservation rate limit exceeded (>3000 reservations/min)",
+            "retry_after_s": 12,
+        }
+    }
+    with pytest.raises(BudgetExceeded, match="reservation rate limit exceeded"):
+        _ask(client, f"rate limited {uuid.uuid4().hex}")
     assert len(hits) == 1
     finops.stop()
 

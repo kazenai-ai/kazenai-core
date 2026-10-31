@@ -3,6 +3,58 @@
 Notable changes to `kazenai`, newest first. Each release is also published on
 [GitHub Releases](https://github.com/kazenai-ai/kazenai-core/releases).
 
+## 1.2.1 - 2026-10-31
+
+An opt-in guard so a call can't silently skip a customer's limit, and corrected
+hosted setup docs.
+
+```bash
+python -m pip install "kazenai[openai]==1.2.1"
+```
+
+### New
+
+- `monitor(..., require_customer_id=True)` refuses a call that names no customer
+  ID. The call raises `CustomerIdRequired` (a `KazenBlock`) before it reserves
+  budget or reaches the provider. Without the option, a call made where the ID
+  isn't set, such as in a `ThreadPoolExecutor` worker, is checked against the
+  organization and workspace limits only. Off by default, so nothing changes
+  unless you turn it on.
+
+### Fixed
+
+- A call refused because the organization is paused said "budget exhausted".
+  `BudgetExceeded` now gives the reason from the decision receipt: "Pre-call
+  reservation denied: organization is paused for new admissions". Plan-limit and
+  customer-limit messages are unchanged.
+- The LiteLLM gateway path gave a paused organization the same "budget
+  exhausted"; `GatewayAdmissionDenied` now carries the receipt's reason.
+- A reservation that got no answer (a timeout, a refused or dropped connection,
+  or a 502/503/504) failed the call at once. It is now sent once more with the
+  same body and idempotency key, so Agent FinOps answers a repeat with the
+  reservation it already made and never reserves twice. A refusal (402) and any
+  other answer are not retried.
+- `KAZENAI_FINOPS_RESERVE_TIMEOUT_S` defaults to 2 s (was 0.8 s). The first call
+  in a new process also opens the connection inside that time, which from a
+  distant region could take most of 0.8 s. With both attempts, a call waits at
+  most about 4 s for an Agent FinOps that never answers; set the variable lower
+  to shorten that.
+
+### Docs
+
+- The README and QUICKSTART show the `org_id` and `workspace_id` that hosted
+  Agent FinOps needs. Without them each reservation is refused with HTTP 403 and
+  the call raises `BudgetUnavailable`.
+- They also show how to name the customer on each call (`use_attribution`) and
+  how to carry the ID into a worker thread (`contextvars.copy_context().run`).
+
+### Compatibility
+
+- Supports Python 3.13 and 3.14, now tested in CI alongside 3.10–3.12 and listed
+  in the package metadata.
+- The CrewAI adapter (the `crewai` and `frameworks` extras) needs Python 3.10–3.13:
+  CrewAI 1.15 doesn't install on 3.14 yet.
+
 ## 1.2.0 - 2026-10-28
 
 Hard limits now apply by default. When Agent FinOps is configured, every call

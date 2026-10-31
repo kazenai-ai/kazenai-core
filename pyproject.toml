@@ -4,13 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kazenai"
-version = "1.2.0"
+version = "1.2.1"
 description = "A hard spending limit for every customer's AI: the KazenAI core SDK checks each OpenAI and Anthropic call against its limit before it runs"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [{ name = "Dhavan Shah", email = "founder@kazenai.com" }]
 keywords = ["llm", "agents", "observability", "finops", "langchain"]
+# The Python versions listed here are the CI test matrix (tests/test_package_metadata.py).
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries",
+]
 
 dependencies = [
   "kazen-event-schema>=0.6.6,<0.7",

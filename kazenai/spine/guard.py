@@ -555,8 +555,7 @@ def reserve_budget(
         method="POST",
     )
     try:
-        timeout_s = float(os.getenv("KAZENAI_FINOPS_RESERVE_TIMEOUT_S", "0.8") or "0.8")
-        with _transport.urlopen(req, timeout=timeout_s) as resp:
+        with _transport.urlopen(req, timeout=_reserve_timeout_s()) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
             reserved = float(payload.get("estimated_cost_usd") or 0.0)
             decision_id = str(payload.get("decision_id") or "") or None
@@ -572,8 +571,7 @@ def reserve_budget(
     except urllib.error.HTTPError as exc:
         if exc.code == 402:
             try:
-                detail = json.loads(exc.read().decode("utf-8"))
-                reason = detail.get("reason") or detail.get("detail") or "budget exhausted"
+                reason = _denial_reason(json.loads(exc.read().decode("utf-8")), "reason", "detail")
             except Exception:
                 reason = "budget exhausted"
             raise BudgetExceeded(f"Pre-call reservation denied: {reason}") from exc
@@ -589,7 +587,57 @@ def reserve_budget(
 
 
 def _reserve_timeout_s() -> float:
-    return float(os.getenv("KAZENAI_FINOPS_RESERVE_TIMEOUT_S", "0.8") or "0.8")
+    """Timeout of one reservation attempt. It includes setting up the connection, which
+    the first call in a new process does (TCP and TLS, two round trips more), so the
+    default leaves room for a host far away. 0.8 s until 1.2.1."""
+    return float(os.getenv("KAZENAI_FINOPS_RESERVE_TIMEOUT_S", "2.0") or "2.0")
+
+
+# A reservation that got no answer (a timeout, a refused or dropped connection, or a
+# 502/503/504 from a proxy) is sent once more, with the same body and so the same
+# idempotency key. If the first attempt was admitted after all, Agent FinOps answers
+# the second with that same reservation: a retry never reserves twice.
+_RESERVE_RETRY_STATUSES = frozenset({502, 503, 504})
+
+
+def _reserve_retry_delay_s() -> float:
+    import random
+
+    return 0.05 + random.random() * 0.1
+
+
+def _reserve_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in _RESERVE_RETRY_STATUSES
+    return _is_unavailable(exc)
+
+
+def _reserve_urlopen(req: urllib.request.Request) -> Any:
+    """``_transport.urlopen`` for a lifecycle reservation, with the one retry above."""
+    try:
+        return _transport.urlopen(req, timeout=_reserve_timeout_s())
+    except Exception as exc:
+        if not _reserve_retryable(exc):
+            raise
+        _log.info("Agent FinOps reservation got no answer (%s); retrying once", type(exc).__name__)
+    time.sleep(_reserve_retry_delay_s())
+    return _transport.urlopen(req, timeout=_reserve_timeout_s())
+
+
+async def _reserve_post_async(client: Any, url: str, **kwargs: Any) -> Any:
+    """Async ``client.post`` for a lifecycle reservation, with the one retry above."""
+    try:
+        resp = await client.post(url, **kwargs)
+        if resp.status_code not in _RESERVE_RETRY_STATUSES:
+            return resp
+        reason = f"HTTP {resp.status_code}"
+    except Exception as exc:
+        if not _is_unavailable(exc):
+            raise
+        reason = type(exc).__name__
+    _log.info("Agent FinOps reservation got no answer (%s); retrying once", reason)
+    await asyncio.sleep(_reserve_retry_delay_s())
+    return await client.post(url, **kwargs)
 
 
 def _handle_settlement_evidence(handle: Any) -> dict[str, Any]:
@@ -609,6 +657,27 @@ def _handle_settlement_evidence(handle: Any) -> dict[str, Any]:
 def _is_tier_breaker(status: int | None, detail: Any) -> bool:
     """FinOps 409 ``tier_breaker``: admission is closed until an operator resolves it (1.4)."""
     return status == 409 and isinstance(detail, dict) and str(detail.get("error_code") or "") == "tier_breaker"
+
+
+def _denial_reason(detail: Any, *fields: str) -> str:
+    """Why FinOps refused a reservation, for the ``BudgetExceeded`` message.
+
+    The first non-empty of ``fields``, else the receipt's determining constraint
+    (a paused org returns the closed reserve shape with no reason field), else
+    "budget exhausted".
+    """
+    if not isinstance(detail, dict):
+        return "budget exhausted"
+    if isinstance(detail.get("detail"), dict):
+        detail = detail["detail"]
+    for name in fields:
+        if detail.get(name):
+            return str(detail[name])
+    receipt = detail.get("decision_receipt")
+    constraint = receipt.get("determining_constraint") if isinstance(receipt, dict) else None
+    if isinstance(constraint, dict) and constraint.get("detail"):
+        return str(constraint["detail"])
+    return "budget exhausted"
 
 
 def _parse_finops_http_error(exc: Exception) -> tuple[int | None, Any]:
@@ -1070,7 +1139,7 @@ def _reserve_lifecycle(
             method="POST",
         )
         try:
-            with _transport.urlopen(req, timeout=_reserve_timeout_s()) as resp:
+            with _reserve_urlopen(req) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
                 handle = _handle_to_reservation(
                     payload,
@@ -1095,7 +1164,7 @@ def _reserve_lifecycle(
         except urllib.error.HTTPError as exc:
             status, detail = _parse_finops_http_error(exc)
             if status == 402 or _is_tier_breaker(status, detail):
-                reason = detail.get("reason") or detail.get("error_code") or "budget exhausted"
+                reason = _denial_reason(detail, "reason", "error_code")
                 raise BudgetExceeded(f"Pre-call reservation denied: {reason}") from exc
             if finops_reservation_fail_closed():
                 if _unavailable_status(status) and _allows_fail_open(base, org_id, binding):
@@ -1252,7 +1321,8 @@ async def _reserve_lifecycle_async(
     ) as span:
         try:
             async with _transport.async_session(timeout) as client:
-                resp = await client.post(
+                resp = await _reserve_post_async(
+                    client,
                     f"{base}/v1/budget/reserve",
                     content=json.dumps(body),
                     headers=_finops_headers(org_id, api_key=binding.get("finops_api_key")),
@@ -1265,7 +1335,7 @@ async def _reserve_lifecycle_async(
                             detail = detail["detail"]
                     except Exception:
                         detail = {"reason": resp.text}
-                    reason = detail.get("reason") or detail.get("error_code") or "budget exhausted"
+                    reason = _denial_reason(detail, "reason", "error_code")
                     raise BudgetExceeded(f"Pre-call reservation denied: {reason}")
                 if resp.status_code >= 400:
                     status, detail = _parse_finops_http_error(
@@ -1418,8 +1488,7 @@ async def reserve_budget_async(
             )
             if resp.status_code == 402:
                 try:
-                    detail = resp.json()
-                    reason = detail.get("reason") or detail.get("detail") or "budget exhausted"
+                    reason = _denial_reason(resp.json(), "reason", "detail")
                 except Exception:
                     reason = "budget exhausted"
                 raise BudgetExceeded(f"Pre-call reservation denied: {reason}")

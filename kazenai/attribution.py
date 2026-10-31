@@ -16,6 +16,8 @@ import contextvars
 from dataclasses import dataclass, fields, replace
 from typing import Any, Iterator, Mapping, Optional
 
+from .enforcement import KazenBlock
+
 ATTRIBUTION_VERSION = "business.attribution.v1"
 
 _ATTR: contextvars.ContextVar[Optional["AttributionContext"]] = contextvars.ContextVar(
@@ -151,6 +153,34 @@ def use_attribution(
         yield effective
     finally:
         _ATTR.reset(token)
+
+
+class CustomerIdRequired(KazenBlock):
+    """Raised before dispatch when ``monitor(require_customer_id=True)`` sees no customer ID."""
+
+    error_code = "customer_id_required"
+
+
+def assert_customer_id(required: bool) -> None:
+    """Refuse the call when ``required`` and the active scope names no customer.
+
+    Monitored calls run this inside their ``use_attribution(...)`` scope, before any
+    reservation or provider dispatch. A ``ThreadPoolExecutor`` worker does not
+    inherit the caller's ContextVars, so without the guard a call made there
+    silently meets only org and workspace limits.
+    """
+    if not required:
+        return
+    current = _ATTR.get()
+    if current is not None and current.normalized().business_subject_ref:
+        return
+    raise CustomerIdRequired(
+        "this call names no customer ID, so monitor(require_customer_id=True) refused it "
+        "before it reached the provider. Wrap the call in "
+        "use_attribution(business_subject_ref=...) or pass business_subject_ref= to "
+        "monitor(). A ThreadPoolExecutor worker does not inherit the ID: submit the work "
+        "with contextvars.copy_context().run."
+    )
 
 
 @contextlib.contextmanager
