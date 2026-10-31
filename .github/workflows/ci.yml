@@ -47,7 +47,9 @@ jobs:
       - run: pytest tests/ -q --cov=kazenai --cov-report=term-missing --cov-fail-under=80
       - name: Enforce async provider behavioral coverage
         run: python scripts/coverage_async_provider_gate.py
+      # CrewAI 1.15.x requires Python <3.14, so the crewai extra can't install on 3.14.
       - name: CrewAI 1.15.26 Control certification (real crews, coverage gate)
+        if: matrix.python-version != '3.14'
         env:
           CREWAI_DISABLE_TELEMETRY: "true"
           OTEL_SDK_DISABLED: "true"

@@ -179,7 +179,7 @@ deprecated, warns, and is removed in 2.0. Hosted Agent FinOps refuses it.
 | LangGraph | Supported when the graph declares every provider client its nodes use; raw clients created inside nodes are not intercepted |
 | LiteLLM proxy | Supported with application-owned or gateway-owned accounting (gateway-owned streaming settlement not yet verified); see [LiteLLM gateway](#litellm-gateway) |
 | OpenAI `responses.create` / `.stream` / `.parse`, sync and async, streaming and non-streaming | Supported, verified against the live API (new in 1.2.0). Refused before dispatch: `background=True`, `previous_response_id` / `conversation` / stored `prompt`, built-in tools |
-| CrewAI 1.15.26 (`kickoff`, `akickoff`, `kickoff_async`) | Supported, verified against the live API, when every LLM is bound with `bind_crew_llm_client`; memory, knowledge, `Crew(stream=True)` and `llm_overlay` are refused under Control |
+| CrewAI 1.15.26 (`kickoff`, `akickoff`, `kickoff_async`) | Supported, verified against the live API, when every LLM is bound with `bind_crew_llm_client`; memory, knowledge, `Crew(stream=True)` and `llm_overlay` are refused under Control. Python 3.10–3.13 (CrewAI doesn't install on 3.14 yet) |
 | Other OpenAI endpoints (embeddings, images, audio, batches, fine-tuning, Realtime, legacy `completions`) and any provider method saved before `monitor()` | Refused before dispatch with `UnsupportedModeError`; `monitor(..., allow_unmetered=("/embeddings",))` sends named endpoints without a budget check |
 | Bedrock/Vertex wrappers, AutoGen | Not supported |
 

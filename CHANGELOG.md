@@ -52,6 +52,8 @@ python -m pip install "kazenai[openai]==1.2.1"
 
 - Supports Python 3.13 and 3.14, now tested in CI alongside 3.10–3.12 and listed
   in the package metadata.
+- The CrewAI adapter (the `crewai` and `frameworks` extras) needs Python 3.10–3.13:
+  CrewAI 1.15 doesn't install on 3.14 yet.
 
 ## 1.2.0 - 2026-10-28
 
