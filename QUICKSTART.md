@@ -6,13 +6,13 @@ product integrations should install the customer-facing package, which
 re-exports the Core API:
 
 ```bash
-python -m pip install "kazenai-finops[openai]==1.2.1"
+python -m pip install "kazenai-finops[openai]==1.2.2"
 ```
 
 Install Core directly when you specifically want the runtime package:
 
 ```bash
-python -m pip install "kazenai[openai]==1.2.1"
+python -m pip install "kazenai[openai]==1.2.2"
 ```
 
 Python 3.10, 3.11 and 3.12 are supported.
@@ -244,7 +244,7 @@ provider APIs. Full details:
 | OpenAI `chat.completions.stream` | Supported |
 | Anthropic `messages.create`, sync and async | Supported, non-streaming and `stream=True` |
 | Anthropic `messages.stream` | Supported |
-| LiteLLM | Application-owned and gateway-owned accounting (gateway-owned streaming settlement not yet verified) |
+| LiteLLM | Application-owned and gateway-owned accounting, streaming included |
 | LangChain | `ChatOpenAI` via `bind_monitored_chat_openai`, `ChatAnthropic` via `bind_monitored_chat_anthropic`; multi-provider chains via `declare_langchain_control_boundary(runnable, *clients)` |
 | LangGraph | Supported with an explicit declared boundary listing every provider client the nodes use; raw clients inside arbitrary nodes are not intercepted |
 | Anthropic beta Messages (`client.beta.messages`) | Not supported; raises `UnsupportedModeError` on a monitored client |

@@ -9,9 +9,9 @@
 # Regenerate (hash-locked, installed with --require-hashes --no-deps):
 #   uv pip compile tests/litellm_proxy_harness.in --universal --python-version 3.11 \
 #     --generate-hashes -o tests/litellm_proxy_harness.lock
-litellm==1.104.2
-litellm-proxy-extras==0.4.102.post1
-# litellm 1.104.2 [proxy] extra, minus litellm-enterprise:
+litellm==1.106.6
+litellm-proxy-extras==0.4.108
+# litellm 1.106.6 [proxy] extra, minus litellm-enterprise:
 gunicorn==23.0.0
 uvicorn==0.54.0
 granian==2.8.4
@@ -30,7 +30,7 @@ python-multipart==0.0.32
 cryptography==50.0.2
 pynacl==1.6.2
 websockets==15.0.1
-boto3==1.43.112
+boto3==1.43.117
 azure-identity==1.26.0
 azure-storage-blob==12.31.0
 mcp==2.3.0

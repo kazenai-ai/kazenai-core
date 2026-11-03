@@ -89,7 +89,7 @@ def test_u01_flush_pending_does_not_ack_result_pending(tmp_path, monkeypatch):
 
     monkeypatch.setattr(client, "_post", _post)
     out = client.flush_pending()
-    assert out == {"applied": 0, "failed": 1}
+    assert out == {"applied": 0, "failed": 1, "quarantined": 0}
     assert len(store.list_pending()) == 1
     assert store.get_open(identities.attempt_id) is not None
     _record("u01_flush_pending_keeps_queue", "pass")

@@ -3,6 +3,78 @@
 Notable changes to `kazenai`, newest first. Each release is also published on
 [GitHub Releases](https://github.com/kazenai-ai/kazenai-core/releases).
 
+## 1.2.2 - 2026-11-03
+
+Fixes for the LiteLLM gateway callback (`kazenai.integrations.litellm_gateway`), and
+for how `monitor()` prices cached tokens.
+
+```bash
+python -m pip install "kazenai[openai]==1.2.2"
+```
+
+### Fixed
+
+- A streamed call through the callback never settled. LiteLLM returns a stream
+  before the hook the callback settled from, so the actual cost was never recorded
+  and the hold stayed open. A stream now settles from LiteLLM's success event when
+  it ends. A stream that fails midway, or whose client leaves, stays pending and is
+  never recorded as $0.
+- The callback never sent the customer, so per-customer limits didn't apply to
+  calls through it. It now sends LiteLLM's end user (the request's `user`, or
+  LiteLLM's customer headers). A call that names no customer is checked against
+  the organization and workspace limits only, as with `monitor()`.
+- The hold ignored the request: it assumed 256 input and 256 output tokens, so a
+  long call could cost far more than it held and concurrent calls could pass a
+  limit. The hold now uses the same bound as `monitor()`.
+- Cached tokens were billed at the full input rate. Cache reads and writes now
+  bill at their own rates, and Anthropic usage through LiteLLM counts each token
+  once.
+- A LiteLLM cache hit left its hold open. It now settles at $0, because nothing
+  reached the provider.
+- A stream the provider cut off, or never reported usage for, was settled at
+  LiteLLM's own tokenizer count as if it were the charge. It now stays pending.
+- A settlement that failed to send stayed on disk and was never resent. Later traffic
+  now resends it, at most every 30 seconds and on the first call after a restart. One
+  FinOps refuses outright, or one older than 7 days, moves to `quarantine/` with a
+  warning. An unknown outcome FinOps has recorded no longer stays in the queue.
+- The callback's calls to Agent FinOps ran on the proxy's event loop, so one slow
+  answer held up every request in that proxy. They now run off it.
+- A regional or other non-first-party endpoint behind the callback was priced at list.
+  It now gets the same uplift as `monitor()`, unless declared in
+  `KAZENAI_ENDPOINT_PRICE_MULTIPLIERS`.
+- A customer ID Agent FinOps rejects now returns HTTP 400 with the reason, not a
+  budget refusal.
+- With `KAZENAI_TIER_MISMATCH_MULTIPLIER` unset under Control, the callback held a flat
+  $0.01 and left every call pending. It now refuses the call and names the setting.
+- Through `monitor()`, a streamed OpenAI Chat Completions call and any OpenAI Responses
+  call, streamed or not, billed cached tokens at the full input rate. It recorded more
+  than the call cost and could reach a limit early. They now bill at the cached rate.
+- Anthropic 1-hour cache writes billed at the 5-minute rate on `monitor()` streams and
+  through LiteLLM. `monitor()` in front of a LiteLLM proxy also counted Anthropic cache
+  writes twice. Both now bill once, at their own rate.
+
+### New
+
+- `KAZENAI_REQUIRE_CUSTOMER_ID=1` makes the callback refuse a call that names no
+  customer with HTTP 400, like `monitor(..., require_customer_id=True)`. Off by default.
+- `KAZENAI_GATEWAY_FLUSH_INTERVAL_S` sets how often the callback resends unsent
+  settlements (default 30).
+
+### Behaviour changes for the callback
+
+- A call that names a customer now counts against that customer's limit.
+- Chat and Responses calls leave with an output limit: one is added when the
+  request has none, and one above the model's bound is lowered, the way `monitor()`
+  does it.
+- Holds are larger, so a call near a limit can be refused where it wasn't before.
+- Under Control, a proxy without `KAZENAI_TIER_MISMATCH_MULTIPLIER` now refuses calls.
+- A hold left by a stream that stays pending is released only by reconciliation.
+
+### Compatibility
+
+- Tested on LiteLLM 1.106.6 and 1.104.2. A new CI job runs the callback through a
+  real LiteLLM proxy.
+
 ## 1.2.1 - 2026-10-31
 
 An opt-in guard so a call can't silently skip a customer's limit, and corrected

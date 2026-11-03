@@ -13,16 +13,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 import uuid
 from dataclasses import dataclass, field
+from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, Mapping, MutableMapping, Optional
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from ..spine import transport as _transport
 from ..spine.guard import _denial_reason
+
+_log = logging.getLogger("kazenai.litellm_gateway")
 
 
 LIFECYCLE_VERSION = "reservation.lifecycle.v1"
@@ -131,6 +136,10 @@ def estimate_cost_usd(
     prompt_tokens: int,
     completion_tokens: int,
     audio_prompt_tokens: int | None = 0,
+    cached_prompt_tokens: int = 0,
+    cache_write_5m_tokens: int = 0,
+    cache_write_1h_tokens: int = 0,
+    price_multiplier: Decimal = Decimal(1),
 ) -> float | None:
     """Authoritative local price when known; ``None`` when pricing is unavailable.
 
@@ -139,11 +148,13 @@ def estimate_cost_usd(
     LiteLLM provider prefixes are stripped before lookup. A ``$0.00`` result for
     an unrecognized model is treated as unavailable pricing (not a free call).
 
-    ``audio_prompt_tokens`` is the audio share of ``prompt_tokens``. Gemini 2.5
-    bills audio input above text, so it is priced at the audio rate. ``None``
-    means unknown: every prompt token is priced at the higher of the two rates
-    (a ceiling, used for holds). Settle with :func:`estimate_cost_from_response`,
-    which reads the audio share from the provider usage.
+    ``prompt_tokens`` counts every prompt token. ``audio_prompt_tokens``,
+    ``cached_prompt_tokens`` and the ``cache_write_*`` counts are shares of it,
+    each priced at its own rate. Gemini 2.5 bills audio input above text.
+    ``audio_prompt_tokens=None`` means unknown: every prompt token is priced at
+    the higher of the two rates (a ceiling, used for holds). Settle with
+    :func:`estimate_cost_from_response`, which reads the shares from the provider
+    usage. ``price_multiplier`` comes from :func:`endpoint_price_multiplier`.
     """
     try:
         from kazenai.cost_engine import TokenCostEngine
@@ -158,21 +169,27 @@ def estimate_cost_usd(
             if candidate not in candidates:
                 candidates.append(candidate)
         prompt = max(0, int(prompt_tokens))
+        cached = max(0, int(cached_prompt_tokens))
+        write_5m = max(0, int(cache_write_5m_tokens))
+        write_1h = max(0, int(cache_write_1h_tokens))
         for candidate in candidates:
             known = resolve_model_key(candidate, engine.known_models(), {})
             if known is None:
                 continue
             row = engine._row(candidate)
             if row is not None:
-                rates = row.rates
+                rates = row.rates.scaled(price_multiplier)
                 if audio_prompt_tokens is None:
                     audio = prompt if rates.audio_input is not None and rates.audio_input > rates.input else 0
                 else:
                     audio = min(prompt, max(0, int(audio_prompt_tokens)))
                 micros = cost_micro_usd(
                     rates,
-                    input_tokens=prompt - audio,
+                    input_tokens=max(0, prompt - audio - cached - write_5m - write_1h),
                     audio_input_tokens=audio,
+                    cached_input_tokens=cached,
+                    cache_write_5m_tokens=write_5m,
+                    cache_write_1h_tokens=write_1h,
                     output_tokens=max(0, int(completion_tokens)),
                 )
                 return float(micro_usd_to_decimal(micros))
@@ -183,32 +200,40 @@ def estimate_cost_usd(
             )
             if cost is None:
                 continue
-            return float(cost)
+            return float(cost) * float(price_multiplier)
         return None
     except Exception:
         return None
 
 
-def extract_audio_prompt_tokens(response: Any) -> int:
-    """Audio share of the prompt from provider usage (0 when not reported)."""
+def estimate_cost_from_response(
+    *, model: str, response: Any, price_multiplier: Decimal = Decimal(1)
+) -> float | None:
+    """Settlement price from a provider response: audio and cache tokens at their own rates."""
     usage = getattr(response, "usage", None)
     if usage is None and isinstance(response, Mapping):
         usage = response.get("usage")
     if usage is None:
-        return 0
+        prompt, completion, _total = extract_usage_tokens(response)
+        return estimate_cost_usd(
+            model=model, prompt_tokens=prompt, completion_tokens=completion, price_multiplier=price_multiplier
+        )
     from kazenai.request_pricing import usage_components
 
-    return int(usage_components(usage).get("audio_input_tokens") or 0)
-
-
-def estimate_cost_from_response(*, model: str, response: Any) -> float | None:
-    """Settlement price from a provider response, audio input included."""
-    prompt, completion, _total = extract_usage_tokens(response)
+    parts = usage_components(usage)
+    cached = parts["cached_input_tokens"]
+    write_5m = parts["cache_write_5m_tokens"]
+    write_1h = parts["cache_write_1h_tokens"]
+    audio = parts["audio_input_tokens"]
     return estimate_cost_usd(
         model=model,
-        prompt_tokens=prompt,
-        completion_tokens=completion,
-        audio_prompt_tokens=extract_audio_prompt_tokens(response),
+        prompt_tokens=parts["input_tokens"] + audio + cached + write_5m + write_1h,
+        completion_tokens=parts["output_tokens"],
+        audio_prompt_tokens=audio,
+        cached_prompt_tokens=cached,
+        cache_write_5m_tokens=write_5m,
+        cache_write_1h_tokens=write_1h,
+        price_multiplier=price_multiplier,
     )
 
 
@@ -218,6 +243,7 @@ def estimate_reserve_usd(
     prompt_tokens: int,
     completion_tokens: int,
     audio_prompt_tokens: int | None = None,
+    price_multiplier: Decimal = Decimal(1),
 ) -> float:
     """Conservative pre-dispatch hold. Never used as a final settlement amount.
 
@@ -230,11 +256,133 @@ def estimate_reserve_usd(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         audio_prompt_tokens=audio_prompt_tokens,
+        price_multiplier=price_multiplier,
     )
     if priced is not None and priced > 0:
         return float(priced)
     # Bound only — evidence for settle still requires authoritative usage pricing.
     return max(0.01, (int(prompt_tokens) + int(completion_tokens)) * 0.000002)
+
+
+_CHAT_CALL_TYPES = frozenset({"completion", "acompletion", "anthropic_messages"})
+_RESPONSES_CALL_TYPES = frozenset({"responses", "aresponses"})
+# What the provider reads as input. The rest of the kwargs are LiteLLM's own.
+_REQUEST_INPUT_FIELDS = (
+    "messages",
+    "input",
+    "prompt",
+    "system",
+    "instructions",
+    "tools",
+    "functions",
+    "tool_choice",
+    "response_format",
+)
+
+
+def reserve_bound_tokens(kwargs: MutableMapping[str, Any], *, call_type: Any = None) -> tuple[int, int]:
+    """Upper bounds for one attempt's hold, as ``(input tokens, output tokens)``.
+
+    The bound ``monitor()`` uses: input counted from the request's bytes, and an
+    output limit added or lowered to the model's bound. Deployment-hook kwargs
+    become the provider request, so a chat or Responses call leaves here capped.
+    Other call types (embeddings, images) have no output limit to set.
+    """
+    from kazenai.monitor import _PRECALL_MIN_TOKENS, _apply_output_token_bound, _estimate_input_tokens
+
+    input_bound = _estimate_input_tokens({key: kwargs[key] for key in _REQUEST_INPUT_FIELDS if key in kwargs})
+    kind = str(getattr(call_type, "value", call_type) or "")
+    responses = kind in _RESPONSES_CALL_TYPES
+    if not responses and kind not in _CHAT_CALL_TYPES and (kind or "messages" not in kwargs):
+        return input_bound, 0
+
+    params = ("max_output_tokens",) if responses else ("max_tokens", "max_completion_tokens")
+    limits: dict[str, Any] = {key: kwargs[key] for key in params if kwargs.get(key) is not None}
+    limits["model"] = _canonical_model_name(str(kwargs.get("model") or ""))
+    _apply_output_token_bound(limits, responses=responses)
+
+    output_bound = 0
+    for key in params:
+        if key in limits:
+            kwargs[key] = limits[key]
+            try:
+                output_bound = max(output_bound, int(limits[key]))
+            except (TypeError, ValueError):
+                pass
+    try:
+        choices = max(1, int(kwargs.get("n") or 1))
+    except (TypeError, ValueError):
+        choices = 1
+    return input_bound, (output_bound or _PRECALL_MIN_TOKENS) * choices
+
+
+def _metadata_blocks(kwargs: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Where LiteLLM keeps call metadata, which differs by call type and hook."""
+    litellm_params = kwargs.get("litellm_params")
+    nested = litellm_params.get("metadata") if isinstance(litellm_params, Mapping) else None
+    blocks = (kwargs.get("metadata"), kwargs.get("litellm_metadata"), nested)
+    return [block for block in blocks if isinstance(block, Mapping)]
+
+
+def resolve_customer_id(kwargs: Mapping[str, Any]) -> str | None:
+    """LiteLLM's end user for this call, the customer KazenAI's limits apply to.
+
+    The proxy resolves it from the request's ``user`` or its customer headers.
+    """
+    for block in _metadata_blocks(kwargs):
+        if block.get("user_api_key_end_user_id"):
+            return str(block["user_api_key_end_user_id"])
+    user = kwargs.get("user")
+    return str(user) if user else None
+
+
+def client_disconnected(kwargs: Mapping[str, Any]) -> bool:
+    """The proxy marks a stream whose client left before it ended."""
+    return any(block.get("client_disconnected") for block in _metadata_blocks(kwargs))
+
+
+def customer_id_required() -> bool:
+    """``KAZENAI_REQUIRE_CUSTOMER_ID``: the callback's ``monitor(require_customer_id=True)``."""
+    return os.getenv("KAZENAI_REQUIRE_CUSTOMER_ID", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def endpoint_price_multiplier(kwargs: Mapping[str, Any]) -> Decimal:
+    """The multiplier on every rate for this deployment, by the rule ``monitor()`` uses.
+
+    A host other than the provider's own API is priced with the uplift, unless the
+    operator declares it in ``KAZENAI_ENDPOINT_PRICE_MULTIPLIERS``.
+    """
+    from kazenai.price_catalog import provider_for_model
+    from kazenai.request_pricing import _price_multiplier
+
+    model = str(kwargs.get("model") or "")
+    provider = str(kwargs.get("custom_llm_provider") or "").strip().lower()
+    if not provider and "/" in model:
+        provider = model.split("/", 1)[0].strip().lower()
+    if not provider:
+        provider = provider_for_model(_canonical_model_name(model)) or ""
+    api_base = kwargs.get("api_base") or kwargs.get("base_url")
+    client = SimpleNamespace(base_url=str(api_base)) if api_base else None
+    return _price_multiplier(kwargs, provider=provider, client=client)[0]
+
+
+def provider_finished_and_reported(stream: Any) -> bool | None:
+    """Whether the provider finished this stream and reported its usage.
+
+    LiteLLM fills in missing usage from its own tokenizer and logs success even for a
+    stream the provider cut off, so its assembled response can't tell these apart. The
+    chunks the stream kept can, the same way LiteLLM bills a disconnect from them.
+    ``None`` when this stream keeps no chunks, as on LiteLLM's other stream types.
+    """
+    chunks = getattr(stream, "chunks", None)
+    if not isinstance(chunks, list):
+        return None
+    finished = reported = False
+    for chunk in chunks:
+        reported = reported or getattr(chunk, "usage", None) is not None
+        for choice in getattr(chunk, "choices", None) or []:
+            finished = finished or bool(getattr(choice, "finish_reason", None))
+    return finished and reported
 
 
 def gateway_owns_enforcement() -> bool:
@@ -289,6 +437,22 @@ def _gateway_pending_dir() -> str:
         return fallback
 
 
+# FinOps won't accept these however often they're resent.
+_PERMANENT_REFUSALS = frozenset({400, 404, 409, 410, 422})
+_PENDING_MAX_AGE_S = 7 * 24 * 3600
+
+
+def _settlement_delivered(event: str, status: int, code: str) -> bool:
+    """Only ``applied`` or ``duplicate`` acknowledge a delivery, with one exception.
+
+    FinOps answers ``pending`` to ``outcome_unknown``: that state is what was sent.
+    On ``usage_known`` the same answer means the known amount wasn't applied yet.
+    """
+    if status >= 400:
+        return False
+    return code in {"applied", "duplicate"} or (event == "outcome_unknown" and code == "pending")
+
+
 class DurableGatewayStore:
     """File-backed open-attempt + pending-settlement evidence.
 
@@ -300,8 +464,10 @@ class DurableGatewayStore:
         self.root = root or _gateway_pending_dir()
         self.open_dir = os.path.join(self.root, "open")
         self.pending_dir = os.path.join(self.root, "pending")
+        self.quarantine_dir = os.path.join(self.root, "quarantine")
         os.makedirs(self.open_dir, exist_ok=True)
         os.makedirs(self.pending_dir, exist_ok=True)
+        os.makedirs(self.quarantine_dir, exist_ok=True)
 
     def _open_path(self, attempt_id: str) -> str:
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in attempt_id)[:180]
@@ -409,6 +575,20 @@ class DurableGatewayStore:
         except Exception:
             pass
 
+    def ack_body(self, body: Mapping[str, Any]) -> None:
+        self.ack_pending(self._pending_path(str(body.get("idempotency_key") or "")))
+
+    def quarantine_pending(self, path: str, reason: str) -> None:
+        """Set a settlement aside for an operator, the way the SDK's settle queue does."""
+        target = os.path.join(self.quarantine_dir, f"{int(time.time())}.{uuid.uuid4().hex[:8]}.{os.path.basename(path)}")
+        try:
+            os.replace(path, target)
+            _log.warning("gateway settlement quarantined (%s): %s", reason, target)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            _log.error("gateway settlement could not be quarantined (%s): %s", reason, path, exc_info=True)
+
 
 class GatewayFinOpsClient:
     """Authenticated FinOps lifecycle client for gateway-owned attempts."""
@@ -483,6 +663,7 @@ class GatewayFinOpsClient:
         estimated_usd: float,
         run_id: str = "",
         feature: str = "litellm_gateway",
+        business_subject_ref: str | None = None,
     ) -> AttemptReservation:
         micros = usd_to_micros_ceil(estimated_usd)
         body = {
@@ -499,7 +680,13 @@ class GatewayFinOpsClient:
             "attempt_id": identity.attempt_id,
             "workflow_id": identity.operation_id,
         }
+        if business_subject_ref:
+            body["business_subject_ref"] = business_subject_ref
         status, payload = self._post("/v1/budget/reserve", body)
+        if payload.get("error_code") == "invalid_attribution":
+            # The customer ID came from the caller, so this is the caller's error, not a budget refusal.
+            reason = _denial_reason(payload, "reason", "message", "error")
+            raise GatewayAdmissionDenied(f"gateway reserve refused: {reason}", code="invalid_attribution", http_status=400)
         if status == 402 or payload.get("allowed") is False:
             reason = _denial_reason(payload, "reason", "error_code")
             raise GatewayAdmissionDenied(f"gateway admission denied: {reason}", code="budget_denied", http_status=402)
@@ -646,19 +833,15 @@ class GatewayFinOpsClient:
             # Transport failure is never a financial acknowledgment — even for cancel.
             return {"result": "pending", "status": "pending", "error": str(exc)}
         code = self._result_code(payload)
-        # Only applied/duplicate acknowledge cancel or unknown; HTTP 200 + pending
-        # keeps the durable queue entry for retry.
-        if status >= 400 or code not in {"applied", "duplicate"}:
+        if not _settlement_delivered(event, status, code):
             self._persist_delivery(reservation, body=body, error=error or str(code or status))
             return {"result": "pending", "status": "pending", "http_status": status, **payload}
-        # Durable cancel/unknown ack: drop open only for cancel_before_call.
+        self.store.ack_body(body)
+        # Drop open only for cancel_before_call: an unknown outcome can still be
+        # settled by late evidence.
         if not dispatched:
             try:
                 self.store.drop_open(reservation.identity.attempt_id)
-                for item in self.store.list_pending():
-                    b = item.get("body") if isinstance(item.get("body"), dict) else {}
-                    if str(b.get("idempotency_key") or "") == body["idempotency_key"]:
-                        self.store.ack_pending(str(item.get("_path") or ""))
             except Exception:
                 pass
             self._open.pop(reservation.identity.attempt_id, None)
@@ -700,47 +883,57 @@ class GatewayFinOpsClient:
             pass
 
     def flush_pending(self) -> dict[str, int]:
-        """Redeliver durable pending settlement bodies after restart.
+        """Redeliver durable pending settlement bodies, after a failed send or a restart.
 
-        Only ``applied`` / ``duplicate`` acknowledge a queued delivery. HTTP 200 with
-        ``result=pending`` must keep the queue entry and open reservation so the
-        exact known amount can be retried.
+        HTTP 200 with ``result=pending`` on ``usage_known`` keeps the queue entry and
+        open reservation so the exact known amount can be retried. A settlement FinOps
+        refuses outright, or one too old to matter, is set aside for an operator.
         """
         applied = 0
         failed = 0
+        quarantined = 0
         for item in self.store.list_pending():
             body = item.get("body") if isinstance(item.get("body"), dict) else None
             path = str(item.get("_path") or "")
             if not body or not path:
                 continue
+            if time.time() - float(item.get("enqueued_at") or 0) > _PENDING_MAX_AGE_S:
+                self.store.quarantine_pending(path, "older than the retry window")
+                quarantined += 1
+                continue
+            event = str(body.get("event") or "")
             try:
                 status, payload = self._post("/v1/budget/settle", body)
-                code = self._result_code(payload)
-                if status < 400 and code in {"applied", "duplicate"}:
-                    self.store.ack_pending(path)
-                    # Finalize matching open record when usage_known settles.
-                    event = str(body.get("event") or "")
-                    rid_call = str(body.get("call_id") or "")
-                    if event == "usage_known":
-                        for attempt_id, open_rsv in list(self._open.items()):
-                            if (
-                                open_rsv.reservation_id == body.get("reservation_id")
-                                and open_rsv.identity.call_id == rid_call
-                            ):
-                                open_rsv.status = "settled"
-                                if body.get("actual_usd_micros") is not None:
-                                    open_rsv.settled_usd_micros = int(body["actual_usd_micros"])
-                                try:
-                                    self.store.drop_open(attempt_id)
-                                except Exception:
-                                    pass
-                                self._open.pop(attempt_id, None)
-                    applied += 1
-                else:
-                    failed += 1
             except Exception:
+                # FinOps is unreachable, so the rest would only wait out the same timeout.
                 failed += 1
-        return {"applied": applied, "failed": failed}
+                break
+            code = self._result_code(payload)
+            if status in _PERMANENT_REFUSALS:
+                self.store.quarantine_pending(path, f"FinOps refused it with HTTP {status}")
+                quarantined += 1
+            elif _settlement_delivered(event, status, code):
+                self.store.ack_pending(path)
+                # Finalize matching open record when usage_known settles.
+                rid_call = str(body.get("call_id") or "")
+                if event == "usage_known":
+                    for attempt_id, open_rsv in list(self._open.items()):
+                        if (
+                            open_rsv.reservation_id == body.get("reservation_id")
+                            and open_rsv.identity.call_id == rid_call
+                        ):
+                            open_rsv.status = "settled"
+                            if body.get("actual_usd_micros") is not None:
+                                open_rsv.settled_usd_micros = int(body["actual_usd_micros"])
+                            try:
+                                self.store.drop_open(attempt_id)
+                            except Exception:
+                                pass
+                            self._open.pop(attempt_id, None)
+                applied += 1
+            else:
+                failed += 1
+        return {"applied": applied, "failed": failed, "quarantined": quarantined}
 
     def get_open(self, attempt_id: str) -> Optional[AttemptReservation]:
         hit = self._open.get(attempt_id)

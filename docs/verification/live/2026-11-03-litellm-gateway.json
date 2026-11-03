@@ -1,0 +1,358 @@
+{
+  "schema": "kazenai.live-verification.v1",
+  "note": "No keys, prompts or outputs. Real LiteLLM proxy from tests/litellm_proxy_harness.lock (no litellm-enterprise), real Agent FinOps on Postgres on loopback, real OpenAI and Anthropic.",
+  "source_tree": "kazenai-core working tree for 1.2.2, 2026-11-03, final code before commit",
+  "claim": "Through the LiteLLM callback, a per-customer limit refuses a streamed call with HTTP 402 before dispatch, a streamed call settles to the price of the usage the provider reported, cache reads and writes settle at their own rates, a client that leaves mid-stream stays pending, and a bad customer ID gets HTTP 400. monitor() settles streamed and Responses calls with cached tokens at the cached rate.",
+  "command": "KAZENAI_LIVE_FRAMEWORK_SMOKE=1 pytest tests/test_live_framework_smoke.py -k '(litellm or (monitor_streams_bill and openai) or monitor_responses) and not anthropic_cache', one run per LiteLLM version",
+  "failed_attempts_note": "Earlier runs that day failed for these reasons, all fixed: the proxy config had no KAZENAI_TIER_MISMATCH_MULTIPLIER; drop_params false made LiteLLM refuse monitor()'s service_tier for Anthropic models; the OpenAI cache tests varied `user`, repeated a prompt into the loop detector, used a prompt under OpenAI's 1,024-token minimum, and missed prompt_cache_key on Responses; a bad customer ID got HTTP 402 because the callback misread FinOps's reply, a real bug, now fixed. One Anthropic cache write used a larger prompt than intended and cost $0.016.",
+  "spend_usd": {
+    "gpt-4o-mini": 0.0078,
+    "claude-haiku-4-5": 0.0203,
+    "note": "All 15 runs that day, from settled ledger amounts, plus at most $0.00018 for each of five client-left calls, which never get a final amount."
+  },
+  "runs": [
+    {
+      "litellm": "1.106.6",
+      "kazenai": "1.2.2",
+      "openai": "2.54.0",
+      "cells_passed": 12,
+      "cells": [
+        {
+          "cell": "litellm.app_owned.anthropic",
+          "passed": true,
+          "model": "claude-haiku-4-5",
+          "expected_cost_usd": [
+            3.4e-05,
+            3.4e-05
+          ],
+          "settled_usd_micros": [
+            34,
+            34
+          ]
+        },
+        {
+          "cell": "litellm.app_owned.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "expected_cost_usd": [
+            3e-06,
+            3e-06
+          ],
+          "settled_usd_micros": [
+            3,
+            3
+          ]
+        },
+        {
+          "cell": "litellm.gateway_owned.anthropic",
+          "passed": true,
+          "model": "claude-haiku-4-5",
+          "usage": [
+            14,
+            4
+          ],
+          "expected_cost_usd": 3.4e-05,
+          "settled_usd_micros": 34,
+          "deny_http_status": 402
+        },
+        {
+          "cell": "litellm.gateway_owned.bad_customer",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "http_status": 400
+        },
+        {
+          "cell": "litellm.gateway_owned.cached.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "usage": [
+            1425,
+            1
+          ],
+          "settled_usd_micros": 109,
+          "cached_tokens": 1408,
+          "calls": 2
+        },
+        {
+          "cell": "litellm.gateway_owned.client_left",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "reserved_usd_micros": 480,
+          "state": "pending_reconciliation"
+        },
+        {
+          "cell": "litellm.gateway_owned.customer_stream.anthropic",
+          "passed": true,
+          "model": "claude-haiku-4-5",
+          "usage": [
+            14,
+            4
+          ],
+          "expected_cost_usd": 3.4e-05,
+          "settled_usd_micros": 34,
+          "reserved_usd_micros": 3280,
+          "deny_http_status": 402,
+          "customer_denied_before_dispatch": true
+        },
+        {
+          "cell": "litellm.gateway_owned.customer_stream.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "usage": [
+            14,
+            1
+          ],
+          "expected_cost_usd": 3e-06,
+          "settled_usd_micros": 3,
+          "reserved_usd_micros": 454,
+          "deny_http_status": 402,
+          "customer_denied_before_dispatch": true
+        },
+        {
+          "cell": "litellm.gateway_owned.injected_limit.anthropic",
+          "passed": true,
+          "model": "claude-haiku-4-5",
+          "usage": [
+            14,
+            4
+          ],
+          "settled_usd_micros": 34,
+          "reserved_usd_micros": 42960,
+          "bound": 8192
+        },
+        {
+          "cell": "litellm.gateway_owned.injected_limit.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "usage": [
+            14,
+            1
+          ],
+          "settled_usd_micros": 3,
+          "reserved_usd_micros": 10131,
+          "bound": 16384
+        },
+        {
+          "cell": "litellm.gateway_owned.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "usage": [
+            14,
+            1
+          ],
+          "expected_cost_usd": 3e-06,
+          "settled_usd_micros": 3,
+          "deny_http_status": 402
+        },
+        {
+          "cell": "monitor.stream.cached.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "settled_usd_micros": 109,
+          "read": 1408,
+          "written": 0,
+          "uncached": 17
+        }
+      ]
+    },
+    {
+      "litellm": "1.104.2",
+      "kazenai": "1.2.2",
+      "openai": "2.54.0",
+      "cells_passed": 12,
+      "cells": [
+        {
+          "cell": "litellm.app_owned.anthropic",
+          "passed": true,
+          "model": "claude-haiku-4-5",
+          "expected_cost_usd": [
+            3.4e-05,
+            3.4e-05
+          ],
+          "settled_usd_micros": [
+            34,
+            34
+          ]
+        },
+        {
+          "cell": "litellm.app_owned.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "expected_cost_usd": [
+            3e-06,
+            3e-06
+          ],
+          "settled_usd_micros": [
+            3,
+            3
+          ]
+        },
+        {
+          "cell": "litellm.gateway_owned.anthropic",
+          "passed": true,
+          "model": "claude-haiku-4-5",
+          "usage": [
+            14,
+            4
+          ],
+          "expected_cost_usd": 3.4e-05,
+          "settled_usd_micros": 34,
+          "deny_http_status": 402
+        },
+        {
+          "cell": "litellm.gateway_owned.bad_customer",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "http_status": 400
+        },
+        {
+          "cell": "litellm.gateway_owned.cached.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "usage": [
+            1425,
+            1
+          ],
+          "settled_usd_micros": 109,
+          "cached_tokens": 1408,
+          "calls": 2
+        },
+        {
+          "cell": "litellm.gateway_owned.client_left",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "reserved_usd_micros": 480,
+          "state": "pending_reconciliation"
+        },
+        {
+          "cell": "litellm.gateway_owned.customer_stream.anthropic",
+          "passed": true,
+          "model": "claude-haiku-4-5",
+          "usage": [
+            14,
+            4
+          ],
+          "expected_cost_usd": 3.4e-05,
+          "settled_usd_micros": 34,
+          "reserved_usd_micros": 3280,
+          "deny_http_status": 402,
+          "customer_denied_before_dispatch": true
+        },
+        {
+          "cell": "litellm.gateway_owned.customer_stream.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "usage": [
+            14,
+            1
+          ],
+          "expected_cost_usd": 3e-06,
+          "settled_usd_micros": 3,
+          "reserved_usd_micros": 454,
+          "deny_http_status": 402,
+          "customer_denied_before_dispatch": true
+        },
+        {
+          "cell": "litellm.gateway_owned.injected_limit.anthropic",
+          "passed": true,
+          "model": "claude-haiku-4-5",
+          "usage": [
+            14,
+            4
+          ],
+          "settled_usd_micros": 34,
+          "reserved_usd_micros": 42960,
+          "bound": 8192
+        },
+        {
+          "cell": "litellm.gateway_owned.injected_limit.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "usage": [
+            14,
+            1
+          ],
+          "settled_usd_micros": 3,
+          "reserved_usd_micros": 10131,
+          "bound": 16384
+        },
+        {
+          "cell": "litellm.gateway_owned.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "usage": [
+            14,
+            1
+          ],
+          "expected_cost_usd": 3e-06,
+          "settled_usd_micros": 3,
+          "deny_http_status": 402
+        },
+        {
+          "cell": "monitor.stream.cached.openai",
+          "passed": true,
+          "model": "gpt-4o-mini",
+          "settled_usd_micros": 109,
+          "read": 1408,
+          "written": 0,
+          "uncached": 17
+        }
+      ]
+    }
+  ],
+  "anthropic_cache_run": {
+    "litellm": "1.106.6",
+    "note": "One run, before the last fixes, which touched the customer-ID refusal and OpenAI Responses usage, not Anthropic pricing. Not rerun, because a cache write costs money.",
+    "cells": [
+      {
+        "cell": "litellm.gateway_owned.cached.anthropic",
+        "passed": true,
+        "model": "claude-haiku-4-5",
+        "calls": [
+          {
+            "read": 0,
+            "written": 12913,
+            "uncached": 7,
+            "settled": 16169
+          },
+          {
+            "read": 12913,
+            "written": 0,
+            "uncached": 7,
+            "settled": 1319
+          }
+        ]
+      },
+      {
+        "cell": "monitor.stream.cached.anthropic",
+        "passed": true,
+        "model": "claude-haiku-4-5",
+        "settled_usd_micros": 1319,
+        "read": 12913,
+        "written": 0,
+        "uncached": 7
+      }
+    ]
+  },
+  "responses_cache_run": {
+    "cells": [
+      {
+        "cell": "monitor.responses.cached.openai",
+        "passed": true,
+        "model": "gpt-4o-mini",
+        "modes": {
+          "plain": {
+            "cached": 1280,
+            "settled": 127,
+            "expected": 126.15
+          },
+          "stream": {
+            "cached": 1280,
+            "settled": 127,
+            "expected": 126.15
+          }
+        }
+      }
+    ]
+  }
+}

@@ -669,7 +669,8 @@ def _start_proxy(*, gateway_owned: bool, cfg: Dict[str, str], tmp: Path) -> tupl
         "litellm_settings:",
         "  num_retries: 0",
         "  turn_off_message_logging: true",
-        "  drop_params: false",
+        # monitor() pins service_tier, which LiteLLM refuses for Anthropic models otherwise.
+        "  drop_params: true",
     ]
     if gateway_owned:
         lines.append("  callbacks: kazenai_litellm_callback.proxy_handler_instance")
@@ -684,6 +685,8 @@ def _start_proxy(*, gateway_owned: bool, cfg: Dict[str, str], tmp: Path) -> tupl
         "LITELLM_MASTER_KEY": master,
         "PYTHONPATH": str(EXAMPLES),
         "LITELLM_LOG": "ERROR",
+        # Otherwise LiteLLM loads any .env it finds above its own install.
+        "LITELLM_MODE": "PRODUCTION",
     }
     if gateway_owned:
         env.update(
@@ -695,6 +698,7 @@ def _start_proxy(*, gateway_owned: bool, cfg: Dict[str, str], tmp: Path) -> tupl
             KAZENAI_CONTROL_PROFILE="1",
             KAZENAI_ENV="dev",
             KAZENAI_GATEWAY_PENDING_DIR=str(tmp / "gateway-pending"),
+            KAZENAI_TIER_MISMATCH_MULTIPLIER="1",
         )
     log = open(tmp / f"proxy-{port}.log", "w")
     proc = subprocess.Popen([binary, "--config", str(config), "--host", "127.0.0.1", "--port", str(port)], env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -828,6 +832,408 @@ def test_litellm_gateway_owned_accounting(monkeypatch, tmp_path, which):
                 raw.chat.completions.create(**{**kwargs, "extra_body": {"metadata": {"kazenai_operation_id": deny_op, "run_id": deny_op}}})
             assert _ledger(cfg, "workflow_id = %s", (deny_op,)) == []
             cell.update(denied_before_dispatch=True, deny_http_status=denied.value.status_code)
+    finally:
+        _stop(proc)
+
+
+@pytest.mark.parametrize("which", ["openai", "anthropic"])
+def test_litellm_gateway_customer_limit_and_streaming(tmp_path, which):
+    """Through the callback: a customer limit refuses, and a stream settles to its usage."""
+    from openai import APIStatusError, OpenAI
+
+    from kazenai.model_pricing import output_limit_param
+
+    cfg = _finops_cfg()
+    _key("OPENAI_API_KEY"), _key("ANTHROPIC_API_KEY")
+    model = _openai_model() if which == "openai" else _anthropic_model()
+    proc, base, master = _start_proxy(gateway_owned=True, cfg=cfg, tmp=tmp_path)
+    client = OpenAI(base_url=base, api_key=master, max_retries=0)
+    kwargs = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
+        output_limit_param(model): 256,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    try:
+        with _Cell(f"litellm.gateway_owned.customer_stream.{which}", model=model, framework="litellm") as cell:
+            customer = f"live-cust-{uuid.uuid4().hex[:8]}"
+            _create_limit(cfg, dimension="business_subject", dimension_id=customer, limit_usd=1.0)
+            op_id = f"wf-lite-gw-stream-{uuid.uuid4().hex[:8]}"
+            usage = None
+            for chunk in client.chat.completions.create(
+                **kwargs, user=customer, extra_body={"metadata": {"kazenai_operation_id": op_id, "run_id": op_id}}
+            ):
+                usage = chunk.usage or usage
+            assert usage is not None
+            time.sleep(1.0)  # settled from LiteLLM's success event once the stream ends
+            rows = _ledger(cfg, "workflow_id = %s", (op_id,))
+            assert len(rows) == 1, f"one gateway reservation: {len(rows)}"
+            assert rows[0]["state"] == "settled", rows[0]["state"]
+            assert rows[0]["business_subject_ref"] == customer
+            expected = _price(model, usage.prompt_tokens, usage.completion_tokens)
+            assert abs(int(rows[0]["actual_usd_micros"] or 0) - expected * 1_000_000) <= 1, (rows[0], expected)
+            cell.update(
+                usage=(usage.prompt_tokens, usage.completion_tokens),
+                expected_cost_usd=expected,
+                settled_usd_micros=rows[0]["actual_usd_micros"],
+                reserved_usd_micros=rows[0]["reserved_usd_micros"],
+            )
+
+            blocked = f"live-cust-blocked-{uuid.uuid4().hex[:8]}"
+            _create_limit(cfg, dimension="business_subject", dimension_id=blocked, limit_usd=0.000001)
+            deny_op = f"wf-lite-gw-stream-deny-{uuid.uuid4().hex[:8]}"
+            with pytest.raises(APIStatusError) as denied:
+                client.chat.completions.create(
+                    **kwargs, user=blocked, extra_body={"metadata": {"kazenai_operation_id": deny_op, "run_id": deny_op}}
+                )
+            assert _ledger(cfg, "workflow_id = %s", (deny_op,)) == []
+            cell.update(customer_denied_before_dispatch=True, deny_http_status=denied.value.status_code)
+    finally:
+        _stop(proc)
+
+
+# Measured: "item17" is about 2 tokens on gpt-4o-mini and 3 on claude-haiku-4-5. OpenAI caches
+# from 1,024 tokens. Claude Haiku 4.5 is assumed to cache from 4,096, and a write of this size
+# costs about half a cent.
+OPENAI_CACHE_WORDS = 700
+ANTHROPIC_CACHE_WORDS = 1400
+
+
+def _cacheable_prompt(words: int) -> str:
+    # The same text all day, so a rerun reads the cache instead of paying to write it again.
+    seed = os.getenv("KAZENAI_LIVE_CACHE_SEED") or time.strftime("%Y-%m-%d")
+    return f"Reference text {seed}. " + " ".join(f"item{index % 97}" for index in range(words))
+
+
+def _cached_price_micros(model: str, *, uncached: int, cached: int, write_5m: int, output: int) -> float:
+    from kazenai.cost_engine import TokenCostEngine
+
+    rates = TokenCostEngine()._row(model).rates
+    return float(
+        uncached * rates.input
+        + cached * rates.cached_input
+        + write_5m * (rates.cache_write_5m if rates.cache_write_5m is not None else rates.input)
+        + output * rates.output
+    )
+
+
+def _extra(usage: Any, name: str) -> int:
+    value = getattr(usage, name, None)
+    if value is None:
+        value = (getattr(usage, "model_extra", None) or {}).get(name)
+    return int(value or 0)
+
+
+def test_litellm_gateway_openai_cached_tokens_bill_at_the_cached_rate(tmp_path):
+    from openai import OpenAI
+
+    cfg = _finops_cfg()
+    _key("OPENAI_API_KEY"), _key("ANTHROPIC_API_KEY")
+    model = _openai_model()
+    proc, base, master = _start_proxy(gateway_owned=True, cfg=cfg, tmp=tmp_path)
+    client = OpenAI(base_url=base, api_key=master, max_retries=0)
+    prompt = _cacheable_prompt(OPENAI_CACHE_WORDS)
+    # OpenAI routes its cache partly on `user`, so every attempt has to send the same one.
+    customer = f"live-cust-{uuid.uuid4().hex[:8]}"
+    try:
+        with _Cell("litellm.gateway_owned.cached.openai", model=model, framework="litellm") as cell:
+            # OpenAI caches automatically, and a hit can take a call or two to appear.
+            for attempt in range(4):
+                op_id = f"wf-lite-gw-cache-{uuid.uuid4().hex[:8]}"
+                usage = None
+                for chunk in client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}, {"role": "user", "content": "Reply with: ok"}],
+                    max_tokens=16,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    user=customer,
+                    extra_body={"metadata": {"kazenai_operation_id": op_id, "run_id": op_id}},
+                ):
+                    usage = chunk.usage or usage
+                assert usage is not None
+                cached = int(getattr(usage.prompt_tokens_details, "cached_tokens", 0) or 0)
+                if cached:
+                    break
+                time.sleep(2.0)
+            assert cached > 0, f"no cache hit after {attempt + 1} calls"
+            time.sleep(1.0)
+            rows = _ledger(cfg, "workflow_id = %s", (op_id,))
+            expected = _cached_price_micros(
+                model, uncached=usage.prompt_tokens - cached, cached=cached, write_5m=0, output=usage.completion_tokens
+            )
+            assert rows[0]["state"] == "settled", rows[0]["state"]
+            assert abs(int(rows[0]["actual_usd_micros"]) - expected) <= 1, (rows[0], expected)
+            cell.update(
+                usage=(usage.prompt_tokens, usage.completion_tokens),
+                cached_tokens=cached,
+                calls=attempt + 1,
+                settled_usd_micros=rows[0]["actual_usd_micros"],
+                expected_micros=expected,
+            )
+    finally:
+        _stop(proc)
+
+
+def test_litellm_gateway_anthropic_cache_tokens_bill_at_their_rates(tmp_path):
+    from openai import OpenAI
+
+    cfg = _finops_cfg()
+    _key("OPENAI_API_KEY"), _key("ANTHROPIC_API_KEY")
+    model = _anthropic_model()
+    proc, base, master = _start_proxy(gateway_owned=True, cfg=cfg, tmp=tmp_path)
+    client = OpenAI(base_url=base, api_key=master, max_retries=0)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _cacheable_prompt(ANTHROPIC_CACHE_WORDS), "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "Reply with: ok"},
+            ],
+        }
+    ]
+
+    def stream_once() -> tuple[str, Any]:
+        op_id = f"wf-lite-gw-acache-{uuid.uuid4().hex[:8]}"
+        usage = None
+        for chunk in client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=16,
+            stream=True,
+            stream_options={"include_usage": True},
+            user=f"live-cust-{uuid.uuid4().hex[:8]}",
+            extra_body={"metadata": {"kazenai_operation_id": op_id, "run_id": op_id}},
+        ):
+            usage = chunk.usage or usage
+        assert usage is not None
+        time.sleep(1.0)
+        return op_id, usage
+
+    try:
+        with _Cell("litellm.gateway_owned.cached.anthropic", model=model, framework="litellm") as cell:
+            calls = []
+            for _ in range(2):  # the first writes the cache unless a run today already did; the second reads it
+                op_id, usage = stream_once()
+                read = _extra(usage, "cache_read_input_tokens")
+                written = _extra(usage, "cache_creation_input_tokens")
+                uncached = usage.prompt_tokens - read - written
+                expected = _cached_price_micros(
+                    model, uncached=uncached, cached=read, write_5m=written, output=usage.completion_tokens
+                )
+                rows = _ledger(cfg, "workflow_id = %s", (op_id,))
+                assert rows[0]["state"] == "settled", rows[0]["state"]
+                assert abs(int(rows[0]["actual_usd_micros"]) - expected) <= 1, (rows[0], expected)
+                calls.append(
+                    {"read": read, "written": written, "uncached": uncached, "settled": rows[0]["actual_usd_micros"]}
+                )
+            assert calls[-1]["read"] > 0, calls
+            cell.update(calls=calls)
+    finally:
+        _stop(proc)
+
+
+@pytest.mark.parametrize("which", ["openai", "anthropic"])
+def test_monitor_streams_bill_cache_tokens_at_their_rates(monkeypatch, which):
+    """Directly to the provider, no proxy: what a stream settles at under monitor()."""
+    from kazenai import monitor
+
+    cfg = _finops_cfg()
+    key = _key("OPENAI_API_KEY") if which == "openai" else _key("ANTHROPIC_API_KEY")
+    _finops_mode(monkeypatch, cfg)
+    model = _openai_model() if which == "openai" else _anthropic_model()
+    workflow_id = f"wf-live-mon-cache-{uuid.uuid4().hex[:8]}"
+    _create_limit(cfg, dimension="workflow", dimension_id=workflow_id, limit_usd=1.0)
+    scope = {"org_id": cfg["org"], "workspace_id": cfg["ws"], "workflow_id": workflow_id, "feature_id": "live-cache"}
+    with _Cell(f"monitor.stream.cached.{which}", model=model, framework="none") as cell:
+        if which == "openai":
+            from openai import OpenAI
+
+            messages = [
+                {"role": "user", "content": _cacheable_prompt(OPENAI_CACHE_WORDS)},
+                {"role": "user", "content": "Reply with: ok"},
+            ]
+            usage = None
+            for attempt in range(3):
+                # A new client each time: the loop detector rightly stops one repeating itself.
+                client = monitor(OpenAI(api_key=key, max_retries=0), **scope)
+                for chunk in client.chat.completions.create(model=model, messages=messages, max_tokens=16, stream=True):
+                    usage = chunk.usage or usage
+                read = int(getattr(usage.prompt_tokens_details, "cached_tokens", 0) or 0)
+                if read:
+                    break
+                time.sleep(2.0)
+            uncached, written, output = usage.prompt_tokens - read, 0, usage.completion_tokens
+        else:
+            import anthropic
+
+            client = monitor(anthropic.Anthropic(api_key=key, max_retries=0), **scope)
+            content = [
+                {"type": "text", "text": _cacheable_prompt(ANTHROPIC_CACHE_WORDS), "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "Reply with: ok"},
+            ]
+            read = written = uncached = output = 0
+            for event in client.messages.create(
+                model=model, max_tokens=16, messages=[{"role": "user", "content": content}], stream=True
+            ):
+                if event.type == "message_start":
+                    start = event.message.usage
+                    uncached = int(start.input_tokens or 0)
+                    read = int(start.cache_read_input_tokens or 0)
+                    written = int(start.cache_creation_input_tokens or 0)
+                elif event.type == "message_delta":
+                    output = int(event.usage.output_tokens or 0)
+        assert read > 0, "no cache hit"
+        time.sleep(1.0)
+        rows = _ledger(cfg, "workflow_id = %s", (workflow_id,))
+        expected = _cached_price_micros(model, uncached=uncached, cached=read, write_5m=written, output=output)
+        assert rows[-1]["state"] == "settled", rows[-1]["state"]
+        assert abs(int(rows[-1]["actual_usd_micros"]) - expected) <= 1, (rows[-1], expected)
+        cell.update(read=read, written=written, uncached=uncached, settled_usd_micros=rows[-1]["actual_usd_micros"])
+
+
+def test_monitor_responses_bill_cached_tokens_at_the_cached_rate(monkeypatch):
+    """A plain and a streamed Responses call, directly to OpenAI."""
+    from openai import OpenAI
+
+    from kazenai import monitor
+
+    cfg = _finops_cfg()
+    key = _key("OPENAI_API_KEY")
+    _finops_mode(monkeypatch, cfg)
+    model = _openai_model()
+    prompt = _cacheable_prompt(OPENAI_CACHE_WORDS)
+    with _Cell("monitor.responses.cached.openai", model=model, framework="none") as cell:
+        seen: dict[str, Any] = {}
+        for mode in ("plain", "stream"):
+            workflow_id = f"wf-live-resp-cache-{mode}-{uuid.uuid4().hex[:8]}"
+            _create_limit(cfg, dimension="workflow", dimension_id=workflow_id, limit_usd=1.0)
+            scope = {"org_id": cfg["org"], "workspace_id": cfg["ws"], "workflow_id": workflow_id, "feature_id": "live-cache"}
+            usage = None
+            request = {
+                "model": model,
+                "input": prompt,
+                "max_output_tokens": 16,
+                # OpenAI routes the Responses cache on this; plain calls missed without it.
+                "prompt_cache_key": "kazenai-live-cache",
+            }
+            for _attempt in range(3):
+                client = monitor(OpenAI(api_key=key, max_retries=0), **scope)
+                if mode == "plain":
+                    usage = client.responses.create(**request).usage
+                else:
+                    for event in client.responses.create(**request, stream=True):
+                        # The 16-token limit usually ends the stream as incomplete.
+                        if event.type in {"response.completed", "response.incomplete"}:
+                            usage = event.response.usage
+                cached = int(usage.input_tokens_details.cached_tokens or 0)
+                if cached:
+                    break
+                time.sleep(3.0)
+            assert cached > 0, f"no cache hit on the {mode} call"
+            time.sleep(1.0)
+            rows = _ledger(cfg, "workflow_id = %s", (workflow_id,))
+            expected = _cached_price_micros(
+                model, uncached=usage.input_tokens - cached, cached=cached, write_5m=0, output=usage.output_tokens
+            )
+            assert rows[-1]["state"] == "settled", rows[-1]["state"]
+            assert abs(int(rows[-1]["actual_usd_micros"]) - expected) <= 1, (mode, rows[-1], expected)
+            seen[mode] = {"cached": cached, "settled": rows[-1]["actual_usd_micros"], "expected": expected}
+        cell.update(modes=seen)
+
+
+def test_litellm_gateway_client_leaving_mid_stream_keeps_the_hold(tmp_path):
+    import httpx
+
+    cfg = _finops_cfg()
+    _key("OPENAI_API_KEY"), _key("ANTHROPIC_API_KEY")
+    model = _openai_model()
+    proc, base, master = _start_proxy(gateway_owned=True, cfg=cfg, tmp=tmp_path)
+    try:
+        with _Cell("litellm.gateway_owned.client_left", model=model, framework="litellm") as cell:
+            op_id = f"wf-lite-gw-left-{uuid.uuid4().hex[:8]}"
+            with httpx.stream(
+                "POST",
+                f"{base}/chat/completions",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": "Count from 1 to 100, one number per line."}],
+                    "max_tokens": 300,
+                    "stream": True,
+                    "user": f"live-cust-{uuid.uuid4().hex[:8]}",
+                    "metadata": {"kazenai_operation_id": op_id, "run_id": op_id},
+                },
+                headers={"Authorization": f"Bearer {master}"},
+                timeout=60,
+            ) as response:
+                assert response.status_code == 200
+                for _ in response.iter_bytes():
+                    break
+            time.sleep(4.0)
+            rows = _ledger(cfg, "workflow_id = %s", (op_id,))
+            assert len(rows) == 1
+            assert rows[0]["state"] == "pending_reconciliation", rows[0]["state"]
+            assert rows[0]["actual_usd_micros"] is None
+            cell.update(state=rows[0]["state"], reserved_usd_micros=rows[0]["reserved_usd_micros"])
+    finally:
+        _stop(proc)
+
+
+def test_litellm_gateway_bad_customer_id_is_the_callers_error(tmp_path):
+    from openai import BadRequestError, OpenAI
+
+    cfg = _finops_cfg()
+    _key("OPENAI_API_KEY"), _key("ANTHROPIC_API_KEY")
+    model = _openai_model()
+    proc, base, master = _start_proxy(gateway_owned=True, cfg=cfg, tmp=tmp_path)
+    try:
+        with _Cell("litellm.gateway_owned.bad_customer", model=model, framework="litellm") as cell:
+            op_id = f"wf-lite-gw-badid-{uuid.uuid4().hex[:8]}"
+            with pytest.raises(BadRequestError) as refused:
+                OpenAI(base_url=base, api_key=master, max_retries=0).chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "Reply with: ok"}],
+                    max_tokens=16,
+                    user="not a valid id!",
+                    extra_body={"metadata": {"kazenai_operation_id": op_id, "run_id": op_id}},
+                )
+            assert _ledger(cfg, "workflow_id = %s", (op_id,)) == []
+            cell.update(http_status=refused.value.status_code, message=str(refused.value)[:160])
+    finally:
+        _stop(proc)
+
+
+@pytest.mark.parametrize("which", ["openai", "anthropic"])
+def test_litellm_gateway_injected_output_limit_is_accepted(tmp_path, which):
+    """No limit in the request: the callback adds the model's bound, and the provider must accept it."""
+    from openai import OpenAI
+
+    from kazenai.model_pricing import default_max_output_tokens
+
+    cfg = _finops_cfg()
+    _key("OPENAI_API_KEY"), _key("ANTHROPIC_API_KEY")
+    model = _openai_model() if which == "openai" else _anthropic_model()
+    proc, base, master = _start_proxy(gateway_owned=True, cfg=cfg, tmp=tmp_path)
+    try:
+        with _Cell(f"litellm.gateway_owned.injected_limit.{which}", model=model, framework="litellm") as cell:
+            op_id = f"wf-lite-gw-limit-{uuid.uuid4().hex[:8]}"
+            resp = OpenAI(base_url=base, api_key=master, max_retries=0).chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Reply with the single word: ok"}],
+                extra_body={"metadata": {"kazenai_operation_id": op_id, "run_id": op_id}},
+            )
+            assert resp.choices[0].message.content
+            time.sleep(1.0)
+            rows = _ledger(cfg, "workflow_id = %s", (op_id,))
+            assert rows[0]["state"] == "settled", rows[0]["state"]
+            bound = default_max_output_tokens(model)
+            cell.update(
+                bound=bound,
+                reserved_usd_micros=rows[0]["reserved_usd_micros"],
+                settled_usd_micros=rows[0]["actual_usd_micros"],
+                usage=(resp.usage.prompt_tokens, resp.usage.completion_tokens),
+            )
     finally:
         _stop(proc)
 
