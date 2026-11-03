@@ -1,11 +1,11 @@
 # Supported integrations
 
-This page lists what KazenAI Control supports in `kazenai` 1.2.1, how each
+This page lists what KazenAI Control supports in `kazenai` 1.2.2, how each
 integration was verified, and the known limits. The machine-readable version is
 [`control-supported-matrix.json`](./control-supported-matrix.json); it is checked
 by the test suite, so the two stay in step.
 
-Packages: `kazenai` 1.2.1, `kazenai-finops` 1.2.1 and `kazen-event-schema` 0.6.6,
+Packages: `kazenai` 1.2.2, `kazenai-finops` 1.2.1 and `kazen-event-schema` 0.6.6,
 on PyPI since 2026-10-31 (1.2.0 since 2026-10-28). Hosted Agent FinOps (limits and run receipts)
 requires `kazenai>=1.2.0`: it refuses the legacy check path that earlier releases
 use, so they fail closed against it.
