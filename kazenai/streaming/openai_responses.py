@@ -62,7 +62,7 @@ def usage_from_response_usage(usage: Any) -> Optional[StreamUsage]:
     total = _int(usage, "total_tokens")
     if total is None and inp is not None and out is not None:
         total = inp + out
-    raw = {
+    raw: dict[str, Any] = {
         key: value
         for key, value in {
             "input_tokens": inp,
@@ -73,6 +73,9 @@ def usage_from_response_usage(usage: Any) -> Optional[StreamUsage]:
         }.items()
         if value is not None
     }
+    # Pricing bills cached input at its own rate, and reads it from this shape.
+    if raw.get("cached_tokens"):
+        raw["input_tokens_details"] = {"cached_tokens": raw["cached_tokens"]}
     return StreamUsage(
         prompt_tokens=inp,
         completion_tokens=out,

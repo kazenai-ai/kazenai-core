@@ -36,13 +36,13 @@ KazenAI:            Pre-flight check → BLOCKED → LLM call never made
 ## Install
 
 ```bash
-python -m pip install "kazenai[openai]==1.2.1"
+python -m pip install "kazenai[openai]==1.2.2"
 # Most teams install the customer package instead:
-python -m pip install "kazenai-finops[openai]==1.2.1"
+python -m pip install "kazenai-finops[openai]==1.2.2"
 # Anthropic:
-# python -m pip install "kazenai-finops[anthropic]==1.2.1"
+# python -m pip install "kazenai-finops[anthropic]==1.2.2"
 # Both providers:
-# python -m pip install "kazenai-finops[providers]==1.2.1"
+# python -m pip install "kazenai-finops[providers]==1.2.2"
 ```
 
 `kazenai-finops` re-exports this SDK and is the recommended install for product integrations.
@@ -177,7 +177,7 @@ deprecated, warns, and is removed in 2.0. Hosted Agent FinOps refuses it.
 | Anthropic `messages.create` / `.stream`, sync and async, streaming and non-streaming | Supported, verified against the live API |
 | LangChain `ChatOpenAI` / `ChatAnthropic` | Supported when bound with `bind_monitored_chat_openai` / `bind_monitored_chat_anthropic` |
 | LangGraph | Supported when the graph declares every provider client its nodes use; raw clients created inside nodes are not intercepted |
-| LiteLLM proxy | Supported with application-owned or gateway-owned accounting (gateway-owned streaming settlement not yet verified); see [LiteLLM gateway](#litellm-gateway) |
+| LiteLLM proxy | Supported with application-owned or gateway-owned accounting, streaming included; see [LiteLLM gateway](#litellm-gateway) |
 | OpenAI `responses.create` / `.stream` / `.parse`, sync and async, streaming and non-streaming | Supported, verified against the live API (new in 1.2.0). Refused before dispatch: `background=True`, `previous_response_id` / `conversation` / stored `prompt`, built-in tools |
 | CrewAI 1.15.26 (`kickoff`, `akickoff`, `kickoff_async`) | Supported, verified against the live API, when every LLM is bound with `bind_crew_llm_client`; memory, knowledge, `Crew(stream=True)` and `llm_overlay` are refused under Control. Python 3.10–3.13 (CrewAI doesn't install on 3.14 yet) |
 | Other OpenAI endpoints (embeddings, images, audio, batches, fine-tuning, Realtime, legacy `completions`) and any provider method saved before `monitor()` | Refused before dispatch with `UnsupportedModeError`; `monitor(..., allow_unmetered=("/embeddings",))` sends named endpoints without a budget check |
@@ -200,9 +200,30 @@ environment_variables:
 ```
 
 Set the usual Agent FinOps variables in the proxy, and keep its retries off
-(`num_retries: 0`). Applications send `metadata={"kazenai_operation_id": ...}` and
-do not reserve again. `kazenai` does not depend on or bundle LiteLLM; the callback
-uses only LiteLLM's MIT-licensed `CustomLogger`.
+(`num_retries: 0`). Applications name the customer the usual LiteLLM way (`user`, or
+its customer headers), send `metadata={"kazenai_operation_id": ...}` and do not
+reserve again. A call that names no customer is checked against the organization
+and workspace limits only; set `KAZENAI_REQUIRE_CUSTOMER_ID=1` to refuse it with HTTP
+400 instead.
+
+The callback holds what a call can cost before it runs: it adds an output limit when
+a chat or Responses request has none and lowers one above the model's bound, the way
+`monitor()` does. An endpoint other than the provider's own API is priced with the same
+uplift as `monitor()`, unless declared in `KAZENAI_ENDPOINT_PRICE_MULTIPLIERS`.
+
+A stream settles when it ends, if the provider finished it and reported usage.
+Otherwise it stays pending and its hold remains until it's reconciled: a stream the
+provider cut off, one that fails midway, or one whose client leaves. A LiteLLM cache
+hit settles at $0. A settlement that fails to send is kept on disk
+(`KAZENAI_GATEWAY_PENDING_DIR`) and resent by later traffic, and one Agent FinOps
+refuses moves to `quarantine/` there for review. `kazenai` does not depend on or bundle
+LiteLLM; the callback uses only LiteLLM's MIT-licensed `CustomLogger`.
+
+To keep accounting in the application instead, wrap an OpenAI client pointed at the
+proxy with `monitor()`, and load no callback. Two proxy settings matter then: turn on
+`drop_params: true` for models that aren't OpenAI's, because `monitor()` pins
+`service_tier` and LiteLLM refuses it for them otherwise, and use real model names or
+price your aliases, because `monitor()` refuses a model it has no price for.
 
 Inline images are priced before the call. Files and documents sent by reference
 are refused. `observe_unbounded=("images",)` lets image calls through without an
@@ -318,6 +339,9 @@ priced via `KAZENAI_PRICING_JSON`.
 | `KAZENAI_PRICING_LIVE` | `0` turns off the signed live price catalog fetched from FinOps (the bundled snapshot always applies otherwise) |
 | `KAZENAI_PRICING_REFRESH_S` / `KAZENAI_PRICING_CACHE_DIR` | Live catalog refresh interval (default 900 s) and private cache directory |
 | `KAZENAI_ENDPOINT_PRICE_MULTIPLIERS` | Exact-host map (values >= 1) for proxies that bill at list price; other non-first-party hosts are priced at 1.1x |
+| `KAZENAI_REQUIRE_CUSTOMER_ID` | LiteLLM callback only: `1` refuses a call that names no customer with HTTP 400 |
+| `KAZENAI_GATEWAY_PENDING_DIR` | LiteLLM callback only: where unsent settlements are kept (default `~/.kazenai/gateway-pending`) |
+| `KAZENAI_GATEWAY_FLUSH_INTERVAL_S` | LiteLLM callback only: how often later traffic resends unsent settlements (default 30) |
 
 Pass `max_budget_usd` (or `budget=SharedBudget(...)`), `org_id`, `project_id`,
 `workspace_id` and attribution fields directly to `monitor()`; they are not

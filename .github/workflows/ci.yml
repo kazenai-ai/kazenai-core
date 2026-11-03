@@ -94,6 +94,30 @@ jobs:
             exit 1
           fi
 
+  # The LiteLLM callback through a real proxy, from the hash-locked open-components
+  # harness (no litellm-enterprise). Fake provider and fake FinOps on loopback, so
+  # this job has no keys and spends nothing.
+  litellm-proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - run: pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: Build the LiteLLM harness
+        run: |
+          python -m venv "$RUNNER_TEMP/litellm-harness"
+          "$RUNNER_TEMP/litellm-harness/bin/pip" install --require-hashes --no-deps -r tests/litellm_proxy_harness.lock
+          "$RUNNER_TEMP/litellm-harness/bin/pip" install --no-deps -e . "kazen-event-schema>=0.6.6"
+      - name: Callback through a real proxy (fails rather than skips without the harness)
+        env:
+          KAZENAI_LITELLM_PROXY_TESTS: "1"
+          KAZENAI_LITELLM_BIN: ${{ runner.temp }}/litellm-harness/bin/litellm
+          KAZENAI_TIER_MISMATCH_MULTIPLIER: "1"
+        run: pytest -q -rs --no-cov tests/test_litellm_gateway_proxy.py
+
   licence-gate:
     # Licence gate + CycloneDX SBOM (scripts/license_policy.py, licence-gate/license-policy.toml,
     # licence-gate/license-exceptions.toml). Blocking: a denied licence, an invalid SBOM or stale

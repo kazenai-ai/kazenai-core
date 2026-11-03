@@ -98,7 +98,7 @@ def observe_openai_chunk(chunk: Any) -> Tuple[str, Optional[StreamUsage]]:
     prompt_tokens = _field(usage, "prompt_tokens")
     completion_tokens = _field(usage, "completion_tokens")
     total_tokens = _field(usage, "total_tokens")
-    raw = {
+    raw: dict[str, Any] = {
         key: value
         for key, value in {
             "prompt_tokens": prompt_tokens,
@@ -107,6 +107,20 @@ def observe_openai_chunk(chunk: Any) -> Tuple[str, Optional[StreamUsage]]:
         }.items()
         if value is not None
     }
+    # Pricing bills these shares of the prompt at their own rates.
+    details_obj = getattr(usage, "prompt_tokens_details", None)
+    if details_obj is None and isinstance(usage, dict):
+        details_obj = usage.get("prompt_tokens_details")
+    details = {
+        key: value
+        for key, value in {
+            "cached_tokens": _field(details_obj, "cached_tokens"),
+            "audio_tokens": _field(details_obj, "audio_tokens"),
+        }.items()
+        if value
+    }
+    if details:
+        raw["prompt_tokens_details"] = details
     return text, StreamUsage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,

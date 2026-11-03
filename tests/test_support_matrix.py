@@ -123,8 +123,8 @@ def test_litellm_has_machine_readable_cells():
     by_id = {c["id"]: c for c in _load()["cells"]}
     for cid in ("gateway.litellm.app_owned", "gateway.litellm.gateway_owned"):
         assert by_id[cid]["status"] in ADVERTISED, cid
-    # Gateway-owned streaming settlement was not exercised live; the cell must say so.
-    assert "streaming settlement is not live-verified" in by_id["gateway.litellm.gateway_owned"]["notes"]
+    # Gateway-owned streaming settlement was exercised live from 1.2.2; the cell must say so.
+    assert "streaming and non-streaming settled" in by_id["gateway.litellm.gateway_owned"]["notes"]
     assert "own independent budget" in by_id["capability.multi_model_workflow_budget"]["notes"]
 
 

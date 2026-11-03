@@ -688,25 +688,28 @@
         "kazenai-core/tests/test_litellm_proxy_integration.py",
         "kazenai-core/tests/test_live_framework_smoke.py"
       ],
-      "notes": "Live-verified 2026-10-12: LiteLLM 1.104.2 proxy to real OpenAI and Anthropic (gpt-6-luna/claude-sonnet-5-5/claude-haiku-4-5 and gpt-4o-mini/claude-sonnet-4-6/claude-haiku-4-5), real Agent FinOps (Control, Postgres): exactly one reservation per call, settled to the price of the reported usage (streaming and non-streaming), pre-dispatch deny with a deny receipt. Retries/fallbacks off on the proxy."
+      "notes": "Live-verified 2026-10-12 on LiteLLM 1.104.2 (gpt-6-luna/claude-sonnet-5-5/claude-haiku-4-5 and gpt-4o-mini/claude-sonnet-4-6/claude-haiku-4-5), and 2026-11-03 on LiteLLM 1.106.6 and 1.104.2 (gpt-4o-mini/claude-haiku-4-5), real Agent FinOps (Control, Postgres): exactly one reservation per call, settled to the price of the reported usage (streaming and non-streaming), pre-dispatch deny with a deny receipt. Retries/fallbacks off on the proxy. Models that aren't OpenAI's need drop_params: true on the proxy, because monitor() pins service_tier. Evidence: docs/verification/live/2026-11-03-litellm-gateway.json."
     },
     {
       "id": "gateway.litellm.gateway_owned",
       "category": "gateway",
       "name": "LiteLLM proxy, gateway-owned accounting",
-      "detail": "kazenai_litellm_callback reserves before provider dispatch and settles from provider usage; a monitored app with KAZENAI_ENFORCEMENT_OWNER=gateway does not reserve again",
+      "detail": "kazenai_litellm_callback reserves before provider dispatch for LiteLLM's end user, with an output limit and a hold that bound the call, and settles from provider usage, streams included; a monitored app with KAZENAI_ENFORCEMENT_OWNER=gateway does not reserve again",
       "status": "live-verified",
       "evidence": [
         "Verification run, 2026-10-09",
-        "Live framework run, 2026-10-12"
+        "Live framework run, 2026-10-12",
+        "Live framework run, 2026-11-03"
       ],
       "tests": [
         "kazenai-core/tests/test_litellm_control.py",
+        "kazenai-core/tests/test_litellm_gateway_callback.py",
+        "kazenai-core/tests/test_litellm_gateway_proxy.py",
         "kazenai-core/tests/test_litellm_proxy_integration.py",
         "kazenai-core/tests/test_live_framework_smoke.py",
         "kazenai-core/tests/test_live_found_regressions.py"
       ],
-      "notes": "Live-verified 2026-10-12, non-streaming only: LiteLLM 1.104.2 proxy to real OpenAI and Anthropic (gpt-6-luna/claude-sonnet-5-5/claude-haiku-4-5 and gpt-4o-mini/claude-sonnet-4-6/claude-haiku-4-5), real Agent FinOps: one gateway reservation per call (no SDK double count), settled to the price of the reported usage, HTTP 402 before dispatch when the budget is exhausted. Gateway-owned streaming settlement is not live-verified."
+      "notes": "Fixed in kazenai 1.2.2; earlier versions did not settle streams or send the customer. Live-verified 2026-11-03 on LiteLLM 1.106.6 and 1.104.2 (gpt-4o-mini/claude-haiku-4-5), real Agent FinOps on Postgres: one gateway reservation per call (no SDK double count), streaming and non-streaming settled to the price of the reported usage, a per-customer limit refuses with HTTP 402 before dispatch. Live on LiteLLM 1.106.6 too: cache reads and writes settle at their own rates, a client that leaves mid-stream stays pending, a bad customer ID gets HTTP 400. Fixture-verified through a real proxy: a LiteLLM cache hit at $0, a provider stream cut off or with no usage stays pending, an undeclared endpoint with the uplift, unsent settlements resent, KAZENAI_REQUIRE_CUSTOMER_ID. Evidence: docs/verification/live/2026-11-03-litellm-gateway.json."
     },
     {
       "id": "capability.multi_model_workflow_budget",

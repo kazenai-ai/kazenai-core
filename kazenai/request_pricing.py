@@ -1273,6 +1273,11 @@ def usage_components(usage: Any) -> dict[str, int]:
         audio = _nested(usage, "input_tokens_details", "audio_tokens")
     write_5m = _nested(usage, "cache_creation", "ephemeral_5m_input_tokens")
     write_1h = _nested(usage, "cache_creation", "ephemeral_1h_input_tokens")
+    if write_5m == 0 and write_1h == 0:
+        # LiteLLM's normalized usage keeps the same split here.
+        details = ("prompt_tokens_details", "cache_creation_token_details")
+        write_5m = _nested(usage, *details, "ephemeral_5m_input_tokens")
+        write_1h = _nested(usage, *details, "ephemeral_1h_input_tokens")
     creation = _usage_field(usage, "cache_creation_input_tokens")
     if write_5m == 0 and write_1h == 0 and creation:
         write_5m = creation
@@ -1282,7 +1287,10 @@ def usage_components(usage: Any) -> dict[str, int]:
     if isinstance(usage, Mapping):
         has_prompt = "prompt_tokens" in usage or "input_tokens_details" in usage or "prompt_tokens_details" in usage
     else:
-        has_prompt = getattr(usage, "prompt_tokens", None) is not None or getattr(usage, "prompt_tokens_details", None) is not None
+        has_prompt = any(
+            getattr(usage, name, None) is not None
+            for name in ("prompt_tokens", "input_tokens_details", "prompt_tokens_details")
+        )
     if has_prompt and cached:
         uncached = max(0, prompt - cached)
     elif _usage_field(usage, "cache_read_input_tokens") or creation or write_5m or write_1h:
@@ -1290,6 +1298,14 @@ def usage_components(usage: Any) -> dict[str, int]:
     else:
         uncached = prompt
         cached = 0
+    # LiteLLM's normalized ``prompt_tokens`` also includes Anthropic cache writes.
+    # Anthropic's own ``input_tokens`` doesn't, and OpenAI reports no writes.
+    if isinstance(usage, Mapping):
+        normalized = "prompt_tokens" in usage
+    else:
+        normalized = getattr(usage, "prompt_tokens", None) is not None
+    if normalized:
+        uncached = max(0, uncached - write_5m - write_1h)
     # Audio input is reported inside the prompt total; bill it at the audio rate.
     audio = min(max(0, audio), uncached)
     return {

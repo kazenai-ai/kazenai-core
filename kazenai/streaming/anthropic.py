@@ -39,7 +39,7 @@ def _usage_from_obj(
     total = None
     if inp is not None and out is not None:
         total = inp + out
-    raw = {
+    raw: dict[str, Any] = {
         key: value
         for key, value in {
             "input_tokens": inp,
@@ -49,6 +49,18 @@ def _usage_from_obj(
         }.items()
         if value is not None
     }
+    # The 5-minute and 1-hour shares of the cache writes bill at different rates.
+    split = getattr(usage, "cache_creation", None)
+    if split is None and isinstance(usage, dict):
+        split = usage.get("cache_creation")
+    if split is not None:
+        shares = {}
+        for name in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"):
+            share = split.get(name) if isinstance(split, dict) else getattr(split, name, None)
+            if share:
+                shares[name] = int(share)
+        if shares:
+            raw["cache_creation"] = shares
     return StreamUsage(
         input_tokens=inp,
         output_tokens=out,

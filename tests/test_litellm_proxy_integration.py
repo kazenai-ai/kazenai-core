@@ -41,7 +41,7 @@ EXAMPLES = REPO / "kazenai-examples" / "litellm-otel-control"
 ARTIFACTS = REPO / "artifacts"
 # A separate venv name: the old `kazenai-litellm-venv` was built from
 # `litellm[proxy]` and contains litellm-enterprise, so it must not be reused.
-LITELLM_VENV = ARTIFACTS / "kazenai-litellm-harness-venv"
+LITELLM_VENV = ARTIFACTS / "kazenai-litellm-harness-1.106.6-venv"
 HARNESS_LOCK = Path(__file__).resolve().parent / "litellm_proxy_harness.lock"
 
 CONFIG_APP = EXAMPLES / "configs" / "proxy_app_owned.yaml"

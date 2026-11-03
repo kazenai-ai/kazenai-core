@@ -10,8 +10,18 @@ Load it in the proxy's ``config.yaml``::
 
 The proxy process needs ``kazenai`` installed and the usual Agent FinOps settings
 (``KAZENAI_FINOPS_URL``, ``KAZENAI_FINOPS_API_KEY``,
-``KAZENAI_TIER_MISMATCH_MULTIPLIER``). Applications behind the proxy send
+``KAZENAI_TIER_MISMATCH_MULTIPLIER``). Applications behind the proxy name the
+customer the usual LiteLLM way (``user``, or its customer headers), send
 ``metadata={"kazenai_operation_id": ...}`` and must not reserve again.
+
+Chat and Responses calls leave with an output limit, added or lowered to the
+model's bound the way ``monitor()`` does it, so the hold covers what the call can
+cost. A stream or a LiteLLM cache hit settles from its success event, because
+LiteLLM returns both before the deployment success hook runs. A stream settles only
+if the provider finished it and reported usage; otherwise it stays pending.
+
+``KAZENAI_REQUIRE_CUSTOMER_ID=1`` refuses a call that names no customer. Calls to
+FinOps run off the event loop, and a settlement that failed to send is resent.
 
 Licensing: ``kazenai`` does not depend on or bundle LiteLLM. This module imports
 only ``litellm.integrations.custom_logger`` from the LiteLLM you already run,
@@ -23,20 +33,30 @@ Import this module only inside the gateway process; ``import kazenai`` never loa
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
+from decimal import Decimal
 from typing import Any, Mapping
 
 from kazenai.integrations.litellm_control import (
     GATEWAY_OWNER,
     GatewayAdmissionDenied,
     GatewayFinOpsClient,
-    estimate_cost_usd,
+    client_disconnected,
+    customer_id_required,
+    endpoint_price_multiplier,
+    estimate_cost_from_response,
     estimate_reserve_usd,
     extract_usage_tokens,
     inject_traceparent,
+    provider_finished_and_reported,
+    reserve_bound_tokens,
     resolve_attempt_from_kwargs,
+    resolve_customer_id,
 )
+from kazenai.cost_engine import _require_multiplier_when_control
 from kazenai.provider_errors import is_definitive_provider_rejection
 
 try:
@@ -49,6 +69,19 @@ except ImportError as exc:  # pragma: no cover - gateway-only
 
 _log = logging.getLogger("kazenai.litellm_gateway")
 
+# How often unsent settlements are retried, driven by the proxy's own traffic.
+_FLUSH_INTERVAL_S = float(os.getenv("KAZENAI_GATEWAY_FLUSH_INTERVAL_S") or 30.0)
+# Stream evidence normally lives for moments; this bounds a success event that never comes.
+_MAX_STREAM_EVIDENCE = 10_000
+
+
+def _log_flush_outcome(task: "asyncio.Future[dict[str, int]]") -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        _log.warning("gateway settlement resend failed: %s", exc)
+
 
 class KazenGatewayControlLogger(CustomLogger):
     """Per-deployment-attempt admission via FinOps reserve/start/settle."""
@@ -59,6 +92,21 @@ class KazenGatewayControlLogger(CustomLogger):
         self._attempt_counter = 0
         # attempt_id -> reservation
         self._by_litellm_call: dict[str, str] = {}
+        # litellm_call_id -> did the provider finish the stream and report usage
+        self._stream_evidence: dict[str, bool] = {}
+        self._flush_task: "asyncio.Future[dict[str, int]] | None" = None
+        self._last_flush = float("-inf")
+
+    def _schedule_flush(self) -> None:
+        """Resend unsent settlements in the background, at most once per interval."""
+        if self._flush_task is not None and not self._flush_task.done():
+            return
+        now = time.monotonic()
+        if now - self._last_flush < _FLUSH_INTERVAL_S:
+            return
+        self._last_flush = now
+        self._flush_task = asyncio.ensure_future(asyncio.to_thread(self.finops.flush_pending))
+        self._flush_task.add_done_callback(_log_flush_outcome)
 
     def _next_attempt_number(self, kwargs: Mapping[str, Any]) -> int:
         # fallback_depth / retry headers are diagnostics only — never unique IDs.
@@ -78,14 +126,8 @@ class KazenGatewayControlLogger(CustomLogger):
         if (os.getenv("KAZENAI_ENFORCEMENT_OWNER") or GATEWAY_OWNER).strip().lower() != GATEWAY_OWNER:
             return kwargs
 
+        self._schedule_flush()
         model = str(kwargs.get("model") or "unknown")
-        messages = kwargs.get("messages") or []
-        approx_tokens = 0
-        if isinstance(messages, list):
-            for m in messages:
-                if isinstance(m, Mapping):
-                    approx_tokens += len(str(m.get("content") or "")) // 4
-        approx_tokens = max(approx_tokens, 256)
 
         att_num = self._next_attempt_number(kwargs)
         base = resolve_attempt_from_kwargs(kwargs, attempt_number=att_num)
@@ -98,11 +140,27 @@ class KazenGatewayControlLogger(CustomLogger):
             attempt=att_num,
         )
 
-        estimated = estimate_reserve_usd(
-            model=model, prompt_tokens=approx_tokens, completion_tokens=approx_tokens
-        )
+        customer = resolve_customer_id(kwargs)
         try:
-            reservation = self.finops.reserve_attempt(
+            if customer is None and customer_id_required():
+                raise GatewayAdmissionDenied(
+                    "this call names no customer, and KAZENAI_REQUIRE_CUSTOMER_ID is on: "
+                    "send `user` or LiteLLM's customer header",
+                    code="customer_id_required",
+                    http_status=400,
+                )
+            # A guessed price would hold a flat $0.01 and leave every call pending.
+            _require_multiplier_when_control()
+            price_multiplier = endpoint_price_multiplier(kwargs)
+            input_bound, output_bound = reserve_bound_tokens(kwargs, call_type=call_type)
+            estimated = estimate_reserve_usd(
+                model=model,
+                prompt_tokens=input_bound,
+                completion_tokens=output_bound,
+                price_multiplier=price_multiplier,
+            )
+            reservation = await asyncio.to_thread(
+                self.finops.reserve_attempt,
                 identity=identity,
                 model=model,
                 estimated_usd=estimated,
@@ -111,8 +169,10 @@ class KazenGatewayControlLogger(CustomLogger):
                     if isinstance(kwargs.get("metadata"), Mapping)
                     else identity.operation_id
                 ),
+                business_subject_ref=customer,
             )
-            self.finops.mark_start(reservation)
+            reservation.meta["price_multiplier"] = format(price_multiplier, "f")
+            await asyncio.to_thread(self.finops.mark_start, reservation)
         except GatewayAdmissionDenied as exc:
             # LiteLLM proxy maps BudgetExceededError to budget_exceeded_status_code;
             # raw GatewayAdmissionDenied surfaces as HTTP 500 on pinned 1.104.x.
@@ -132,6 +192,13 @@ class KazenGatewayControlLogger(CustomLogger):
                     max_budget=0.0,
                     message=str(exc),
                 ) from exc
+            if exc.http_status == 400:
+                # The caller's error: raw GatewayAdmissionDenied would surface as HTTP 500.
+                try:
+                    from litellm.exceptions import BadRequestError
+                except Exception:
+                    raise exc
+                raise BadRequestError(message=str(exc), model=model, llm_provider="kazenai") from exc
             raise
         except Exception as exc:
             # Must not be swallowed as best-effort logging — block dispatch.
@@ -159,28 +226,118 @@ class KazenGatewayControlLogger(CustomLogger):
         response: Any,
         call_type: Any = None,
     ) -> Any:
+        # On LiteLLM's Responses route this runs with the stream just opened. Its success event settles it.
+        if request_data.get("stream"):
+            return response
         reservation = self._reservation_for(request_data)
         if reservation is None:
             return response
-        model = str(request_data.get("model") or reservation.meta.get("model") or "unknown")
+        await self._settle_usage(reservation, request_data, response)
+        self._forget_call(request_data)
+        return response
+
+    async def async_post_call_streaming_iterator_hook(
+        self, user_api_key_dict: Any, response: Any, request_data: dict
+    ) -> Any:
+        """Pass the stream through, then note whether the provider finished it and reported usage."""
+        async for chunk in response:
+            yield chunk
+        call_id = str(request_data.get("litellm_call_id") or "")
+        reported = provider_finished_and_reported(response)
+        if call_id and reported is not None:
+            if len(self._stream_evidence) >= _MAX_STREAM_EVIDENCE:
+                self._stream_evidence.pop(next(iter(self._stream_evidence)))
+            self._stream_evidence[call_id] = reported
+
+    async def async_log_success_event(
+        self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
+    ) -> None:
+        """Settle what the deployment hook never sees: finished streams and cache hits."""
+        self._schedule_flush()
+        reported = self._stream_evidence.get(str(kwargs.get("litellm_call_id") or ""))
+        reservation = self._reservation_for(kwargs)
+        if reservation is None:
+            self._forget_call(kwargs)
+            return
+        if kwargs.get("cache_hit"):
+            # Answered from LiteLLM's cache: nothing reached the provider.
+            await asyncio.to_thread(
+                self.finops.settle_success,
+                reservation,
+                actual_usd=0.0,
+                usage_evidence={"cache_hit": True, "cost_confidence": "exact"},
+            )
+        elif client_disconnected(kwargs):
+            # The usage here is LiteLLM's count of what arrived before the client
+            # left. The provider may have kept generating, so it isn't the charge.
+            await asyncio.to_thread(
+                self.finops.settle_cancel_or_pending, reservation, dispatched=True, error="client_disconnected"
+            )
+        elif kwargs.get("stream") and reported is False:
+            # The usage here is LiteLLM's tokenizer count, not a provider's report.
+            await asyncio.to_thread(
+                self.finops.settle_cancel_or_pending, reservation, dispatched=True, error="missing_usage"
+            )
+        else:
+            await self._settle_usage(
+                reservation, kwargs, response_obj, unverified=bool(kwargs.get("stream")) and reported is None
+            )
+        self._forget_call(kwargs)
+
+    async def async_log_failure_event(
+        self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
+    ) -> None:
+        """A stream that failed after dispatch stays pending. Other failures have the deployment hook."""
+        if not kwargs.get("stream"):
+            return
+        reservation = self._reservation_for(kwargs)
+        if reservation is None:
+            return
+        exception = kwargs.get("exception")
+        await asyncio.to_thread(
+            self.finops.settle_cancel_or_pending,
+            reservation,
+            dispatched=True,
+            error=f"stream_failed:{type(exception).__name__ if exception else 'unknown'}",
+        )
+        self._forget_call(kwargs)
+
+    async def _settle_usage(
+        self, reservation: Any, request: Mapping[str, Any], response: Any, *, unverified: bool = False
+    ) -> None:
+        model = str(request.get("model") or reservation.meta.get("model") or "unknown")
         prompt, completion, total = extract_usage_tokens(response)
         if total <= 0:
             # Unknown usage → pending, never false-zero settle.
-            self.finops.settle_cancel_or_pending(reservation, dispatched=True, error="missing_usage")
-            return response
-        actual = estimate_cost_usd(model=model, prompt_tokens=prompt, completion_tokens=completion)
-        self.finops.settle_success(
+            await asyncio.to_thread(
+                self.finops.settle_cancel_or_pending, reservation, dispatched=True, error="missing_usage"
+            )
+            return
+        evidence: dict[str, Any] = {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": total,
+            "model": model,
+            "cost_confidence": "estimated",
+        }
+        if unverified:
+            # This stream keeps no chunks to check, so LiteLLM's usage can't be confirmed.
+            evidence["usage_source"] = "unverified"
+        await asyncio.to_thread(
+            self.finops.settle_success,
             reservation,
-            actual_usd=actual,
-            usage_evidence={
-                "prompt_tokens": prompt,
-                "completion_tokens": completion,
-                "total_tokens": total,
-                "model": model,
-                "cost_confidence": "estimated",
-            },
+            actual_usd=estimate_cost_from_response(
+                model=model,
+                response=response,
+                price_multiplier=Decimal(str(reservation.meta.get("price_multiplier") or "1")),
+            ),
+            usage_evidence=evidence,
         )
-        return response
+
+    def _forget_call(self, request: Mapping[str, Any]) -> None:
+        call_id = str(request.get("litellm_call_id") or "")
+        self._by_litellm_call.pop(call_id, None)
+        self._stream_evidence.pop(call_id, None)
 
     async def async_post_call_failure_deployment_hook(
         self,
@@ -197,7 +354,8 @@ class KazenGatewayControlLogger(CustomLogger):
         # found, rate limited) did no billable work: settle exactly $0 and
         # release the hold instead of leaving it pending.
         if not isinstance(exception, GatewayAdmissionDenied) and is_definitive_provider_rejection(exception):
-            self.finops.settle_success(
+            await asyncio.to_thread(
+                self.finops.settle_success,
                 reservation,
                 actual_usd=0.0,
                 usage_evidence={
@@ -206,14 +364,17 @@ class KazenGatewayControlLogger(CustomLogger):
                     "cost_confidence": "exact",
                 },
             )
+            self._forget_call(request_data)
             return
         # Provider may have processed the request even if the response was lost.
         dispatched = not isinstance(exception, GatewayAdmissionDenied)
-        self.finops.settle_cancel_or_pending(
+        await asyncio.to_thread(
+            self.finops.settle_cancel_or_pending,
             reservation,
             dispatched=dispatched,
             error=f"{type(exception).__name__}:{exception}",
         )
+        self._forget_call(request_data)
 
     def _reservation_for(self, request_data: Mapping[str, Any] | dict) -> Any:
         meta = request_data.get("metadata") if isinstance(request_data.get("metadata"), Mapping) else {}
