@@ -3,6 +3,46 @@
 Notable changes to `kazenai`, newest first. Each release is also published on
 [GitHub Releases](https://github.com/kazenai-ai/kazenai-core/releases).
 
+## 1.2.4 - 2026-11-07
+
+One request to Agent FinOps before each call, instead of two, and the settle after the
+call no longer holds up your response. The spending limit is exactly as strict as before.
+
+```bash
+python -m pip install "kazenai[openai]==1.2.4"
+```
+
+### Changed
+
+- **Start on admit.** When Agent FinOps offers it (`capabilities.start_on_admit` in
+  `GET /v1/budget/lifecycle`), the reserve asks FinOps to record "the call may start"
+  in the same transaction, and the SDK no longer sends `provider_started` before the
+  call. An older FinOps keeps the separate request; nothing to configure.
+- **Settles in the background (behaviour change).** The `usage_known` settle after a
+  call, streamed or not, is journaled to disk before the response returns, as before,
+  and then sent by a small pool of background threads instead of inline. Until it
+  lands, FinOps keeps holding the reserved amount, so the limit is never weaker: the
+  remaining budget only looks lower for a few milliseconds. A send that fails stays
+  journaled and the flusher retries it. At exit the process waits up to
+  `KAZENAI_SETTLE_EXIT_WAIT_S` (default 2) for the backlog.
+  `KAZENAI_SETTLE_IN_BACKGROUND=0` keeps the inline send.
+- **Short-lived processes.** In a serverless handler, call
+  `kazenai.spine.guard.drain_settlements()` before returning. A process frozen or
+  killed before the send leaves the reservation held until Agent FinOps's recovery
+  (15 minutes), then marked outcome unknown: never an overspend, but the budget looks
+  used until it's reconciled.
+- **Abandoned admissions.** A reserve whose answer never arrives (both attempts time
+  out, or a 5xx) is replayed in the background with the same idempotency key; if Agent
+  FinOps did admit it, the SDK releases it with `admission_abandoned`. Before, such a
+  hold waited for recovery.
+- **One capabilities fetch per process.** Concurrent first calls share one
+  `GET /v1/budget/lifecycle` instead of each sending it (per thread pool and per event
+  loop).
+
+The first two apply when Agent FinOps offers start-on-admit; against an older Agent FinOps
+the SDK keeps the separate requests. The LiteLLM proxy callback keeps its separate
+`provider_started` for now.
+
 ## 1.2.3 - 2026-11-07
 
 The loop guard records by default instead of refusing calls.
