@@ -6,13 +6,13 @@ product integrations should install the customer-facing package, which
 re-exports the Core API:
 
 ```bash
-python -m pip install "kazenai-finops[openai]==1.2.2"
+python -m pip install "kazenai-finops[openai]==1.2.3"
 ```
 
 Install Core directly when you specifically want the runtime package:
 
 ```bash
-python -m pip install "kazenai[openai]==1.2.2"
+python -m pip install "kazenai[openai]==1.2.3"
 ```
 
 Python 3.10, 3.11 and 3.12 are supported.

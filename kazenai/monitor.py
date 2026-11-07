@@ -29,7 +29,7 @@ from .debug import DebugPrinter
 from ._dispatch_gate import install_dispatch_gate
 from .enforcement import BudgetExceeded, BudgetUnavailable, Enforcement, LoopDetected, RateLimitExceeded, StreamCutoffError, UnsupportedModeError
 from .capture_policy import CaptureMode, build_content_ref, capture_disclosure, event_log_fields, resolve_capture_mode
-from .loop_detector import LoopDetector, LoopScores
+from .loop_detector import LOOP_GUARD_BLOCK, LOOP_GUARD_OFF, LOOP_GUARD_RECORD, LoopDetector, LoopScores, resolve_loop_guard
 from .finops import FinOpsConfig, FinOpsController
 from .schema import KazenEvent, new_id, now_ms
 from .sinks import EventSink, HttpSink, HttpSinkConfig, JsonlSink, MemorySink, MultiSink
@@ -1372,6 +1372,129 @@ def _emit_stream_model_call(
     _log_event_safe(log, event)
 
 
+def _emit_loop_detected(
+    scores: LoopScores,
+    *,
+    blocked: bool,
+    loop_guard: str,
+    block_threshold: float,
+    step_ctx: Any,
+    agent_role: str,
+    method: str,
+    model: Optional[str],
+    event_sink: Optional[EventSink],
+) -> None:
+    """Write a ``finops.loop.anomaly`` event (reason ``repeated_request``) for a loop hit.
+
+    Fail-open, and it carries no cost.
+    """
+    if event_sink is None:
+        return
+    try:
+        # A blocked call has no model.call event, so the loop event takes its step.
+        # A recorded one hangs off the call's step, like the other derived events.
+        step_id = step_ctx.step_id if blocked else new_id()
+        parent_step_id = step_ctx.parent_step_id if blocked else step_ctx.step_id
+        event = KazenEvent(
+            schema_version="1.2",
+            ts_ms=now_ms(),
+            event_id=new_id(),
+            org_id=step_ctx.org_id,
+            project_id=step_ctx.project_id,
+            workspace_id=step_ctx.workspace_id,
+            surface="kazenai-core",
+            agent_id=step_ctx.agent_id,
+            agent_role=agent_role,
+            run_id=step_ctx.run_id,
+            root_run_id=step_ctx.run_id,
+            step_id=step_id,
+            parent_step_id=parent_step_id,
+            # A registered type: strict consumers drop unregistered ones. The reason
+            # tells it apart from FinOpsController's rising_cost_low_novelty anomaly.
+            event_type="finops.loop.anomaly",
+            payload={
+                **_attribution_payload_fields(),
+                "reason": "repeated_request",
+                "method": method,
+                "model": model,
+                "loop_guard": loop_guard,
+                "action": "blocked" if blocked else "recorded",
+                "threshold": float(block_threshold),
+                "loop_scores": {
+                    "h1_jaccard": scores.h1_jaccard,
+                    "h2_tools": scores.h2_tools,
+                    "combined": scores.combined,
+                },
+            },
+        )
+        event_sink.emit(event)
+    except Exception as exc:
+        _log_fail_open("loop_event_emit", exc)
+
+
+def _loop_subject() -> Optional[str]:
+    """The call's customer ID: per-call attribution merged with monitor()'s default."""
+    try:
+        from .attribution import get_attribution
+
+        attr = get_attribution()
+        return attr.normalized().business_subject_ref if attr is not None else None
+    except Exception:
+        return None
+
+
+def _loop_guard_check(
+    *,
+    loop_guard: str,
+    loop_detector: LoopDetector,
+    block_threshold: float,
+    payload: Any,
+    kwargs: Mapping[str, Any],
+    step_ctx: Any,
+    agent_role: str,
+    method: str,
+    event_sink: Optional[EventSink],
+    log: Any,
+) -> Optional[LoopScores]:
+    """Score a request before dispatch. On a loop hit, record it; raise only under ``block``.
+
+    Runs inside the call's attribution scope, so each customer is scored against its
+    own history; calls naming no customer share one.
+    """
+    if loop_guard == LOOP_GUARD_OFF:
+        return None
+    try:
+        scores = loop_detector.score(
+            input_text=_extract_input_text(payload),
+            tool_names=_extract_tool_names(kwargs),
+            subject=_loop_subject(),
+        )
+        hit = scores.combined >= float(block_threshold) and loop_detector.is_loop(scores)
+    except Exception:
+        log.exception("kazenai.loop_detector_failed")
+        return None
+    if not hit:
+        return scores
+    blocked = loop_guard == LOOP_GUARD_BLOCK
+    model = kwargs.get("model") if isinstance(kwargs, Mapping) else None
+    _emit_loop_detected(
+        scores,
+        blocked=blocked,
+        loop_guard=loop_guard,
+        block_threshold=block_threshold,
+        step_ctx=step_ctx,
+        agent_role=agent_role,
+        method=method,
+        model=str(model) if model is not None else None,
+        event_sink=event_sink,
+    )
+    if blocked:
+        raise LoopDetected(
+            f"loop detected: score={scores.combined:.3f} h1={scores.h1_jaccard:.3f} h2={scores.h2_tools:.3f}"
+        )
+    return scores
+
+
 def patch_openai(
     client: Any,
     *,
@@ -1383,6 +1506,7 @@ def patch_openai(
     enforcement: Optional[Enforcement] = None,
     loop_detector: Optional[LoopDetector] = None,
     loop_block_threshold: float = 0.85,
+    loop_guard: str = LOOP_GUARD_RECORD,
     usd_per_1k_tokens: float = 0.0,
     endpoint_url: Optional[str] = None,
     endpoint_headers: Optional[Mapping[str, str]] = None,
@@ -1411,6 +1535,11 @@ def patch_openai(
     Completions, Responses ``compact`` / ``connect``) are stubbed to raise
     ``UnsupportedModeError``.
 
+    ``loop_guard`` decides what a loop hit does: ``"record"`` (default) writes a
+    ``finops.loop.anomaly`` event (reason ``repeated_request``) and sends the call,
+    ``"block"`` raises
+    ``LoopDetected`` before dispatch, ``"off"`` skips the check.
+
     Returns an `undo()` function that restores the original methods.
     """
 
@@ -1418,6 +1547,7 @@ def patch_openai(
         log = structlog.get_logger(__name__)
     else:
         log = logging.getLogger(__name__)
+    loop_guard = resolve_loop_guard(loop_guard)
     enforcement = enforcement or Enforcement()
     loop_detector = loop_detector or LoopDetector()
     dbg = DebugPrinter(enabled=debug)
@@ -1473,23 +1603,19 @@ def patch_openai(
                 stack.enter_context(use_attribution(**attr_defaults))
                 assert_customer_id(require_customer_id)
                 payload = _extract_openai_input(args, kwargs)
-                tool_names = _extract_tool_names(kwargs)
 
-                loop_scores: Optional[LoopScores] = None
-                try:
-                    loop_scores = loop_detector.score(
-                        input_text=_extract_input_text(payload),
-                        tool_names=tool_names,
-                    )
-                    if loop_scores.combined >= float(loop_block_threshold) and loop_detector.is_loop(loop_scores):
-                        raise LoopDetected(
-                            f"loop detected: score={loop_scores.combined:.3f} h1={loop_scores.h1_jaccard:.3f} h2={loop_scores.h2_tools:.3f}"
-                        )
-                except LoopDetected:
-                    raise
-                except Exception:
-                    log.exception("kazenai.loop_detector_failed")
-                    loop_scores = None
+                loop_scores: Optional[LoopScores] = _loop_guard_check(
+                    loop_guard=loop_guard,
+                    loop_detector=loop_detector,
+                    block_threshold=loop_block_threshold,
+                    payload=payload,
+                    kwargs=kwargs,
+                    step_ctx=step_ctx,
+                    agent_role=agent_role,
+                    method=method,
+                    event_sink=event_sink,
+                    log=log,
+                )
 
                 snap = enforcement.snapshot()
                 dbg.pre_call(
@@ -2042,6 +2168,7 @@ def patch_anthropic(
     enforcement: Optional[Enforcement] = None,
     loop_detector: Optional[LoopDetector] = None,
     loop_block_threshold: float = 0.85,
+    loop_guard: str = LOOP_GUARD_RECORD,
     usd_per_1k_tokens: float = 0.0,
     endpoint_url: Optional[str] = None,
     endpoint_headers: Optional[Mapping[str, str]] = None,
@@ -2066,6 +2193,7 @@ def patch_anthropic(
 
     Mirrors patch_openai() but handles the Anthropic response shape
     (msg.usage.input_tokens / output_tokens instead of usage.total_tokens).
+    ``loop_guard`` works as in patch_openai().
 
     Returns an `undo()` function that restores the original methods.
     """
@@ -2073,6 +2201,7 @@ def patch_anthropic(
         log = structlog.get_logger(__name__)
     else:
         log = logging.getLogger(__name__)
+    loop_guard = resolve_loop_guard(loop_guard)
     enforcement = enforcement or Enforcement()
     loop_detector = loop_detector or LoopDetector()
 
@@ -2119,22 +2248,19 @@ def patch_anthropic(
                 stack.enter_context(use_attribution(**attr_defaults))
                 assert_customer_id(require_customer_id)
                 payload = _extract_openai_input(args, kwargs)  # same shape works for Anthropic
-                tool_names = _extract_tool_names(kwargs)
 
-                loop_scores = None
-                try:
-                    loop_scores = loop_detector.score(
-                        input_text=_extract_input_text(payload),
-                        tool_names=tool_names,
-                    )
-                    if loop_scores.combined >= float(loop_block_threshold) and loop_detector.is_loop(loop_scores):
-                        raise LoopDetected(
-                            f"loop detected: score={loop_scores.combined:.3f}"
-                        )
-                except LoopDetected:
-                    raise
-                except Exception:
-                    loop_scores = None
+                loop_scores = _loop_guard_check(
+                    loop_guard=loop_guard,
+                    loop_detector=loop_detector,
+                    block_threshold=loop_block_threshold,
+                    payload=payload,
+                    kwargs=kwargs,
+                    step_ctx=step_ctx,
+                    agent_role=agent_role,
+                    method=method,
+                    event_sink=event_sink,
+                    log=log,
+                )
 
                 # Reject streaming before any network/provider work.
                 _reject_streaming_if_unsupported(kwargs)
@@ -2834,6 +2960,7 @@ def monitor(
     max_budget_usd: Optional[float] = None,
     soft_pause_pct: float = 0.90,
     loop_anomaly_threshold: float = 0.90,
+    loop_guard: str = LOOP_GUARD_RECORD,
     stream_enforcement: bool = False,
     stream_cutoff_usd: Optional[float] = None,
     debug: bool = False,
@@ -2868,7 +2995,9 @@ def monitor(
       ``messages.stream``
     - Hard local cap raises ``BudgetExceeded`` before provider dispatch
     - Shared authority deny raises ``BudgetExceeded`` / unreachable raises ``BudgetUnavailable``
-    - Loop guard raises ``LoopDetected`` before provider dispatch
+    - Loop guard: ``loop_guard="record"`` (default) writes a ``finops.loop.anomaly``
+      event (reason ``repeated_request``) and sends the call; ``loop_guard="block"`` raises ``LoopDetected`` before
+      provider dispatch; ``loop_guard="off"`` skips the check
     - Soft trajectory pause raises ``KazenCircuitBreaker`` after a completed call
     - OpenAI Realtime, legacy Completions and Responses ``compact`` / ``connect``
       raise ``UnsupportedModeError``
@@ -2960,6 +3089,7 @@ def monitor(
         if max_budget_usd is not None:
             raise ValueError("pass either budget=SharedBudget(...) or max_budget_usd, not both")
     soft_budget = budget.max_usd if budget is not None else max_budget_usd
+    loop_guard = resolve_loop_guard(loop_guard)
     finops = FinOpsController(cfg=FinOpsConfig(budget_usd=soft_budget, soft_pause_pct=soft_pause_pct, loop_anomaly_threshold=loop_anomaly_threshold))
     # Local max_budget_usd must feed the same pre-call Enforcement
     # used on the patched provider path (not only FinOpsController post-call CB).
@@ -2987,6 +3117,7 @@ def monitor(
         allow_unmetered=tuple(allow_unmetered or ()),
         observe_unbounded=tuple(observe_unbounded or ()),
         require_customer_id=bool(require_customer_id),
+        loop_guard=loop_guard,
     )
     is_async = _client_is_async(client)
     if _detect_client_kind(client) == "anthropic":
@@ -3066,6 +3197,7 @@ def monitor(
             allow_unmetered=tuple(allow_unmetered or ()),
             observe_unbounded=tuple(observe_unbounded or ()),
             require_customer_id=bool(require_customer_id),
+            loop_guard=loop_guard,
         )
         clone_async = _client_is_async(clone)
         if _detect_client_kind(clone) == "anthropic":

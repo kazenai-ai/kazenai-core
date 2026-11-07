@@ -306,12 +306,23 @@ def test_output_token_bound_injected_and_clamped(monkeypatch):
 def test_loop_detected_before_provider(monkeypatch):
     _standalone(monkeypatch)
     client = FakeOpenAI()
-    monitor(client, max_budget_usd=10.0)
+    monitor(client, max_budget_usd=10.0, loop_guard="block")
     msg = [{"role": "user", "content": "identical loop bait"}]
     client.chat.completions.create(model="gpt-4o-mini", messages=msg)
     with pytest.raises(LoopDetected):
         client.chat.completions.create(model="gpt-4o-mini", messages=msg)
     assert client.chat.completions.calls == 1
+
+
+def test_loop_is_recorded_not_refused_by_default(monkeypatch):
+    """1.2.3: the default loop guard records the hit and still sends the call."""
+    _standalone(monkeypatch)
+    client = FakeOpenAI()
+    monitor(client, max_budget_usd=10.0)
+    msg = [{"role": "user", "content": "identical loop bait"}]
+    client.chat.completions.create(model="gpt-4o-mini", messages=msg)
+    client.chat.completions.create(model="gpt-4o-mini", messages=msg)
+    assert client.chat.completions.calls == 2
 
 
 def test_circuit_breaker_is_post_call_not_budget_exceeded(monkeypatch):
