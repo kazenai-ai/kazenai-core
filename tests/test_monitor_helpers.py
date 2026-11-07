@@ -303,6 +303,7 @@ def test_patch_openai_loop_detection_raises():
         agent_id="a",
         loop_detector=detector,
         loop_block_threshold=0.0,
+        loop_guard="block",
     )
     try:
         client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "repeat same text"}])

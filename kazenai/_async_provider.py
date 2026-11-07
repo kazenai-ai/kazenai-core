@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .context import RunContext, get_current_context, use_context
 from ._dispatch_gate import install_dispatch_gate
-from .enforcement import Enforcement, LoopDetected, UnsupportedModeError
+from .enforcement import Enforcement, UnsupportedModeError
 from .schema import KazenEvent, new_id, now_ms
 
 try:
@@ -100,6 +100,7 @@ def patch_openai_async(
     usd_per_1k_tokens: Optional[float] = None,
     loop_block_threshold: float = 0.90,
     loop_detector: Any = None,
+    loop_guard: str = "record",
     endpoint_url: Optional[str] = None,
     endpoint_headers: Optional[Dict[str, str]] = None,
     certified_surface: bool = True,
@@ -113,12 +114,13 @@ def patch_openai_async(
     from .debug import DebugPrinter
     from .enforcement_owner import claim_configured_enforcement_owner as claim_enforcement_owner
     from .finops import FinOpsController
-    from .loop_detector import LoopDetector, LoopScores
+    from .loop_detector import LoopDetector, resolve_loop_guard
 
     if structlog is not None:
         log = structlog.get_logger(__name__)
     else:
         log = _log
+    loop_guard = resolve_loop_guard(loop_guard)
     loop_detector = loop_detector or LoopDetector()
     dbg = DebugPrinter(enabled=debug)
     del dbg  # parity with the sync path's optional pre-call printer
@@ -160,25 +162,18 @@ def patch_openai_async(
                 stack.enter_context(use_attribution(**attr_defaults))
                 assert_customer_id(require_customer_id)
                 payload = m._extract_openai_input(args, kwargs)
-                tool_names = m._extract_tool_names(kwargs)
-                loop_scores: Optional[LoopScores] = None
-                try:
-                    loop_scores = loop_detector.score(
-                        input_text=m._extract_input_text(payload),
-                        tool_names=tool_names,
-                    )
-                    if (
-                        loop_scores.combined >= float(loop_block_threshold)
-                        and loop_detector.is_loop(loop_scores)
-                    ):
-                        raise LoopDetected(
-                            f"loop detected: score={loop_scores.combined:.3f}"
-                        )
-                except LoopDetected:
-                    raise
-                except Exception:
-                    log.exception("kazenai.loop_detector_failed")
-                    loop_scores = None
+                m._loop_guard_check(
+                    loop_guard=loop_guard,
+                    loop_detector=loop_detector,
+                    block_threshold=loop_block_threshold,
+                    payload=payload,
+                    kwargs=kwargs,
+                    step_ctx=step_ctx,
+                    agent_role=agent_role,
+                    method=method,
+                    event_sink=event_sink,
+                    log=log,
+                )
 
                 m._reject_streaming_if_unsupported(kwargs)
                 m._apply_output_token_bound(kwargs, responses=is_responses)
@@ -708,6 +703,7 @@ def patch_anthropic_async(
     usd_per_1k_tokens: Optional[float] = None,
     loop_block_threshold: float = 0.90,
     loop_detector: Any = None,
+    loop_guard: str = "record",
     endpoint_url: Optional[str] = None,
     endpoint_headers: Optional[Dict[str, str]] = None,
     certified_surface: bool = True,
@@ -721,12 +717,13 @@ def patch_anthropic_async(
     from .debug import DebugPrinter
     from .enforcement_owner import claim_configured_enforcement_owner as claim_enforcement_owner
     from .finops import FinOpsController
-    from .loop_detector import LoopDetector
+    from .loop_detector import LoopDetector, resolve_loop_guard
 
     if structlog is not None:
         log = structlog.get_logger(__name__)
     else:
         log = _log
+    loop_guard = resolve_loop_guard(loop_guard)
     loop_detector = loop_detector or LoopDetector()
     dbg = DebugPrinter(enabled=debug)
     del dbg  # parity with sync path pre_call optional
@@ -760,6 +757,19 @@ def patch_anthropic_async(
                 stack.enter_context(use_attribution(**attr_defaults))
                 assert_customer_id(require_customer_id)
                 payload = m._extract_openai_input(args, kwargs)
+                # Before 1.2.3 this path built a detector but never consulted it.
+                m._loop_guard_check(
+                    loop_guard=loop_guard,
+                    loop_detector=loop_detector,
+                    block_threshold=loop_block_threshold,
+                    payload=payload,
+                    kwargs=kwargs,
+                    step_ctx=step_ctx,
+                    agent_role=agent_role,
+                    method=method,
+                    event_sink=event_sink,
+                    log=log,
+                )
                 m._reject_streaming_if_unsupported(kwargs)
                 m._apply_output_token_bound(kwargs)
                 call_kwargs = dict(kwargs)

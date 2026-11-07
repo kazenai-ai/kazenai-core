@@ -21,7 +21,7 @@ limit before it runs. Over the limit, the call doesn't happen.
 `kazenai` is the core Python SDK. One call, `monitor()`, wraps your OpenAI or Anthropic client and:
 
 1. **Blocks overspend before the provider call** (`BudgetExceeded`)
-2. **Detects runaway loops** before another LLM request
+2. **Flags requests that repeat** like a loop, as a `finops.loop.anomaly` event (`loop_guard="block"` refuses them with `LoopDetected` instead)
 3. **Connects to Agent FinOps** (optional) for a limit per customer across every process, with a receipt for every allow and deny
 
 Most observability tools tell you what went wrong after the bill. KazenAI can stop the call that would cause it.
@@ -36,13 +36,13 @@ KazenAI:            Pre-flight check → BLOCKED → LLM call never made
 ## Install
 
 ```bash
-python -m pip install "kazenai[openai]==1.2.2"
+python -m pip install "kazenai[openai]==1.2.3"
 # Most teams install the customer package instead:
-python -m pip install "kazenai-finops[openai]==1.2.2"
+python -m pip install "kazenai-finops[openai]==1.2.3"
 # Anthropic:
-# python -m pip install "kazenai-finops[anthropic]==1.2.2"
+# python -m pip install "kazenai-finops[anthropic]==1.2.3"
 # Both providers:
-# python -m pip install "kazenai-finops[providers]==1.2.2"
+# python -m pip install "kazenai-finops[providers]==1.2.3"
 ```
 
 `kazenai-finops` re-exports this SDK and is the recommended install for product integrations.
@@ -165,7 +165,7 @@ deprecated, warns, and is removed in 2.0. Hosted Agent FinOps refuses it.
 |------------|----------|
 | Hard budget cap | `BudgetExceeded` **before** the provider call |
 | Soft trajectory pause | `KazenCircuitBreaker` after a completed call when projection trips |
-| Loop detection | Blocks high-risk repeat patterns before another provider call |
+| Loop detection | Records repeat patterns as `finops.loop.anomaly` events (reason `repeated_request`) and sends the call. `monitor(loop_guard="block")` raises `LoopDetected` before the provider call; `"off"` skips the check |
 | Event ingest | Optional `HttpSink` batches to Agent FinOps when URL + API key are set |
 | Shared schema | Canonical `KazenEvent` via [`kazen-event-schema`](https://pypi.org/project/kazen-event-schema/) |
 

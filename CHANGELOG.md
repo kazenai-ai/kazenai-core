@@ -3,6 +3,63 @@
 Notable changes to `kazenai`, newest first. Each release is also published on
 [GitHub Releases](https://github.com/kazenai-ai/kazenai-core/releases).
 
+## 1.2.3 - 2026-11-07
+
+The loop guard records by default instead of refusing calls.
+
+```bash
+python -m pip install "kazenai[openai]==1.2.3"
+```
+
+### Changed
+
+- **Behaviour change:** `monitor()` no longer refuses a call because it looks like a
+  loop, unless you ask it to. Up to 1.2.2 it raised `LoopDetected` before the provider
+  call when a request's words overlapped another of the last 32 on the same client by
+  more than 85% (sync) or 90% (async), or when the same `tools` list had been sent 3
+  times. That refused ordinary traffic that was under every limit: the same question
+  from two customers, a long shared system prompt, any agent that sends its tools list
+  on each call (from its third call), a long chat, content sent as a list of parts, and
+  an app's own retry. Now a loop hit writes a `finops.loop.anomaly` event with
+  `"reason": "repeated_request"` and the call goes ahead.
+- New `monitor(loop_guard=...)`, also on `patch_openai()` and `patch_anthropic()`:
+  - `"record"` (default): write the event, send the call.
+  - `"block"`: raise `LoopDetected` before the provider call, as before 1.2.3. The
+    refusal now also writes the event (`"action": "blocked"`), so it shows in the
+    timeline.
+  - `"off"`: skip the check; no events.
+
+  Any other value raises `ValueError` when `monitor()` is called. Clients made with
+  `with_options()` or `copy()` keep the mode.
+- The loop guard keeps its history per customer: the call's customer ID from
+  `use_attribution(business_subject_ref=...)` or `monitor(business_subject_ref=...)`,
+  the same one the call's limits and events use. Two customers sending the same
+  prompt through one client are no longer a loop in any mode; one customer repeating
+  still is. Calls that name no customer share one history per client, as before. Up
+  to 64 customer histories are kept per client (each the size of the old per-client
+  history: the last 32 inputs and 64 tool fingerprints); the least recently active is
+  dropped first. `LoopDetector(max_subjects=...)` changes the bound for code that
+  builds its own detector.
+
+### Fixed
+
+- Async Anthropic clients never ran the loop guard: the detector was built but not
+  called. They now follow `loop_guard` like the other three paths.
+
+### Events
+
+- A loop hit is a `finops.loop.anomaly` event, a type `kazen-event-schema` already
+  registers, with `"reason": "repeated_request"` (the soft-pause controller's own
+  anomaly keeps `"rising_cost_low_novelty"`). It carries the customer and feature
+  attribution, `method`, `model`, `loop_guard`, `action` (`recorded` or `blocked`),
+  `threshold` and `loop_scores`. It has no cost, so Agent FinOps money totals don't
+  count it.
+
+### Compatibility
+
+- Code that catches `LoopDetected` keeps working but no longer sees it unless it passes
+  `loop_guard="block"`. To keep the 1.2.2 behaviour, pass `loop_guard="block"`.
+
 ## 1.2.2 - 2026-11-03
 
 Fixes for the LiteLLM gateway callback (`kazenai.integrations.litellm_gateway`), and
