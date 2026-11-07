@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kazenai"
-version = "1.2.3"
+version = "1.2.4"
 description = "A hard spending limit for every customer's AI: the KazenAI core SDK checks each OpenAI and Anthropic call against its limit before it runs"
 readme = "README.md"
 requires-python = ">=3.10"

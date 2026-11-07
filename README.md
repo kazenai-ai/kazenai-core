@@ -36,7 +36,7 @@ KazenAI:            Pre-flight check → BLOCKED → LLM call never made
 ## Install
 
 ```bash
-python -m pip install "kazenai[openai]==1.2.3"
+python -m pip install "kazenai[openai]==1.2.4"
 # Most teams install the customer package instead:
 python -m pip install "kazenai-finops[openai]==1.2.3"
 # Anthropic:
@@ -333,6 +333,8 @@ priced via `KAZENAI_PRICING_JSON`.
 | `KAZENAI_PROFILE` | `legacy` selects the deprecated pre-1.2 path; leave unset |
 | `KAZENAI_DEPLOYMENT_MODE` | `production` / `staging` require fail-closed shared reservations |
 | `KAZENAI_FINOPS_RESERVE_TIMEOUT_S` | Timeout for one attempt of a shared pre-call reservation (default 2 s, including connection setup). A reservation that gets no answer is sent once more with the same idempotency key |
+| `KAZENAI_SETTLE_IN_BACKGROUND` | `0` sends the settle after a call inline, before the response returns (the behaviour up to 1.2.3). Default: journaled to disk, then sent in the background; Agent FinOps holds the reserved amount until it lands |
+| `KAZENAI_SETTLE_EXIT_WAIT_S` | Seconds the process waits at exit for background settles still being sent (default 2). What isn't sent stays journaled for the flusher |
 | `KAZENAI_FINOPS_KEEPALIVE_S` | Seconds an idle connection to Agent FinOps is kept for reuse (default 15); `0` opens a new connection per request |
 | `KAZENAI_TIMELINE_PATH` | Optional local JSONL evidence path |
 | `KAZENAI_SDK_SETTLE_QUEUE_DIR` | Persistent private directory for pending settlement intents |

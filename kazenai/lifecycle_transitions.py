@@ -30,6 +30,8 @@ SETTLE_EVENT_SUFFIX = {
     "usage_known": "usage",
     "outcome_unknown": "unknown",
     "cancel_before_call": "cancelled",
+    # A start-on-admit reservation whose reserve answer never arrived, released before any dispatch.
+    "admission_abandoned": "abandoned",
     "replay_pending": "replay",
 }
 

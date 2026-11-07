@@ -33,19 +33,26 @@ HTTP success with `result=pending` remains queued.
    `KAZENAI_FINOPS_RESERVE_TIMEOUT_S`, if longer), so a live call and the
    flusher never deliver the same event at once. If the send ends without an
    acknowledgement, the record is handed to the flusher immediately.
-3. Export backlog signals from `python -m kazenai.spine.settle_queue stats`
+3. Since 1.2.4 the settle after a call is sent in the background by default: it is
+   journaled before the response returns, then sent by a small pool of SDK threads;
+   a send that fails is handed to the flusher at once. At exit the process waits up
+   to `KAZENAI_SETTLE_EXIT_WAIT_S` (default 2 s) for that backlog, and anything left
+   stays journaled. Short-lived processes (serverless handlers) should call
+   `kazenai.spine.guard.drain_settlements()` before returning.
+   `KAZENAI_SETTLE_IN_BACKGROUND=0` sends it inline, as before.
+4. Export backlog signals from `python -m kazenai.spine.settle_queue stats`
    (or `kazenai.spine.settle_queue.queue_stats()`): `depth`, `oldest_age_s`,
    `quarantined`, `last_flush_at`, `last_flush_ok_at`, `last_flush_failed`.
    Alert on growing `oldest_age_s` and any non-zero `quarantined`.
-4. Many SDK processes on one host may share a queue directory. Each
+5. Many SDK processes on one host may share a queue directory. Each
    `(org, FinOps URL, idempotency_key)` binds exactly one intent fingerprint
    through an atomic claim file (`claims/`); a conflicting reuse raises
    `SettleIntentConflict` in every process. The queue directory must be on a
    local filesystem that supports hard links and `flock` (not NFS); otherwise
    journaling fails and the call is refused rather than sent unjournaled.
-5. Keep credentials in runtime configuration. API keys are not written to queue
+6. Keep credentials in runtime configuration. API keys are not written to queue
    files unless a caller explicitly requests persistence.
-6. A flush sends records only to the process's configured FinOps URL, with the
+7. A flush sends records only to the process's configured FinOps URL, with the
    process's own key, never a URL or key stored in a record. A record journaled
    for a different FinOps URL is moved to `quarantine/` as
    `destination_mismatch` and not sent. Check the configured URL, then replay

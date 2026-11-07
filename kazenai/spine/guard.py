@@ -391,6 +391,9 @@ class ReservationHandle:
     # Agent FinOps was unreachable and the organization chose fail-open: the call
     # runs with local caps only, and there is no reservation to settle.
     fail_open: bool = False
+    # FinOps stored the reservation in_flight at admission (start_on_admit), so no
+    # separate provider_started is sent.
+    started_on_admit: bool = False
 
     def __float__(self) -> float:
         return float(self.reserved_cost_usd)
@@ -739,6 +742,11 @@ def _capture_settlement_binding(
 
 # Cache key: (base_url, org_id, api_key_fingerprint) — identity-scoped.
 _LIFECYCLE_CAP_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+# Single flight for the capability fetch (sync: a lock per cache key; async: one
+# future per event loop and cache key).
+_LIFECYCLE_FETCH_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
+_LIFECYCLE_FETCH_LOCKS_GUARD = threading.Lock()
+_LIFECYCLE_IN_FLIGHT: dict[tuple[int, tuple[str, str, str]], "asyncio.Future[dict[str, Any] | None]"] = {}
 
 
 def _effective_api_key(api_key: str | None) -> str:
@@ -760,13 +768,40 @@ def _lifecycle_cap_cache_key(
     return (url, org, fp)
 
 
+def _lifecycle_fetch_lock(cache_key: tuple[str, str, str]) -> threading.Lock:
+    with _LIFECYCLE_FETCH_LOCKS_GUARD:
+        lock = _LIFECYCLE_FETCH_LOCKS.get(cache_key)
+        if lock is None:
+            lock = _LIFECYCLE_FETCH_LOCKS[cache_key] = threading.Lock()
+        return lock
+
+
 def _fetch_server_lifecycle_capabilities(
     base: str,
     *,
     org_id: str = "",
     api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Authenticated GET /v1/budget/lifecycle with a short process cache."""
+    """Authenticated GET /v1/budget/lifecycle with a short process cache.
+
+    One fetch per FinOps, org and key at a time: concurrent first calls wait for
+    the same answer instead of each sending the request."""
+    cache_key = _lifecycle_cap_cache_key(base, org_id=org_id, api_key=api_key)
+    if not cache_key[0]:
+        return {}
+    cached = _LIFECYCLE_CAP_CACHE.get(cache_key)
+    if cached and (time.time() - cached[0]) < 30.0:
+        return cached[1]
+    with _lifecycle_fetch_lock(cache_key):
+        return _fetch_server_lifecycle_capabilities_once(base, org_id=org_id, api_key=api_key)
+
+
+def _fetch_server_lifecycle_capabilities_once(
+    base: str,
+    *,
+    org_id: str = "",
+    api_key: str | None = None,
+) -> dict[str, Any]:
     import time
 
     cache_key = _lifecycle_cap_cache_key(base, org_id=org_id, api_key=api_key)
@@ -802,7 +837,43 @@ async def _fetch_server_lifecycle_capabilities_async(
     org_id: str = "",
     api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Native async GET /v1/budget/lifecycle (does not block the event loop)."""
+    """Native async GET /v1/budget/lifecycle (does not block the event loop).
+
+    One fetch per event loop, FinOps, org and key at a time: concurrent first calls
+    await the same answer. A waiter whose leader was cancelled fetches for itself."""
+    cache_key = _lifecycle_cap_cache_key(base, org_id=org_id, api_key=api_key)
+    if not cache_key[0]:
+        return {}
+    cached = _LIFECYCLE_CAP_CACHE.get(cache_key)
+    if cached and (time.time() - cached[0]) < 30.0:
+        return cached[1]
+    loop = asyncio.get_running_loop()
+    flight_key = (id(loop), cache_key)
+    leader = _LIFECYCLE_IN_FLIGHT.get(flight_key)
+    if leader is not None and leader.get_loop() is loop:
+        answer = await asyncio.shield(leader)
+        if answer is not None:
+            return answer
+        return await _fetch_server_lifecycle_capabilities_async_once(base, org_id=org_id, api_key=api_key)
+    future: asyncio.Future[dict[str, Any] | None] = loop.create_future()
+    _LIFECYCLE_IN_FLIGHT[flight_key] = future
+    answer: dict[str, Any] | None = None
+    try:
+        answer = await _fetch_server_lifecycle_capabilities_async_once(base, org_id=org_id, api_key=api_key)
+        return answer
+    finally:
+        if _LIFECYCLE_IN_FLIGHT.get(flight_key) is future:
+            del _LIFECYCLE_IN_FLIGHT[flight_key]
+        if not future.done():
+            future.set_result(answer)
+
+
+async def _fetch_server_lifecycle_capabilities_async_once(
+    base: str,
+    *,
+    org_id: str = "",
+    api_key: str | None = None,
+) -> dict[str, Any]:
     import time
 
     import httpx
@@ -875,14 +946,16 @@ def _ensure_server_lifecycle_compatible(
     *,
     org_id: str = "",
     api_key: str | None = None,
-) -> None:
-    """Pre-dispatch Control gate: client/server lifecycle must agree."""
+) -> dict[str, Any]:
+    """Pre-dispatch Control gate: client/server lifecycle must agree. Returns the
+    capabilities document ({} outside reservation settlement)."""
     from kazenai.lifecycle_config import resolve_effective_lifecycle
 
     if not resolve_effective_lifecycle().uses_reservation_settlement:
-        return
+        return {}
     caps = _fetch_server_lifecycle_capabilities(base, org_id=org_id, api_key=api_key)
     _apply_lifecycle_capability_gate(caps, base=base, org_id=org_id, api_key=api_key)
+    return caps
 
 
 async def _ensure_server_lifecycle_compatible_async(
@@ -890,16 +963,23 @@ async def _ensure_server_lifecycle_compatible_async(
     *,
     org_id: str = "",
     api_key: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     """Async twin of ``_ensure_server_lifecycle_compatible``."""
     from kazenai.lifecycle_config import resolve_effective_lifecycle
 
     if not resolve_effective_lifecycle().uses_reservation_settlement:
-        return
+        return {}
     caps = await _fetch_server_lifecycle_capabilities_async(
         base, org_id=org_id, api_key=api_key
     )
     _apply_lifecycle_capability_gate(caps, base=base, org_id=org_id, api_key=api_key)
+    return caps
+
+
+def _offers_start_on_admit(caps: Mapping[str, Any]) -> bool:
+    """FinOps records "dispatch may occur" at admission, so no separate start is sent."""
+    advertised = caps.get("capabilities") if isinstance(caps, Mapping) else None
+    return isinstance(advertised, Mapping) and advertised.get("start_on_admit") is True
 
 
 def _handle_to_reservation(
@@ -974,6 +1054,7 @@ def _handle_to_reservation(
         lifecycle_version=str(bind.get("lifecycle_version") or ""),
         config_version=str(bind.get("config_version") or ""),
         settlement_capability=capability or None,
+        started_on_admit=str(payload.get("state") or "") == "in_flight",
     )
 
 
@@ -1087,7 +1168,7 @@ def _reserve_lifecycle(
         est_usd = 0.01
     micros, pricing_fields = _catalog_reserve_overlay(_usd_to_micros_ceil(est_usd))
     binding = _capture_settlement_binding(base=base, org_id=org_id, workspace_id=workspace_id)
-    _ensure_server_lifecycle_compatible(
+    caps = _ensure_server_lifecycle_compatible(
         base,
         org_id=org_id,
         api_key=binding.get("finops_api_key"),
@@ -1112,6 +1193,9 @@ def _reserve_lifecycle(
         operation_id=operation_id,
         attempt_id=attempt_id or identities.attempt_id,
     )
+    start = _offers_start_on_admit(caps)
+    if start:
+        body["start_on_admit"] = True
     data = json.dumps(body).encode("utf-8")
     from kazenai.otel import build_control_attributes, control_span, record_span_event
 
@@ -1166,6 +1250,8 @@ def _reserve_lifecycle(
             if status == 402 or _is_tier_breaker(status, detail):
                 reason = _denial_reason(detail, "reason", "error_code")
                 raise BudgetExceeded(f"Pre-call reservation denied: {reason}") from exc
+            if start and (status is None or status >= 500):
+                _abandon_admission(base=base, org_id=org_id, body=body, api_key=binding.get("finops_api_key"))
             if finops_reservation_fail_closed():
                 if _unavailable_status(status) and _allows_fail_open(base, org_id, binding):
                     return _fail_open_handle(
@@ -1176,6 +1262,9 @@ def _reserve_lifecycle(
         except (BudgetExceeded, BudgetUnavailable):
             raise
         except Exception as exc:
+            if start:
+                # No answer: FinOps may have admitted it in_flight. Nothing was dispatched.
+                _abandon_admission(base=base, org_id=org_id, body=body, api_key=binding.get("finops_api_key"))
             if finops_reservation_fail_closed() or enforcement_fail_closed():
                 if _is_unavailable(exc) and _allows_fail_open(base, org_id, binding):
                     return _fail_open_handle(
@@ -1295,11 +1384,14 @@ async def _reserve_lifecycle_async(
     att = identities.attempt
     idem = identities.idempotency_key
     binding = _capture_settlement_binding(base=base, org_id=org_id, workspace_id=workspace_id)
-    await _ensure_server_lifecycle_compatible_async(
+    caps = await _ensure_server_lifecycle_compatible_async(
         base,
         org_id=org_id,
         api_key=binding.get("finops_api_key"),
     )
+    start = _offers_start_on_admit(caps)
+    if start:
+        body["start_on_admit"] = True
     timeout = httpx.Timeout(_reserve_timeout_s())
     from kazenai.otel import build_control_attributes, control_span, record_span_event
 
@@ -1344,6 +1436,8 @@ async def _reserve_lifecycle_async(
                     if _is_tier_breaker(status, detail):
                         reason = detail.get("reason") or "tier breaker open"
                         raise BudgetExceeded(f"Pre-call reservation denied: {reason}")
+                    if start and resp.status_code >= 500:
+                        _abandon_admission(base=base, org_id=org_id, body=body, api_key=binding.get("finops_api_key"))
                     if finops_reservation_fail_closed():
                         if _unavailable_status(resp.status_code) and _allows_fail_open(base, org_id, binding):
                             return _fail_open_handle(
@@ -1383,7 +1477,13 @@ async def _reserve_lifecycle_async(
                 return handle
         except (BudgetExceeded, BudgetUnavailable):
             raise
-        except Exception as exc:
+        except BaseException as exc:
+            if start:
+                # No answer (a timeout, or the caller gave up): FinOps may have admitted
+                # it in_flight. Nothing was dispatched.
+                _abandon_admission(base=base, org_id=org_id, body=body, api_key=binding.get("finops_api_key"))
+            if not isinstance(exc, Exception):
+                raise
             if finops_reservation_fail_closed() or enforcement_fail_closed():
                 if _is_unavailable(exc) and _allows_fail_open(base, org_id, binding):
                     return _fail_open_handle(
@@ -1527,7 +1627,7 @@ def _finops_result_ack(payload: dict[str, Any] | None, *, event: str) -> bool:
     code = str(payload.get("result") or payload.get("status") or "").strip().lower()
     if event in {"usage_known"}:
         return code in {"applied", "duplicate"}
-    if event in {"provider_started", "cancel_before_call", "outcome_unknown", "replay_pending"}:
+    if event in {"provider_started", "cancel_before_call", "admission_abandoned", "outcome_unknown", "replay_pending"}:
         # pending is a valid durable mark for outcome_unknown / replay_pending.
         if event in {"outcome_unknown", "replay_pending"}:
             return code in {"applied", "duplicate", "pending"}
@@ -1596,6 +1696,213 @@ def _enqueue_settle_intent(
         )
     except Exception:
         _log.debug("settle intent enqueue failed", exc_info=True)
+
+
+# --- Background settles and abandoned admissions (SDK 1.2.4) -----------------------
+#
+# A usage_known settle never weakens the limit: until it lands, FinOps holds the
+# reserved amount. So by default it leaves the call's path. The intent is journaled to
+# disk first, as before, then sent by a small pool of daemon threads; a send that
+# fails is handed to the settle flusher, which retries it. At exit the pool gets a
+# short, bounded wait (KAZENAI_SETTLE_EXIT_WAIT_S, default 2); anything left stays in
+# the journal for the flusher. KAZENAI_SETTLE_IN_BACKGROUND=0 keeps settles inline.
+
+_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+_ABANDON_DELAYS_S = (2.0, 10.0, 30.0)
+
+
+def settle_in_background() -> bool:
+    return os.getenv("KAZENAI_SETTLE_IN_BACKGROUND", "1").strip().lower() not in _OFF_VALUES
+
+
+class _BackgroundSender:
+    """Daemon worker threads with a countable backlog (so exit can wait for it)."""
+
+    def __init__(self, *, name: str, workers: int) -> None:
+        import queue
+
+        self._queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
+        self._pending = 0
+        self._idle = threading.Condition()
+        for i in range(max(1, workers)):
+            threading.Thread(target=self._run, name=f"{name}-{i}", daemon=True).start()
+
+    def submit(self, job: Callable[[], None]) -> None:
+        with self._idle:
+            self._pending += 1
+        self._queue.put(job)
+
+    def _run(self) -> None:
+        while True:
+            job = self._queue.get()
+            try:
+                job()
+            except Exception:
+                _log.debug("background lifecycle job failed", exc_info=True)
+            finally:
+                with self._idle:
+                    self._pending -= 1
+                    self._idle.notify_all()
+
+    def drain(self, timeout_s: float) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        with self._idle:
+            while self._pending:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self._idle.wait(left)
+        return True
+
+
+_SENDERS: dict[str, _BackgroundSender] = {}
+_SENDERS_PID = 0
+_SENDERS_LOCK = threading.Lock()
+
+
+def _sender(name: str, workers: int) -> _BackgroundSender:
+    global _SENDERS_PID
+    with _SENDERS_LOCK:
+        if _SENDERS_PID != os.getpid():  # a forked child starts its own threads
+            _SENDERS.clear()
+            _SENDERS_PID = os.getpid()
+            import atexit
+
+            atexit.register(_drain_at_exit)
+        sender = _SENDERS.get(name)
+        if sender is None:
+            sender = _SENDERS[name] = _BackgroundSender(name=name, workers=workers)
+        return sender
+
+
+def _settle_sender() -> _BackgroundSender:
+    try:
+        workers = int(os.getenv("KAZENAI_SETTLE_BACKGROUND_WORKERS", "4") or "4")
+    except ValueError:
+        workers = 4
+    return _sender("kazenai-settle", workers)
+
+
+def drain_settlements(timeout_s: float = 5.0) -> bool:
+    """Wait up to ``timeout_s`` for background settles to be sent. True when none is left.
+
+    For short-lived processes (serverless handlers): call before returning. What is
+    not sent in time stays journaled, and the settle flusher sends it later."""
+    with _SENDERS_LOCK:
+        senders = list(_SENDERS.values()) if _SENDERS_PID == os.getpid() else []
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    done = True
+    for sender in senders:
+        done = sender.drain(max(0.0, deadline - time.monotonic())) and done
+    return done
+
+
+def _drain_at_exit() -> None:
+    try:
+        wait = float(os.getenv("KAZENAI_SETTLE_EXIT_WAIT_S", "2") or "2")
+    except ValueError:
+        wait = 2.0
+    drain_settlements(wait)
+
+
+def _settle_in_background(
+    base: str,
+    org_id: str,
+    payload: dict[str, Any],
+    *,
+    api_key: str | None,
+    timeout_s: float = 2.0,
+) -> bool:
+    """Journal ``payload`` and send it from the background pool. False when the
+    journal can't be written (the caller then sends inline, as before)."""
+    try:
+        journal_path, journal_fp = _journal_settle_intent(
+            payload, base=base, org_id=org_id, api_key=api_key, error="pre_send"
+        )
+    except Exception:
+        _log.debug("settle journal failed; sending inline", exc_info=True)
+        return False
+
+    def send() -> None:
+        acked = False
+        try:
+            acked = _post_settle_sync(
+                base,
+                org_id,
+                payload,
+                timeout_s=timeout_s,
+                api_key=api_key,
+                enqueue_on_failure=False,
+                journal_before_send=False,
+            )
+        finally:
+            if acked:
+                _ack_settle_intent(journal_path, journal_fp)
+            else:
+                # Due now for the flusher, which retries until FinOps acknowledges it.
+                _release_settle_intent(journal_path, journal_fp)
+                try:
+                    from kazenai.spine.settle_queue import _ensure_auto_flush
+
+                    _ensure_auto_flush()
+                except Exception:
+                    _log.debug("settle flusher start failed", exc_info=True)
+
+    _settle_sender().submit(send)
+    return True
+
+
+def _abandon_admission(*, base: str, org_id: str, body: Mapping[str, Any], api_key: str | None) -> None:
+    """The reserve answer never arrived, so nothing was dispatched. If FinOps did admit
+    it with start_on_admit, its hold is in_flight: replay the reserve with the same
+    idempotency key (a lost answer is recovered by repeating the same operation) to get
+    the reservation and its capability, then release it with admission_abandoned. Background, with
+    a few spaced attempts; if none lands, recovery keeps the hold as outcome unknown."""
+    import random
+
+    frozen = json.dumps(dict(body)).encode("utf-8")
+    call_id = str(body.get("call_id") or "")
+    attempt = int(body.get("attempt") or 1)
+
+    def abandon() -> None:
+        for delay in _ABANDON_DELAYS_S:
+            time.sleep(delay * (0.5 + random.random()))
+            req = urllib.request.Request(
+                f"{base}/v1/budget/reserve",
+                data=frozen,
+                headers=_finops_headers(org_id, api_key=api_key),
+                method="POST",
+            )
+            try:
+                with _transport.urlopen(req, timeout=_reserve_timeout_s()) as resp:
+                    payload = json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                if 400 <= int(exc.code or 0) < 500 and int(exc.code or 0) not in (408, 429):
+                    return  # refused, or a different payload under this key: nothing is held
+                continue
+            except Exception:
+                continue
+            if not isinstance(payload, dict) or payload.get("allowed") is False:
+                return
+            reservation_id = str(payload.get("reservation_id") or "")
+            capability = str(payload.get("settlement_capability") or "")
+            state = str(payload.get("state") or "")
+            event = {"in_flight": "admission_abandoned", "reserved": "cancel_before_call"}.get(state)
+            if not (reservation_id and capability and event):
+                return
+            settle = build_settle_payload(
+                reservation_id=reservation_id,
+                call_id=str(payload.get("call_id") or call_id),
+                attempt=int(payload.get("attempt") or attempt),
+                org_id=org_id,
+                event=event,
+                settlement_capability=capability,
+            )
+            # Journaled before the send: the flusher retries it if this fails.
+            _post_settle_sync(base, org_id, settle, timeout_s=_reserve_timeout_s(), api_key=api_key)
+            return
+
+    _sender("kazenai-abandon", 2).submit(abandon)
 
 
 class SettleRejected(Exception):
@@ -1853,6 +2160,8 @@ def reconcile_budget(
             settlement_capability=handle.settlement_capability,
             usage_evidence=_handle_settlement_evidence(handle),
         )
+        if settle_in_background() and _settle_in_background(base, settle_org, payload, api_key=settle_key):
+            return True  # journaled; sent off the call's path (FinOps holds the reserve until then)
         return _post_settle_sync(
             base, settle_org, payload, timeout_s=2.0, api_key=settle_key
         )
@@ -1943,6 +2252,11 @@ async def reconcile_budget_async(
                     usage_evidence=_handle_settlement_evidence(handle),
                 )
                 lifecycle_payload = payload
+                if settle_in_background() and _settle_in_background(
+                    base, settle_org, payload, api_key=settle_key
+                ):
+                    # Journaled; sent off the call's path (FinOps holds the reserve until then).
+                    return True
                 # Journal before await so CancelledError / ConnectError keep intent.
                 journal_path, journal_fp = _journal_settle_intent(
                     payload,
@@ -2059,6 +2373,8 @@ def signal_reservation_event(
         raise ValueError(f"unsupported reservation lifecycle event: {event}")
     if event == "usage_known" and actual_cost_usd is None:
         raise ValueError("actual_cost_usd is required for usage_known")
+    if event == "provider_started" and handle.started_on_admit:
+        return True  # FinOps recorded it at admission (start_on_admit)
 
     base = handle.settlement_base_url()
     settle_org = handle.settlement_org_id(org_id)
@@ -2085,6 +2401,13 @@ def signal_reservation_event(
         settlement_capability=handle.settlement_capability,
         usage_evidence=_handle_settlement_evidence(handle),
     )
+    if (
+        event == "usage_known"
+        and not required
+        and settle_in_background()
+        and _settle_in_background(base, settle_org, payload, api_key=settle_key, timeout_s=_reserve_timeout_s())
+    ):
+        return True
     if not _post_settle_sync(
         base, settle_org, payload, timeout_s=_reserve_timeout_s(), api_key=settle_key
     ):
@@ -2125,6 +2448,8 @@ async def signal_reservation_event_async(
         raise ValueError(f"unsupported reservation lifecycle event: {event}")
     if event == "usage_known" and actual_cost_usd is None:
         raise ValueError("actual_cost_usd is required for usage_known")
+    if event == "provider_started" and handle.started_on_admit:
+        return True  # FinOps recorded it at admission (start_on_admit)
 
     base = handle.settlement_base_url()
     settle_org = handle.settlement_org_id(org_id)
@@ -2151,6 +2476,13 @@ async def signal_reservation_event_async(
         settlement_capability=handle.settlement_capability,
         usage_evidence=_handle_settlement_evidence(handle),
     )
+    if (
+        event == "usage_known"
+        and not required
+        and settle_in_background()
+        and _settle_in_background(base, settle_org, payload, api_key=settle_key, timeout_s=_reserve_timeout_s())
+    ):
+        return True
     journal_path: str | None = None
     journal_fp: str | None = None
     try:

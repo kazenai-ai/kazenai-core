@@ -34,6 +34,9 @@ def _hermetic_kazenai_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KAZENAI_TIER_MISMATCH_MULTIPLIER", "1")
     # The flusher daemon starts after the first spooled record. Tests flush explicitly.
     monkeypatch.setenv("KAZENAI_SDK_SETTLE_AUTO_FLUSH", "0")
+    # Tests assert each settle request as the call returns. Background settles (the
+    # default) have their own tests (tests/test_background_settle.py), which unset this.
+    monkeypatch.setenv("KAZENAI_SETTLE_IN_BACKGROUND", "0")
     # Mock provider hosts bill at list price. A non-first-party host is
     # otherwise priced with the 10% regional/third-party uplift; the uplift has
     # its own tests (tests/test_pricing_modifiers.py), which unset this.
