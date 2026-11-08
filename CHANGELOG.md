@@ -3,7 +3,14 @@
 Notable changes to `kazenai`, newest first. Each release is also published on
 [GitHub Releases](https://github.com/kazenai-ai/kazenai-core/releases).
 
-## Unreleased
+## 1.2.5 - 2026-11-08
+
+Short text requests reserve close to what they cost, so a small budget is no longer
+filled by holds. The spending limit is never weaker: every hold is still an upper bound.
+
+```bash
+python -m pip install "kazenai[openai]==1.2.5"
+```
 
 ### Changed
 
