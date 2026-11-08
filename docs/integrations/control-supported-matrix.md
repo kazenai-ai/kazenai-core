@@ -1,6 +1,6 @@
 # Supported integrations
 
-This page lists what KazenAI Control supports in `kazenai` 1.2.4, how each
+This page lists what KazenAI Control supports in `kazenai` 1.2.5, how each
 integration was verified, and the known limits. The machine-readable version is
 [`control-supported-matrix.json`](./control-supported-matrix.json); it is checked
 by the test suite, so the two stay in step.
