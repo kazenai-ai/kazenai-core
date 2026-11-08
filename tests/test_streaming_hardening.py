@@ -171,18 +171,20 @@ class _Anthropic:
 
 
 def test_projection_prices_estimated_input_plus_enforced_output() -> None:
-    projected = _precall_projection_usd(
-        {
-            "model": "gpt-4o-mini",
-            "max_tokens": 100,
-            "messages": [{"role": "user", "content": "hello"}],
-        },
-        None,
-    )
-    # 2,000 conservative input tokens + the actual 100-token output cap.
-    assert projected == pytest.approx(
-        (2_000 * 0.00015 + 100 * 0.00060) / 1_000.0
-    )
+    from kazenai.monitor import _estimate_input_tokens
+
+    kwargs = {
+        "model": "gpt-4o-mini",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    projected = _precall_projection_usd(kwargs, None)
+    # The byte-bounded input estimate (at least one token per byte) + the 100-token output cap.
+    input_tokens = _estimate_input_tokens(kwargs)
+    assert input_tokens >= len("hello")
+    exact = (input_tokens * 0.00015 + 100 * 0.00060) / 1_000.0
+    # Rounded up to a whole micro-USD, never down.
+    assert exact - 1e-12 <= projected < exact + 1e-6
 
 
 def test_unknown_model_block_policy_reaches_caller_before_dispatch(monkeypatch) -> None:

@@ -3,6 +3,20 @@
 Notable changes to `kazenai`, newest first. Each release is also published on
 [GitHub Releases](https://github.com/kazenai-ai/kazenai-core/releases).
 
+## Unreleased
+
+### Changed
+
+- **Smaller holds for short text requests.** Before a call, the SDK assumed at least
+  2,000 input tokens, so a short prompt on a cheap model reserved several times its
+  cost and a small budget filled with holds early. A plain-text request is now priced
+  from its size, which is already an upper bound (at most one token per byte, plus
+  framing). A request with images, audio, files, tools, tool calls, a stored
+  conversation or prompt, or `extra_body` keeps the 2,000-token floor, because its
+  size doesn't bound its tokens. Request settings that never reach the model as text
+  (`n`, `temperature`, `service_tier`, `user`, `metadata` and similar) no longer count
+  as input. The limit is never weaker: every hold is still an upper bound.
+
 ## 1.2.4 - 2026-11-07
 
 One request to Agent FinOps before each call, instead of two, and the settle after the

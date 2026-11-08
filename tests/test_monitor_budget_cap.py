@@ -67,11 +67,12 @@ def test_enforcement_pending_blocks_concurrent_projection():
 def test_cap_boundary_allows_when_projection_fits(monkeypatch):
     """Cap at exactly the projected floor must allow (projected_total > limit denies)."""
     _standalone_env(monkeypatch)
-    projected = _precall_projection_usd({"model": "gpt-4o"}, None)
+    messages = [{"role": "user", "content": "hi"}]
+    projected = _precall_projection_usd({"model": "gpt-4o", "messages": messages}, None)
     assert projected > 0
     client = FakeOpenAI()
     monitor(client, max_budget_usd=projected)  # equal → allowed (check uses >)
-    client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
+    client.chat.completions.create(model="gpt-4o", messages=messages)
     assert client.chat.completions.calls == 1
 
 

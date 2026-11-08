@@ -30,7 +30,9 @@ def test_precall_floor_matches_price_table_and_ranks_models():
     pricey = _precall_projection_usd({"model": "claude-opus-4-8"}, None)
     assert pricey > cheap > 0
     # An unknown-but-priced model falls back to usd_per_1k_tokens; no model + no price -> 0.
-    assert _precall_projection_usd({}, 0.03) == pytest.approx(0.03 * (2000 / 1000))
+    from kazenai.monitor import _estimate_input_tokens
+
+    assert _precall_projection_usd({}, 0.03) == pytest.approx(0.03 * (_estimate_input_tokens({}) / 1000))
     assert _precall_projection_usd({}, None) == 0.0
 
 

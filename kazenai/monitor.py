@@ -313,6 +313,23 @@ def _estimate_input_tokens(kwargs: Mapping[str, Any]) -> int:
         "max_tokens",
         "max_completion_tokens",
         "max_output_tokens",
+        # Settings the provider applies but never reads as prompt text.
+        "n",
+        "temperature",
+        "top_p",
+        "top_k",
+        "seed",
+        "presence_penalty",
+        "frequency_penalty",
+        "logprobs",
+        "top_logprobs",
+        "service_tier",
+        "inference_geo",
+        "store",
+        "user",
+        "metadata",
+        "parallel_tool_calls",
+        "reasoning_effort",
     }
 
     def _size(value: Any, *, depth: int = 0) -> int:
@@ -341,9 +358,63 @@ def _estimate_input_tokens(kwargs: Mapping[str, Any]) -> int:
             return 64
 
     request_body = {key: value for key, value in (kwargs or {}).items() if key not in excluded}
-    # Keep the historical floor for request framing/provider overhead.  Above
-    # that floor one UTF-8 byte is treated as at most one token.
-    return max(_PRECALL_MIN_TOKENS, _size(request_body) + 64)
+    # One UTF-8 byte is at most one token, and +64 covers request framing, so for a
+    # self-contained text request the byte count is already an upper bound. Anything
+    # whose tokens the request's bytes don't bound (images, audio, files, tools, or
+    # context stored by the provider) keeps the historical floor.
+    estimate = _size(request_body) + 64
+    if _bytes_bound_input(request_body):
+        return estimate
+    return max(_PRECALL_MIN_TOKENS, estimate)
+
+
+# Content part types that are plain text in OpenAI Chat/Responses and Anthropic Messages.
+_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
+# Request fields that bring in tokens the request's own bytes don't show: tool
+# definitions (providers add their own tool prompt), stored conversations and prompt
+# templates, attached files, and anything passed through untouched.
+_UNBOUNDED_FIELDS = frozenset(
+    {
+        "tools",
+        "functions",
+        "tool_choice",
+        "tool_resources",
+        "previous_response_id",
+        "conversation",
+        "attachments",
+        "file_ids",
+        "files",
+        "cached_content",
+        "mcp_servers",
+        "container",
+        "extra_body",
+    }
+)
+
+
+def _bytes_bound_input(request_body: Mapping[str, Any]) -> bool:
+    """True when the request is plain text only, so its byte count bounds its tokens."""
+    for key, value in request_body.items():
+        if key in _UNBOUNDED_FIELDS and value not in (None, [], {}, ""):
+            return False
+        if key == "prompt" and not isinstance(value, str):  # a stored prompt template, not text
+            return False
+
+    def _text_only(value: Any, depth: int = 0) -> bool:
+        if depth > 32:
+            return False
+        if isinstance(value, Mapping):
+            part = value.get("type")
+            if part is not None and part not in _TEXT_PART_TYPES and part != "message":
+                return False
+            if any(k in value for k in ("tool_calls", "function_call", "image_url", "input_audio", "file", "source")):
+                return False
+            return all(_text_only(v, depth + 1) for v in value.values())
+        if isinstance(value, (list, tuple)):
+            return all(_text_only(v, depth + 1) for v in value)
+        return isinstance(value, (str, int, float, bool)) or value is None
+
+    return _text_only(request_body)
 
 
 def _max_output_tokens(kwargs: Mapping[str, Any]) -> int:
