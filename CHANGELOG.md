@@ -3,7 +3,7 @@
 Notable changes to `kazenai`, newest first. Each release is also published on
 [GitHub Releases](https://github.com/kazenai-ai/kazenai-core/releases).
 
-## 1.2.6 - unreleased
+## 1.2.6 - 2026-11-15
 
 A refused customer ID is reported as what it is, an over-limit refusal says what the
 call could have cost, and LiteLLM gateway calls that name no run are no longer filed
