@@ -1,4 +1,4 @@
-__version__ = "1.2.5"
+__version__ = "1.2.6"
 
 # Prefer the installed distribution version. Fallback is only for editable /
 # source checkouts where package metadata is unavailable.
@@ -7,7 +7,7 @@ try:
 
     __version__ = _pkg_version("kazenai")
 except PackageNotFoundError:  # pragma: no cover - source-tree only
-    __version__ = "1.2.5"
+    __version__ = "1.2.6"
 
 from .context import BackgroundTaskContext, RunContext, get_current_context, use_context
 from .attribution import (
@@ -28,6 +28,7 @@ from .enforcement import (
     BudgetExceeded,
     BudgetUnavailable,
     Enforcement,
+    InvalidAttribution,
     KazenBlock,
     LoopDetected,
     RateLimitExceeded,
@@ -90,6 +91,7 @@ __all__ = [
     "aguarded_llm_call",
     "BudgetExceeded",
     "BudgetUnavailable",
+    "InvalidAttribution",
     "guarded_embedding_call",
     "guarded_llm_call",
     "CircuitBreaker",

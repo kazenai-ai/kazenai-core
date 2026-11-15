@@ -36,7 +36,7 @@ KazenAI:            Pre-flight check → BLOCKED → LLM call never made
 ## Install
 
 ```bash
-python -m pip install "kazenai[openai]==1.2.5"
+python -m pip install "kazenai[openai]==1.2.6"
 # Most teams install the customer package instead:
 python -m pip install "kazenai-finops[openai]==1.2.3"
 # Anthropic:

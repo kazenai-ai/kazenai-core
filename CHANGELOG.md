@@ -3,6 +3,41 @@
 Notable changes to `kazenai`, newest first. Each release is also published on
 [GitHub Releases](https://github.com/kazenai-ai/kazenai-core/releases).
 
+## 1.2.6 - 2026-11-15
+
+A refused customer ID is reported as what it is, an over-limit refusal says what the
+call could have cost, and LiteLLM gateway calls that name no run are no longer filed
+under one run called "None".
+
+```bash
+python -m pip install "kazenai[openai]==1.2.6"
+```
+
+### Fixed
+
+- **A customer or feature ID that Agent FinOps refuses raises `InvalidAttribution`.**
+  Up to 1.2.5 it raised `BudgetUnavailable: Pre-call reservation HTTP 400`, which read
+  like an outage. The message now carries FinOps's reason, for example "business_subject_ref
+  has invalid characters". `InvalidAttribution` subclasses `BudgetUnavailable`, so code
+  that catches `BudgetUnavailable` or `KazenBlock` still catches it. The call never runs,
+  whatever the org's fail-open setting. With `KAZENAI_ENV=dev` and the client's
+  fail-open setting, such a call used to run without a reservation; it is refused now.
+- **LiteLLM gateway: a call whose metadata names no `run_id` is its own run.** LiteLLM
+  always sends a metadata dict, and 1.2.2–1.2.5 turned its missing `run_id` into the
+  text "None", so every such call landed in one run called "None" in Runs and Agent
+  FinOps. Each call now uses its own operation ID, as the SDK path does.
+
+### Changed
+
+- **An over-limit refusal says what the call could cost and what is left.** The
+  `BudgetExceeded` message adds, for example, "this call can cost up to $0.010834 and
+  $0.010000 is left; a lower max_tokens lowers what a call can cost". The hold is the
+  call's worst case: with no `max_tokens`, the SDK caps the reply at the model's
+  default output limit (16,384 tokens for gpt-4o-mini) and holds that, so a small
+  limit can refuse a call that would have cost far less. Set `max_tokens` to lower it.
+- `BudgetUnavailable`'s docstring now says what it means: Agent FinOps gave no usable
+  answer (unreachable, timed out, or an error status), not only "unreachable".
+
 ## 1.2.5 - 2026-11-08
 
 Short text requests reserve close to what they cost, so a small budget is no longer

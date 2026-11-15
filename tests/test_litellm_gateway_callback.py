@@ -115,6 +115,30 @@ async def test_a_call_with_no_customer_sends_no_customer_field(logger, finops):
 
 
 # ---------------------------------------------------------------------------
+# Run ID
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata",
+    [{}, {"user_api_key_end_user_id": "customer-42"}, {"run_id": None}, {"run_id": "  "}],
+)
+async def test_a_call_naming_no_run_is_its_own_run_never_one_named_none(logger, finops, metadata):
+    # 1.2.2-1.2.5 sent str(None), so every such call landed in one run called "None".
+    await logger.async_pre_call_deployment_hook(_request(metadata=metadata))
+    reserve = _events(finops, "reserve")[0]
+    assert reserve["run_id"] == reserve["operation_id"]
+    assert reserve["run_id"] not in {"", "None"}
+
+
+@pytest.mark.asyncio
+async def test_the_callers_run_id_reaches_the_reservation(logger, finops):
+    await logger.async_pre_call_deployment_hook(_request(metadata={"run_id": "run-7"}))
+    assert _events(finops, "reserve")[0]["run_id"] == "run-7"
+
+
+# ---------------------------------------------------------------------------
 # The hold is a real bound
 # ---------------------------------------------------------------------------
 

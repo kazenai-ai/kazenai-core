@@ -21,7 +21,24 @@ class BudgetExceeded(KazenBlock):
 
 
 class BudgetUnavailable(KazenBlock):
-    """Raised when FinOps is unreachable and enforcement mode is fail_closed."""
+    """Agent FinOps gave no usable answer before the call (fail-closed), so it didn't run.
+
+    FinOps was unreachable, timed out, or answered with an error status. A refused
+    customer or feature ID is the subclass ``InvalidAttribution``.
+    """
+
+
+class InvalidAttribution(BudgetUnavailable):
+    """Agent FinOps refused the call's customer or feature ID (``invalid_attribution``).
+
+    The ID was present but not accepted: for example it has a character outside letters,
+    digits and ``. _ : @ -``, or is longer than 128 characters. The message carries
+    FinOps's reason. The call didn't run, whatever the org's fail-open setting: this is an
+    answer, not an outage. It subclasses ``BudgetUnavailable`` so handlers written before
+    1.2.6 still catch it.
+    """
+
+    error_code = "invalid_attribution"
 
 
 class RateLimitExceeded(KazenBlock):

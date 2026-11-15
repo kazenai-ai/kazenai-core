@@ -22,7 +22,7 @@ import httpx
 import pytest
 
 from kazenai import monitor
-from kazenai.enforcement import BudgetExceeded, BudgetUnavailable
+from kazenai.enforcement import BudgetExceeded, BudgetUnavailable, InvalidAttribution
 from kazenai.spine import guard, org_policy, transport
 
 openai = pytest.importorskip("openai")
@@ -256,6 +256,88 @@ def test_a_budget_denial_still_denies_a_fail_open_org(monkeypatch):
     }
     with pytest.raises(BudgetExceeded, match="reservation rate limit exceeded"):
         _ask(client, f"rate limited {uuid.uuid4().hex}")
+    assert len(hits) == 1
+    finops.stop()
+
+
+_REFUSED_CUSTOMER_ID = {
+    "detail": {
+        "allowed": False,
+        "error_code": "invalid_attribution",
+        "reason": "business_subject_ref has invalid characters",
+    }
+}
+
+
+def test_a_refused_customer_id_is_the_callers_error_not_an_outage(monkeypatch):
+    finops, hits = FinOps("fail_open"), []
+    client = _client(monkeypatch, finops, hits)
+    assert _ask(client, f"learn {uuid.uuid4().hex}") == "ok"
+    finops.reserve_status, finops.reserve_body = 400, _REFUSED_CUSTOMER_ID
+    with pytest.raises(InvalidAttribution, match="business_subject_ref has invalid characters") as caught:
+        _ask(client, f"bad customer {uuid.uuid4().hex}")
+    assert caught.value.error_code == "invalid_attribution"
+    assert "HTTP 400" not in str(caught.value)
+    # Handlers written before 1.2.6 still catch it.
+    assert isinstance(caught.value, BudgetUnavailable)
+    assert len(hits) == 1
+    finops.stop()
+
+
+def test_async_a_refused_customer_id_is_the_callers_error(monkeypatch):
+    finops, hits = FinOps("fail_open"), []
+    client = _client(monkeypatch, finops, hits)
+    assert _ask(client, f"learn {uuid.uuid4().hex}") == "ok"
+    finops.reserve_status, finops.reserve_body = 400, _REFUSED_CUSTOMER_ID
+
+    async def run() -> None:
+        aclient = _client(monkeypatch, finops, hits, is_async=True)
+        await aclient.chat.completions.create(
+            model="gpt-4o-mini", messages=[{"role": "user", "content": f"async bad customer {uuid.uuid4().hex}"}]
+        )
+
+    with pytest.raises(InvalidAttribution, match="business_subject_ref has invalid characters"):
+        asyncio.run(run())
+    assert len(hits) == 1
+    finops.stop()
+
+
+def test_a_refused_customer_id_never_runs_under_client_side_fail_open(monkeypatch):
+    # KAZENAI_ENV=dev with the client's fail-open used to turn this 400 into an
+    # unreserved call. A refused ID is an answer, so it refuses everywhere.
+    monkeypatch.setenv("KAZENAI_ENV", "dev")
+    monkeypatch.setenv("KAZENAI_FINOPS_RESERVATION_MODE", "fail_open")
+    finops, hits = FinOps("fail_open"), []
+    client = _client(monkeypatch, finops, hits)
+    finops.reserve_status, finops.reserve_body = 400, _REFUSED_CUSTOMER_ID
+    with pytest.raises(InvalidAttribution):
+        _ask(client, f"dev bad customer {uuid.uuid4().hex}")
+    assert hits == []
+    finops.stop()
+
+
+def test_an_over_limit_refusal_says_what_the_call_could_cost_and_what_is_left(monkeypatch):
+    finops, hits = FinOps("fail_open"), []
+    client = _client(monkeypatch, finops, hits)
+    assert _ask(client, f"learn {uuid.uuid4().hex}") == "ok"
+    finops.reserve_status, finops.reserve_body = 402, {
+        "detail": {
+            "allowed": False,
+            "error_code": "invalid_amount",
+            "reason": "insufficient remaining capacity on business_subject",
+            "decision_receipt": {
+                "reason_code": "insufficient_capacity",
+                "requested_estimate_usd_micros": 10_834,
+                "remaining_capacity_usd_micros": 10_000,
+            },
+        }
+    }
+    with pytest.raises(BudgetExceeded) as caught:
+        _ask(client, f"over {uuid.uuid4().hex}")
+    message = str(caught.value)
+    assert "insufficient remaining capacity on business_subject" in message
+    assert "this call can cost up to $0.010834 and $0.010000 is left" in message
+    assert "max_tokens" in message
     assert len(hits) == 1
     finops.stop()
 
