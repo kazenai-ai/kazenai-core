@@ -83,6 +83,18 @@ def _log_flush_outcome(task: "asyncio.Future[dict[str, int]]") -> None:
         _log.warning("gateway settlement resend failed: %s", exc)
 
 
+def _metadata_run_id(kwargs: Mapping[str, Any]) -> str:
+    """The caller's run ID from LiteLLM's request metadata, or "" when it names none.
+
+    LiteLLM always passes a metadata dict, so a missing run ID must stay empty and let
+    ``reserve_attempt`` fall back to this call's own operation ID. (1.2.2-1.2.5 sent
+    ``str(None)``, which filed every such call under one run named "None".)
+    """
+    metadata = kwargs.get("metadata")
+    raw = metadata.get("run_id") if isinstance(metadata, Mapping) else None
+    return str(raw).strip() if raw is not None else ""
+
+
 class KazenGatewayControlLogger(CustomLogger):
     """Per-deployment-attempt admission via FinOps reserve/start/settle."""
 
@@ -164,11 +176,7 @@ class KazenGatewayControlLogger(CustomLogger):
                 identity=identity,
                 model=model,
                 estimated_usd=estimated,
-                run_id=str(
-                    (kwargs.get("metadata") or {}).get("run_id")
-                    if isinstance(kwargs.get("metadata"), Mapping)
-                    else identity.operation_id
-                ),
+                run_id=_metadata_run_id(kwargs),
                 business_subject_ref=customer,
             )
             reservation.meta["price_multiplier"] = format(price_multiplier, "f")

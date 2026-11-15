@@ -25,7 +25,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from ..spine import transport as _transport
-from ..spine.guard import _denial_reason
+from ..spine.guard import _denial_reason, _is_invalid_attribution
 
 _log = logging.getLogger("kazenai.litellm_gateway")
 
@@ -683,7 +683,7 @@ class GatewayFinOpsClient:
         if business_subject_ref:
             body["business_subject_ref"] = business_subject_ref
         status, payload = self._post("/v1/budget/reserve", body)
-        if payload.get("error_code") == "invalid_attribution":
+        if _is_invalid_attribution(payload):
             # The customer ID came from the caller, so this is the caller's error, not a budget refusal.
             reason = _denial_reason(payload, "reason", "message", "error")
             raise GatewayAdmissionDenied(f"gateway reserve refused: {reason}", code="invalid_attribution", http_status=400)

@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping, Optional, TypeVar, Union
 from ..context import get_current_context
 from ..cost_engine import TokenCostEngine
 from ..deployment import enforcement_fail_closed, finops_reservation_fail_closed
-from ..enforcement import BudgetExceeded, BudgetUnavailable
+from ..enforcement import BudgetExceeded, BudgetUnavailable, InvalidAttribution
 from ..lifecycle_transitions import (
     build_settle_payload,
     create_attempt_identities,
@@ -662,25 +662,66 @@ def _is_tier_breaker(status: int | None, detail: Any) -> bool:
     return status == 409 and isinstance(detail, dict) and str(detail.get("error_code") or "") == "tier_breaker"
 
 
+def _is_invalid_attribution(detail: Any) -> bool:
+    """FinOps refused the call's customer or feature ID (``invalid_attribution``).
+
+    That is the caller's error and an answer, not an outage: it is checked before the
+    402 and fail-open branches, whatever the HTTP status.
+    """
+    if not isinstance(detail, dict):
+        return False
+    if isinstance(detail.get("detail"), dict):
+        detail = detail["detail"]
+    return str(detail.get("error_code") or "") == "invalid_attribution"
+
+
+def _capacity_hint(detail: dict) -> str:
+    """For an over-limit refusal: what this call could cost (its hold) against what's left.
+
+    The hold is the call's worst case, so with no ``max_tokens`` it can be far above
+    what the call would really cost; a lower ``max_tokens`` lowers it.
+    """
+    receipt = detail.get("decision_receipt")
+    if not isinstance(receipt, dict) or receipt.get("reason_code") != "insufficient_capacity":
+        return ""
+    hold = receipt.get("requested_estimate_usd_micros")
+    left = receipt.get("remaining_capacity_usd_micros")
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (hold, left)):
+        return ""
+    return (
+        f" (this call can cost up to ${hold / 1_000_000:.6f} and ${max(left, 0) / 1_000_000:.6f} is left;"
+        " a lower max_tokens lowers what a call can cost)"
+    )
+
+
 def _denial_reason(detail: Any, *fields: str) -> str:
     """Why FinOps refused a reservation, for the ``BudgetExceeded`` message.
 
     The first non-empty of ``fields``, else the receipt's determining constraint
     (a paused org returns the closed reserve shape with no reason field), else
-    "budget exhausted".
+    "budget exhausted". An over-limit refusal adds the call's hold and what's left.
     """
     if not isinstance(detail, dict):
         return "budget exhausted"
     if isinstance(detail.get("detail"), dict):
         detail = detail["detail"]
+    hint = _capacity_hint(detail)
     for name in fields:
         if detail.get(name):
-            return str(detail[name])
+            return str(detail[name]) + hint
     receipt = detail.get("decision_receipt")
     constraint = receipt.get("determining_constraint") if isinstance(receipt, dict) else None
     if isinstance(constraint, dict) and constraint.get("detail"):
-        return str(constraint["detail"])
+        return str(constraint["detail"]) + hint
     return "budget exhausted"
+
+
+def _raise_if_invalid_attribution(detail: Any, cause: BaseException | None = None) -> None:
+    if _is_invalid_attribution(detail):
+        reason = _denial_reason(detail, "reason")
+        raise InvalidAttribution(
+            f"Pre-call reservation refused the call's customer or feature ID: {reason}"
+        ) from cause
 
 
 def _parse_finops_http_error(exc: Exception) -> tuple[int | None, Any]:
@@ -1247,6 +1288,7 @@ def _reserve_lifecycle(
                 return handle
         except urllib.error.HTTPError as exc:
             status, detail = _parse_finops_http_error(exc)
+            _raise_if_invalid_attribution(detail, exc)
             if status == 402 or _is_tier_breaker(status, detail):
                 reason = _denial_reason(detail, "reason", "error_code")
                 raise BudgetExceeded(f"Pre-call reservation denied: {reason}") from exc
@@ -1419,6 +1461,12 @@ async def _reserve_lifecycle_async(
                     content=json.dumps(body),
                     headers=_finops_headers(org_id, api_key=binding.get("finops_api_key")),
                 )
+                if resp.status_code >= 400:
+                    _raise_if_invalid_attribution(
+                        _parse_finops_http_error(
+                            httpx.HTTPStatusError("reserve", request=resp.request, response=resp)
+                        )[1]
+                    )
                 if resp.status_code == 402:
                     detail: Any = {}
                     try:
